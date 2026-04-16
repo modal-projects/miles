@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 from megatron.core import mpu
 from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.distributed import DistributedDataParallelConfig, finalize_model_grads
+from megatron.core.distributed import finalize_model_grads
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
@@ -46,71 +46,6 @@ logger = logging.getLogger(__name__)
 
 from .bridge_lora_helpers import _ensure_model_list, _setup_lora_model_via_bridge  # noqa: F401
 from .lora_utils import save_lora_checkpoint
-
-
-def _wrap_model_with_ddp(args: Namespace, model: list[torch.nn.Module]) -> list[DDP]:
-    """Mirror Megatron's DDP wrap, but run after fp32 dtype restoration.
-
-    Marked fp32 params must be restored before DDP builds param buffers, or the
-    post-hoc ``param.data = param.data.to(fp32)`` will detach them from those
-    buffers and break optimizer/weight-sync invariants.
-    """
-    if args.use_torch_fsdp2 or args.use_megatron_fsdp:
-        raise NotImplementedError("Pre-DDP fp32 param restoration is not wired for FSDP paths yet.")
-
-    config = get_model_config(model[0])
-
-    kwargs = {}
-    for field in dataclasses.fields(DistributedDataParallelConfig):
-        if hasattr(args, field.name):
-            kwargs[field.name] = getattr(args, field.name)
-    kwargs["grad_reduce_in_fp32"] = args.accumulate_allreduce_grads_in_fp32
-    kwargs["check_for_nan_in_grad"] = args.check_for_nan_in_loss_and_grad
-    kwargs["check_for_large_grads"] = args.check_for_large_grads
-    if args.ddp_num_buckets is not None:
-        assert args.ddp_bucket_size is None, "Cannot specify both --ddp-num-buckets and --ddp-bucket-size"
-        assert args.ddp_num_buckets > 0, "--ddp-num-buckets must be greater than 0"
-        kwargs["bucket_size"] = (
-            sum(p.nelement() for chunk in model for p in chunk.parameters()) // args.ddp_num_buckets
-        )
-    else:
-        kwargs["bucket_size"] = args.ddp_bucket_size
-    kwargs["pad_buckets_for_high_nccl_busbw"] = args.ddp_pad_buckets_for_high_nccl_busbw
-    kwargs["reduce_scatter_with_fp32_accumulation"] = args.ddp_reduce_scatter_with_fp32_accumulation
-    kwargs["average_in_collective"] = args.ddp_average_in_collective
-    ddp_config = DistributedDataParallelConfig(**kwargs)
-
-    if ddp_config.bucket_size is None:
-        ddp_config.bucket_size = max(40_000_000, 1_000_000 * get_parallel_state().intra_dp_cp.size)
-    if not ddp_config.overlap_grad_reduce:
-        ddp_config.bucket_size = None
-
-    ddp_extra_kwargs = {}
-    if getattr(args, "disable_grad_buffers_cpu_backup", False):
-        ddp_extra_kwargs["disable_grad_buffers_cpu_backup"] = True
-    if getattr(args, "disable_param_buffers_cpu_backup", False):
-        ddp_extra_kwargs["disable_param_buffers_cpu_backup"] = True
-
-    ddp_stream = torch.cuda.Stream()
-    ddp_stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(ddp_stream):
-        model = [
-            DDP(
-                config=config,
-                ddp_config=ddp_config,
-                module=model_chunk,
-                disable_bucketing=(model_chunk_idx > 0) or args.overlap_param_gather_with_optimizer_step,
-                **ddp_extra_kwargs,
-            )
-            for model_chunk_idx, model_chunk in enumerate(model)
-        ]
-    torch.cuda.current_stream().wait_stream(ddp_stream)
-
-    if args.data_parallel_random_init:
-        for model_module in model:
-            model_module.broadcast_params()
-
-    return model
 
 
 def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer) -> OptimizerParamScheduler:
@@ -188,13 +123,7 @@ def setup_model_and_optimizer(
     if is_lora_enabled(args) and role == "actor" and args.megatron_to_hf_mode == "bridge":
         model = _setup_lora_model_via_bridge(args)
     else:
-        model = get_model(
-            get_model_provider_func(args, role),
-            ModelType.encoder_or_decoder,
-            wrap_with_ddp=False,
-        )
-
-        model = _wrap_model_with_ddp(args, model)
+        model = get_model(get_model_provider_func(args, role), ModelType.encoder_or_decoder)
 
     # Optimizer
     kwargs = {}
