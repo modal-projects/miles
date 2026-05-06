@@ -18,6 +18,8 @@ class TestWorkerScriptArgs:
         assert args.run_backward is False
         assert args.ref_load is None
         assert args.source_patcher_config is None
+        assert args.routing_replay_dump_path is None
+        assert args.routing_replay_load_path is None
 
     def test_to_cli_args_roundtrip(self) -> None:
         original = WorkerScriptArgs(
@@ -42,6 +44,8 @@ class TestWorkerScriptArgs:
         cli_str = WORKER_SCRIPT_ARGS_BRIDGE.to_cli_args(args)
         assert "--script-ref-load" not in cli_str
         assert "--script-source-patcher-config" not in cli_str
+        assert "--script-routing-replay-dump-path" not in cli_str
+        assert "--script-routing-replay-load-path" not in cli_str
 
     def test_bool_serialization(self) -> None:
         args = WorkerScriptArgs(

@@ -17,6 +17,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from megatron.core import mpu
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.training.arguments import parse_args, validate_args
@@ -29,6 +30,11 @@ from miles.backends.megatron_utils.checkpoint import load_checkpoint
 from miles.backends.megatron_utils.initialize import init
 from miles.backends.megatron_utils.model_provider import get_model_provider_func
 from miles.utils.debug_utils.run_megatron.worker.batch import loss_func, prepare_batch
+from miles.utils.debug_utils.run_megatron.worker.replay import (
+    load_replay_data,
+    save_replay_data,
+    setup_replay_before_model,
+)
 from miles.utils.debug_utils.run_megatron.worker.script_args import WORKER_SCRIPT_ARGS_BRIDGE, WorkerScriptArgs
 
 
@@ -43,15 +49,20 @@ def main() -> None:
     if script.source_patcher_config:
         _apply_source_patches(script.source_patcher_config)
 
+    setup_replay_before_model(script)
     model: list[Any] = _build_and_load_model(args, script)
 
     for m in model:
         dumper.register_non_intrusive_dumper(m)
 
+    load_replay_data(script, rank=rank, sequence_parallel=getattr(args, "sequence_parallel", False))
+
     token_ids: list[int] = json.loads(script.token_ids_file.read_text())
     batch: dict[str, torch.Tensor] = prepare_batch(
         token_ids=token_ids,
         batch_size=args.micro_batch_size,
+        cp_rank=mpu.get_context_parallel_rank(),
+        cp_size=mpu.get_context_parallel_world_size(),
     )
 
     if rank == 0:
@@ -64,6 +75,7 @@ def main() -> None:
         batch=batch,
     )
 
+    save_replay_data(script, rank=rank)
     _finalize_dumper()
 
     if rank == 0:

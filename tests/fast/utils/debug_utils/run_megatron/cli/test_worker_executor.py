@@ -43,6 +43,7 @@ class TestBuildMegatronFlags:
             sp=False,
             seq_length=128,
             batch_size=1,
+            use_routing_replay=False,
         )
         assert "--tensor-model-parallel-size 2" in flags
         assert "--pipeline-model-parallel-size 4" in flags
@@ -56,6 +57,7 @@ class TestBuildMegatronFlags:
             sp=False,
             seq_length=256,
             batch_size=4,
+            use_routing_replay=False,
         )
         assert "--seq-length 256" in flags
         assert "--micro-batch-size 4" in flags
@@ -67,8 +69,29 @@ class TestBuildMegatronFlags:
             sp=False,
             seq_length=128,
             batch_size=1,
+            use_routing_replay=False,
         )
         assert "--bf16" in flags
+
+    def test_routing_replay_on(self) -> None:
+        flags = _build_megatron_flags(
+            parallel=ParallelConfig(),
+            sp=False,
+            seq_length=128,
+            batch_size=1,
+            use_routing_replay=True,
+        )
+        assert "--use-routing-replay" in flags
+
+    def test_routing_replay_off(self) -> None:
+        flags = _build_megatron_flags(
+            parallel=ParallelConfig(),
+            sp=False,
+            seq_length=128,
+            batch_size=1,
+            use_routing_replay=False,
+        )
+        assert "--use-routing-replay" not in flags
 
     def test_sp_on_off(self) -> None:
         flags_on = _build_megatron_flags(
@@ -76,6 +99,7 @@ class TestBuildMegatronFlags:
             sp=True,
             seq_length=128,
             batch_size=1,
+            use_routing_replay=False,
         )
         assert "--sequence-parallel" in flags_on
 
@@ -84,6 +108,7 @@ class TestBuildMegatronFlags:
             sp=False,
             seq_length=128,
             batch_size=1,
+            use_routing_replay=False,
         )
         assert "--sequence-parallel" not in flags_off
 
@@ -132,6 +157,28 @@ class TestBuildWorkerArgs:
             extra_args="",
         )
         assert not result.endswith(" ")
+
+    def test_routing_replay_flag(self) -> None:
+        result = build_worker_args(
+            parallel=ParallelConfig(),
+            sp=False,
+            seq_length=128,
+            batch_size=1,
+            script_args=make_script_args(routing_replay_dump_path=Path("/dump")),
+            extra_args="",
+        )
+        assert "--use-routing-replay" in result
+
+    def test_no_routing_replay(self) -> None:
+        result = build_worker_args(
+            parallel=ParallelConfig(),
+            sp=False,
+            seq_length=128,
+            batch_size=1,
+            script_args=make_script_args(),
+            extra_args="",
+        )
+        assert "--use-routing-replay" not in result
 
 
 class TestBuildTorchrunCmd:

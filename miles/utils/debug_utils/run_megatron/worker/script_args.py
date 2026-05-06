@@ -21,6 +21,8 @@ class WorkerScriptArgs:
     ref_load: Path | None = None
     run_backward: bool = False
     source_patcher_config: Path | None = None
+    routing_replay_dump_path: Path | None = None
+    routing_replay_load_path: Path | None = None
 
 
 WORKER_SCRIPT_ARGS_BRIDGE: DataclassArgparseBridge[WorkerScriptArgs] = DataclassArgparseBridge(

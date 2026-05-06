@@ -33,6 +33,9 @@ def run_impl(args: RunArgs) -> None:
     """Core run logic, called by both ``run`` command and ``run_and_compare``."""
     parallel: ParallelConfig = ParallelConfig.from_run_args(args)
 
+    if args.routing_replay_dump_path is not None and parallel.nproc != 1:
+        raise ValueError(f"Routing replay dump requires single-rank run (nproc=1), got {parallel}")
+
     resolved_megatron: Path = resolve_megatron_path(args.megatron_path)
 
     prompt: PromptConfig = PromptConfig(
@@ -53,6 +56,8 @@ def run_impl(args: RunArgs) -> None:
         ref_load=args.ref_load,
         run_backward=args.run_backward,
         source_patcher_config=args.source_patcher_config,
+        routing_replay_dump_path=args.routing_replay_dump_path,
+        routing_replay_load_path=args.routing_replay_load_path,
     )
     worker_args_str: str = build_worker_args(
         parallel=parallel,

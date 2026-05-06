@@ -20,6 +20,26 @@ def _make_run_args(**overrides: object) -> RunArgs:
     return RunArgs(**defaults)  # type: ignore[arg-type]
 
 
+class TestRunImplValidation:
+    def test_routing_replay_requires_nproc1(self) -> None:
+        with pytest.raises(ValueError, match="single-rank"):
+            run_impl(
+                _make_run_args(
+                    tp=2,
+                    routing_replay_dump_path=Path("/dump"),
+                )
+            )
+
+    def test_routing_replay_pp_gt1_also_fails(self) -> None:
+        with pytest.raises(ValueError, match="single-rank"):
+            run_impl(
+                _make_run_args(
+                    pp=2,
+                    routing_replay_dump_path=Path("/dump"),
+                )
+            )
+
+
 class TestRunImplExecCommand:
     """Only mock exec_command, generate_token_ids, write_token_ids_to_tmpfile,
     and resolve_model_script — let the rest (build_worker_args, build_dumper_env,
@@ -69,6 +89,16 @@ class TestRunImplExecCommand:
         run_impl(_make_run_args(role="critic"))
         cmd = self.mock_exec.call_args[0][0]
         assert "--script-role critic" in cmd
+
+    def test_routing_replay_nproc1_ok(self) -> None:
+        run_impl(
+            _make_run_args(
+                tp=1,
+                routing_replay_dump_path=Path("/dump"),
+            )
+        )
+        cmd = self.mock_exec.call_args[0][0]
+        assert "--use-routing-replay" in cmd
 
     def test_backward_enables_grad_env(self) -> None:
         run_impl(_make_run_args(run_backward=True))

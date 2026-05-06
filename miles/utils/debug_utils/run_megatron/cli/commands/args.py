@@ -42,3 +42,5 @@ class RunArgs(CommonRunArgs):
     cp: int = _field(default=1, help="Context parallel size")
     ep: int | None = _field(default=None, help="Expert parallel size (default=tp)")
     etp: int = _field(default=1, help="Expert tensor parallel size")
+    routing_replay_dump_path: Path | None = _field(default=None, help="Routing replay dump path")
+    routing_replay_load_path: Path | None = _field(default=None, help="Routing replay load path")
