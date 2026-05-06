@@ -60,3 +60,22 @@ class CompareArgs:
     baseline_logprob_dir: Path | None = _field(default=None, help="Baseline logprob JSON directory")
     target_logprob_dir: Path | None = _field(default=None, help="Target logprob JSON directory")
     logprob_threshold: float | None = _field(default=None, help="Logprob max abs diff threshold")
+
+
+@dataclasses.dataclass(kw_only=True)
+class RunAndCompareArgs(CommonRunArgs):
+    output_base_dir: Path = _field(help="Base output directory for dumps")
+    baseline: str = _field(help='Baseline parallel config, e.g. "--tp 1 --cp 1"')
+    target: str = _field(help='Target parallel config, e.g. "--tp 2 --cp 2"')
+    routing_replay: bool = _field(
+        default=False,
+        help="Enable routing replay (record on baseline, replay on target)",
+    )
+    compare_logprobs: bool = _field(
+        default=True,
+        help="Compute and compare per-token logprobs between baseline and target",
+    )
+    baseline_extra_args: str = _field(default="", help="Extra megatron args for baseline run only")
+    target_extra_args: str = _field(default="", help="Extra megatron args for target run only")
+    diff_threshold: float | None = _field(default=None, help="Activation diff pass/fail threshold")
+    logprob_threshold: float | None = _field(default=None, help="Logprob max abs diff threshold")
