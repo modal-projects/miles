@@ -18,45 +18,12 @@ FLASHINFER_NVFP4_ENV_KEYS = (
 )
 
 
-def str_to_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
-def nvfp4_4over6_weight_scope_enabled(value) -> bool:
-    if isinstance(value, str):
-        value = value.strip().lower()
-        if value in ("weights", "all"):
-            return True
-        if value in ("none", "activations"):
-            return False
-    return str_to_bool(value)
-
-
-def nvfp4_4over6_enabled() -> bool:
-    return nvfp4_4over6_weight_scope_enabled(os.getenv("NVTE_NVFP4_4OVER6"))
-
-
-def nvfp4_4over6_weight_scope() -> str:
-    return "weights" if nvfp4_4over6_enabled() else "none"
-
-
 def nvfp4_weight_e4m3_max() -> int:
-    if nvfp4_4over6_enabled() and nvfp4_4over6_weight_scope_enabled(
-        os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
-    ):
+    if os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all") and os.getenv(
+        "NVTE_NVFP4_4OVER6_E4M3_USE_256", "all"
+    ).strip().lower() in ("weights", "all"):
         return 256
     return int(FP8_E4M3_MAX)
-
-
-def nvfp4_4over6_err_mode() -> str:
-    err_mode = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper()
-    if err_mode not in ("MAE", "MSE"):
-        raise ValueError("NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'.")
-    return err_mode
 
 
 def nvfp4_global_encode_scale_te(
@@ -94,18 +61,20 @@ def nvfp4_global_decode_scale_te(
 
 
 def sync_flashinfer_nvfp4_env_from_nvte() -> dict[str, str]:
-    weight_4over6_enabled = nvfp4_4over6_enabled()
+    weight_4over6_enabled = os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all")
     flashinfer_env = {
         "FLASHINFER_NVFP4_4OVER6": "1" if weight_4over6_enabled else "0",
         "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": (
             "1"
             if weight_4over6_enabled
-            and nvfp4_4over6_weight_scope_enabled(os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all"))
+            and os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all").strip().lower() in ("weights", "all")
             else "0"
         ),
-        "FLASHINFER_NVFP4_4OVER6_ERR_MODE": nvfp4_4over6_err_mode(),
+        "FLASHINFER_NVFP4_4OVER6_ERR_MODE": os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
         "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": (
-            "1" if str_to_bool(os.getenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", "0")) else "0"
+            "1"
+            if os.getenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", "0").strip().lower() in ("1", "true", "yes", "on")
+            else "0"
         ),
     }
     os.environ.update(flashinfer_env)
@@ -145,7 +114,7 @@ def _te_nvfp4_quantize_1d(
     except ImportError:
         from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 
-    weight_4over6_enabled = nvfp4_4over6_enabled()
+    weight_4over6_enabled = os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all")
     nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
     try:
         qweight, block_scale = NVFP4QuantizerRef._quantize_blockwise_reference(
@@ -156,7 +125,7 @@ def _te_nvfp4_quantize_1d(
             pow_2_scales=False,
             nvfp4_use_4over6=weight_4over6_enabled,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
-            nvfp4_4over6_err_mode=nvfp4_4over6_err_mode(),
+            nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
             eps=0.0,
         )
     except TypeError:
