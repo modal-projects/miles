@@ -29,7 +29,6 @@ from tqdm import tqdm
 
 from miles.utils.nvfp4 import (
     NVFP4_GROUP_SIZE,
-    nvfp4_4over6_enabled,
     nvfp4_4over6_weight_scope,
     nvfp4_global_decode_scale_te,
     nvfp4_quantize_1d,
@@ -113,7 +112,6 @@ _nvfp4_global_decode_scale_te = nvfp4_global_decode_scale_te
 def _quantize_nvfp4_1d(
     weight: torch.Tensor,
     global_amax: torch.Tensor | None = None,
-    use_4over6: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     NVFP4 1D quantization (tile shape = 1x16).
@@ -133,18 +131,15 @@ def _quantize_nvfp4_1d(
     else:
         global_amax = global_amax.to(device=weight.device, dtype=torch.float32)
 
-    return nvfp4_quantize_1d(weight, global_amax, use_4over6=use_4over6)
+    return nvfp4_quantize_1d(weight, global_amax)
 
 
 def quantize_nvfp4(
     weight: torch.Tensor,
     global_amax: torch.Tensor | None = None,
-    use_4over6: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if use_4over6 is None:
-        use_4over6 = nvfp4_4over6_enabled()
     if weight.dim() == 2:
-        return _quantize_nvfp4_1d(weight, global_amax=global_amax, use_4over6=use_4over6)
+        return _quantize_nvfp4_1d(weight, global_amax=global_amax)
     if weight.dim() == 3:
         if global_amax is not None:
             raise ValueError("global_amax override is only supported for 2D weights.")
@@ -152,7 +147,7 @@ def quantize_nvfp4(
         block_scales = []
         global_scales = []
         for idx in range(weight.shape[0]):
-            qweight, block_scale, global_scale = _quantize_nvfp4_1d(weight[idx], use_4over6=use_4over6)
+            qweight, block_scale, global_scale = _quantize_nvfp4_1d(weight[idx])
             qweights.append(qweight)
             block_scales.append(block_scale)
             global_scales.append(global_scale)
@@ -177,7 +172,7 @@ class ConversionResult:
         self.modules_to_not_convert.extend(module_names)
 
 
-def _update_quantization_config(cfg: dict, ignore_list: list[str], use_4over6: bool | None = None) -> None:
+def _update_quantization_config(cfg: dict, ignore_list: list[str]) -> None:
     quant_cfg = cfg.get("quantization_config")
     if not isinstance(quant_cfg, dict):
         quant_cfg = {}
@@ -185,7 +180,7 @@ def _update_quantization_config(cfg: dict, ignore_list: list[str], use_4over6: b
     quant_cfg["quant_algo"] = "NVFP4"
     quant_cfg["quant_method"] = "modelopt"
     quant_cfg["group_size"] = NVFP4_GROUP_SIZE
-    quant_cfg["nvfp4_4over6"] = nvfp4_4over6_weight_scope(use_4over6)
+    quant_cfg["nvfp4_4over6"] = nvfp4_4over6_weight_scope()
     quant_cfg["ignore"] = ignore_list
     quant_cfg.setdefault("kv_cache_scheme", DEFAULT_KV_CACHE_SCHEME)
 
@@ -211,7 +206,6 @@ def _write_hf_quant_config(
     output_path: str,
     ignore_list: list[str],
     input_path: str,
-    use_4over6: bool | None = None,
 ) -> None:
     hf_quant_path = os.path.join(input_path, "hf_quant_config.json")
     if os.path.exists(hf_quant_path):
@@ -227,7 +221,7 @@ def _write_hf_quant_config(
     quant_section["quant_algo"] = "NVFP4"
     quant_section["kv_cache_quant_algo"] = DEFAULT_KV_CACHE_QUANT_ALGO
     quant_section["group_size"] = NVFP4_GROUP_SIZE
-    quant_section["nvfp4_4over6"] = nvfp4_4over6_weight_scope(use_4over6)
+    quant_section["nvfp4_4over6"] = nvfp4_4over6_weight_scope()
     quant_section["exclude_modules"] = ignore_list
     hf_quant_cfg["quantization"] = quant_section
 
@@ -304,7 +298,6 @@ def process_file(
     num_layers_at_end_in_bf16: int,
     extra_high_precision_layers_hf: tuple[str, ...],
     shared_global_amax: dict[str, torch.Tensor],
-    use_4over6: bool,
 ) -> None:
     if not filename.endswith(".safetensors"):
         return
@@ -334,7 +327,6 @@ def process_file(
                 qweight, block_scale, weight_scale_2 = quantize_nvfp4(
                     tensor,
                     global_amax=global_amax,
-                    use_4over6=use_4over6,
                 )
                 q_weights[key] = qweight
                 q_weights[key.replace(".weight", ".weight_scale")] = block_scale
@@ -379,8 +371,6 @@ def convert_nvfp4(
         *extra_high_precision_layers_hf,
         *sorted(dynamic_skip_layer_prefixes),
     )
-    use_4over6 = nvfp4_4over6_enabled()
-
     shared_global_amax = _collect_shared_global_amax(
         input_path=input_path,
         safetensors_files=safetensors_files,
@@ -400,7 +390,6 @@ def convert_nvfp4(
             num_layers_at_end_in_bf16,
             extra_high_precision_layers_hf,
             shared_global_amax,
-            use_4over6,
         )
         gc.collect()
         if torch.cuda.is_available():
@@ -411,10 +400,10 @@ def convert_nvfp4(
     config_path = os.path.join(input_path, "config.json")
     if os.path.exists(config_path):
         cfg = json.load(open(config_path))
-        _update_quantization_config(cfg, ignore_list, use_4over6=use_4over6)
+        _update_quantization_config(cfg, ignore_list)
         json.dump(cfg, open(os.path.join(output_path, "config.json"), "w"), indent=2)
 
-    _write_hf_quant_config(output_path, ignore_list, input_path, use_4over6=use_4over6)
+    _write_hf_quant_config(output_path, ignore_list, input_path)
 
     index_dict = {
         "weight_map": result_collector.weight_map,

@@ -2,7 +2,7 @@ import re
 
 import torch
 
-from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_4over6_enabled, nvfp4_global_decode_scale_te, nvfp4_quantize_1d
+from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_global_decode_scale_te, nvfp4_quantize_1d
 
 GATED_PAIR_SUFFIXES = {
     ".gate_proj.weight": "gate",
@@ -18,14 +18,8 @@ def is_nvfp4_quantization_config(quantization_config) -> bool:
     return quantization_config.get("quant_algo") == "NVFP4" or quantization_config.get("quant_method") == "nvfp4"
 
 
-def fp4_param_gather_enabled(args) -> bool:
-    if args is None:
-        return False
-    return bool(getattr(args, "fp4_param", False) or getattr(args, "fp4_param_gather", False))
-
-
 def assert_no_fp4_param_gather(args) -> None:
-    if fp4_param_gather_enabled(args):
+    if args is not None and bool(getattr(args, "fp4_param", False) or getattr(args, "fp4_param_gather", False)):
         raise NotImplementedError("fp4-param-gather is unsupported for Miles NVFP4 checkpoint export.")
 
 
@@ -184,7 +178,6 @@ _nvfp4_global_decode_scale_te = nvfp4_global_decode_scale_te
 def _quantize_nvfp4_1d(
     weight: torch.Tensor,
     global_amax: torch.Tensor | None = None,
-    use_4over6: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     NVFP4 1D quantization (tile shape = 1x16).
@@ -204,18 +197,15 @@ def _quantize_nvfp4_1d(
     else:
         global_amax = global_amax.to(device=weight.device, dtype=torch.float32)
 
-    return nvfp4_quantize_1d(weight, global_amax, use_4over6=use_4over6)
+    return nvfp4_quantize_1d(weight, global_amax)
 
 
 def quantize_nvfp4(
     weight: torch.Tensor,
     global_amax: torch.Tensor | None = None,
-    use_4over6: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if use_4over6 is None:
-        use_4over6 = nvfp4_4over6_enabled()
     if weight.dim() == 2:
-        return _quantize_nvfp4_1d(weight, global_amax=global_amax, use_4over6=use_4over6)
+        return _quantize_nvfp4_1d(weight, global_amax=global_amax)
     if weight.dim() == 3:
         if global_amax is not None:
             raise ValueError("global_amax override is only supported for 2D weights.")
@@ -223,7 +213,7 @@ def quantize_nvfp4(
         block_scales = []
         global_scales = []
         for idx in range(weight.shape[0]):
-            qweight, block_scale, global_scale = _quantize_nvfp4_1d(weight[idx], use_4over6=use_4over6)
+            qweight, block_scale, global_scale = _quantize_nvfp4_1d(weight[idx])
             qweights.append(qweight)
             block_scales.append(block_scale)
             global_scales.append(global_scale)
