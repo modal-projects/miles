@@ -3,6 +3,8 @@ from tests.ci.ci_register import register_cuda_ci
 register_cuda_ci(est_time=60, suite="stage-b-2-gpu-h200", labels=[])
 
 
+import os
+
 import pytest
 import torch
 from tools.convert_hf_to_nvfp4 import quantize_nvfp4 as tool_quantize_nvfp4
@@ -13,12 +15,7 @@ from miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_nvfp4 imp
     quantize_nvfp4 as processor_quantize_nvfp4,
 )
 from miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_nvfp4 import quantize_params_nvfp4
-from miles.utils.nvfp4 import (
-    NVFP4_GROUP_SIZE,
-    nvfp4_4over6_err_mode,
-    nvfp4_global_decode_scale_te,
-    nvfp4_weight_e4m3_max,
-)
+from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_global_decode_scale_te, nvfp4_weight_e4m3_max
 
 NVFP4_SHAPES = [
     (1, 64),
@@ -95,7 +92,7 @@ def _te_nvfp4_reference_with_global_amax(
         pow_2_scales=False,
         nvfp4_use_4over6=False,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
-        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode(),
+        nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
         eps=0.0,
     )
     return qweight, block_scale, nvfp4_global_decode_scale_te(global_amax, nvfp4_e4m3_max)

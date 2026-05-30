@@ -12,12 +12,6 @@ GATED_PAIR_SUFFIXES = {
 }
 
 
-def is_nvfp4_quantization_config(quantization_config) -> bool:
-    if quantization_config is None:
-        return False
-    return quantization_config.get("quant_algo") == "NVFP4" or quantization_config.get("quant_method") == "nvfp4"
-
-
 def assert_no_fp4_param_gather(args) -> None:
     if args is not None and bool(getattr(args, "fp4_param", False) or getattr(args, "fp4_param_gather", False)):
         raise NotImplementedError("fp4-param-gather is unsupported for Miles NVFP4 checkpoint export.")
@@ -46,7 +40,7 @@ def _is_ignored(name: str, ignore_rules: list[str]) -> bool:
 
 def quantize_params_nvfp4(args, megatron_name, converted_named_params, quantization_config):
     assert quantization_config is not None
-    assert is_nvfp4_quantization_config(quantization_config)
+    assert quantization_config.get("quant_algo") == "NVFP4" or quantization_config.get("quant_method") == "nvfp4"
     assert_no_fp4_param_gather(args)
 
     if getattr(args, "extra_high_precision_layers_megatron", False):

@@ -27,12 +27,7 @@ import safetensors.torch
 import torch
 from tqdm import tqdm
 
-from miles.utils.nvfp4 import (
-    NVFP4_GROUP_SIZE,
-    nvfp4_4over6_weight_scope,
-    nvfp4_global_decode_scale_te,
-    nvfp4_quantize_1d,
-)
+from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_global_decode_scale_te, nvfp4_quantize_1d
 
 DEFAULT_KV_CACHE_SCHEME = {"dynamic": False, "num_bits": 8, "type": "float"}
 DEFAULT_KV_CACHE_QUANT_ALGO = "FP8"
@@ -180,7 +175,9 @@ def _update_quantization_config(cfg: dict, ignore_list: list[str]) -> None:
     quant_cfg["quant_algo"] = "NVFP4"
     quant_cfg["quant_method"] = "modelopt"
     quant_cfg["group_size"] = NVFP4_GROUP_SIZE
-    quant_cfg["nvfp4_4over6"] = nvfp4_4over6_weight_scope()
+    quant_cfg["nvfp4_4over6"] = (
+        "weights" if os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all") else "none"
+    )
     quant_cfg["ignore"] = ignore_list
     quant_cfg.setdefault("kv_cache_scheme", DEFAULT_KV_CACHE_SCHEME)
 
@@ -221,7 +218,9 @@ def _write_hf_quant_config(
     quant_section["quant_algo"] = "NVFP4"
     quant_section["kv_cache_quant_algo"] = DEFAULT_KV_CACHE_QUANT_ALGO
     quant_section["group_size"] = NVFP4_GROUP_SIZE
-    quant_section["nvfp4_4over6"] = nvfp4_4over6_weight_scope()
+    quant_section["nvfp4_4over6"] = (
+        "weights" if os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all") else "none"
+    )
     quant_section["exclude_modules"] = ignore_list
     hf_quant_cfg["quantization"] = quant_section
 
