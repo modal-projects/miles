@@ -199,11 +199,7 @@ def _update_quantization_config(cfg: dict, ignore_list: list[str]) -> None:
     cfg["quantization_config"] = quant_cfg
 
 
-def _write_hf_quant_config(
-    output_path: str,
-    ignore_list: list[str],
-    input_path: str,
-) -> None:
+def _write_hf_quant_config(output_path: str, ignore_list: list[str], input_path: str) -> None:
     hf_quant_path = os.path.join(input_path, "hf_quant_config.json")
     if os.path.exists(hf_quant_path):
         with open(hf_quant_path) as f:
@@ -323,10 +319,7 @@ def process_file(
             if should_quantize(key, tensor, skip_weight_substrings=dynamic_skip_substrings):
                 base, _role = _split_gated_pair_name(key)
                 global_amax = shared_global_amax.get(base) if base else None
-                qweight, block_scale, weight_scale_2 = quantize_nvfp4(
-                    tensor,
-                    global_amax=global_amax,
-                )
+                qweight, block_scale, weight_scale_2 = quantize_nvfp4(tensor, global_amax=global_amax)
                 q_weights[key] = qweight
                 q_weights[key.replace(".weight", ".weight_scale")] = block_scale
                 q_weights[key.replace(".weight", ".weight_scale_2")] = weight_scale_2
@@ -370,6 +363,7 @@ def convert_nvfp4(
         *extra_high_precision_layers_hf,
         *sorted(dynamic_skip_layer_prefixes),
     )
+
     shared_global_amax = _collect_shared_global_amax(
         input_path=input_path,
         safetensors_files=safetensors_files,
