@@ -278,7 +278,7 @@ def execute(args: ScriptArgs):
             "NVTE_NVFP4_DISABLE_RHT": "1",
             "NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING": "1",
             "NVTE_NVFP4_ROW_SCALED_ACTIVATION": "1",
-            "NVTE_BACKWARD_OVERRIDE": "dequantized",
+            "NVTE_BACKWARD_OVERRIDE": "high_precision",
             "NVTE_USE_FAST_MATH": "0",
         }
         optimizer_args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
