@@ -159,11 +159,9 @@ def test_nvfp4_hf_should_quantize_respects_extra_high_precision_layers_hf():
 def test_nvfp4_quantize_matches_te_reference_bitwise(quantize_fn, shape, dtype, init_data, use_4over6, monkeypatch):
     device = "cuda"
     torch.manual_seed(42)
-    monkeypatch.delenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", raising=False)
-    monkeypatch.delenv("NVTE_NVFP4_4OVER6_ERR_MODE", raising=False)
-    monkeypatch.delenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", raising=False)
     if use_4over6:
         monkeypatch.setenv("NVTE_NVFP4_4OVER6", "all")
+        monkeypatch.setenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MSE")
     else:
         monkeypatch.delenv("NVTE_NVFP4_4OVER6", raising=False)
 
