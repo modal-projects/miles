@@ -9,13 +9,6 @@ FP8_E4M3_MAX = 448.0
 NVFP4_GROUP_SIZE = 16
 
 logger = logging.getLogger(__name__)
-FLASHINFER_NVFP4_ENV_KEYS = (
-    "FLASHINFER_NVFP4_4OVER6",
-    "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256",
-    "FLASHINFER_NVFP4_4OVER6_ERR_MODE",
-    "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH",
-    "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH",
-)
 
 
 def nvfp4_weight_e4m3_max() -> int:
@@ -84,7 +77,14 @@ def sync_flashinfer_nvfp4_env_from_nvte() -> dict[str, str]:
 
 @contextmanager
 def flashinfer_nvfp4_env_from_nvte():
-    original_env = {key: os.environ.get(key) for key in FLASHINFER_NVFP4_ENV_KEYS}
+    flashinfer_nvfp4_env_keys = (
+        "FLASHINFER_NVFP4_4OVER6",
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256",
+        "FLASHINFER_NVFP4_4OVER6_ERR_MODE",
+        "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH",
+        "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH",
+    )
+    original_env = {key: os.environ.get(key) for key in flashinfer_nvfp4_env_keys}
     try:
         sync_flashinfer_nvfp4_env_from_nvte()
         yield
