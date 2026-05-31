@@ -2,7 +2,7 @@ import re
 
 import torch
 
-from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_global_decode_scale_te, nvfp4_quantize_1d
+from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_quantize_1d
 
 GATED_PAIR_SUFFIXES = {
     ".gate_proj.weight": "gate",
@@ -160,9 +160,6 @@ def _split_gated_pair_name(name: str):
         if name.endswith(suffix):
             return name[: -len(suffix)], role
     return None, None
-
-
-_nvfp4_global_decode_scale_te = nvfp4_global_decode_scale_te
 
 
 def _quantize_nvfp4_1d(

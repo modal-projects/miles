@@ -26,7 +26,7 @@ import safetensors.torch
 import torch
 from tqdm import tqdm
 
-from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_global_decode_scale_te, nvfp4_quantize_1d
+from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_quantize_1d
 
 DEFAULT_KV_CACHE_SCHEME = {"dynamic": False, "num_bits": 8, "type": "float"}
 DEFAULT_KV_CACHE_QUANT_ALGO = "FP8"
@@ -98,9 +98,6 @@ def should_quantize(
             f"Last dim {weight.shape[-1]} must be divisible by {NVFP4_GROUP_SIZE} " f"for NVFP4 quantization ({name})."
         )
     return True
-
-
-_nvfp4_global_decode_scale_te = nvfp4_global_decode_scale_te
 
 
 def _quantize_nvfp4_1d(
