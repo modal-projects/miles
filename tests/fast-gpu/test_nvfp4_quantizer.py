@@ -58,14 +58,6 @@ def _te_nvfp4_reference(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     weight = weight.contiguous()
     global_amax = torch.max(torch.abs(weight.to(torch.float32)))
-    return _te_nvfp4_reference_with_global_amax(weight, global_amax)
-
-
-def _te_nvfp4_reference_with_global_amax(
-    weight: torch.Tensor,
-    global_amax: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    weight = weight.contiguous()
     nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
     qweight, block_scale = NVFP4QuantizerRef._quantize_blockwise_reference(
         weight,
