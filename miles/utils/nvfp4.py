@@ -1,14 +1,12 @@
-import logging
 import os
-from contextlib import contextmanager
 
 import torch
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
 FP4_E2M1_MAX = 6.0
 FP8_E4M3_MAX = 448.0
 NVFP4_GROUP_SIZE = 16
-
-logger = logging.getLogger(__name__)
+TE_NVFP4_ROW_ALIGNMENT = 16
 
 
 def nvfp4_weight_e4m3_max() -> int:
@@ -53,111 +51,53 @@ def nvfp4_global_decode_scale_te(
     return torch.div(1.0, nvfp4_global_encode_scale_te(global_amax, nvfp4_e4m3_max))
 
 
-def sync_flashinfer_nvfp4_env_from_nvte() -> dict[str, str]:
-    weight_4over6_enabled = os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all")
-    flashinfer_env = {
-        "FLASHINFER_NVFP4_4OVER6": "1" if weight_4over6_enabled else "0",
-        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": (
-            "1"
-            if weight_4over6_enabled
-            and os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all").strip().lower() in ("weights", "all")
-            else "0"
-        ),
-        "FLASHINFER_NVFP4_4OVER6_ERR_MODE": os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
-        "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": (
-            "1"
-            if os.getenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", "0").strip().lower() in ("1", "true", "yes", "on")
-            else "0"
-        ),
-    }
-    os.environ.update(flashinfer_env)
-    os.environ.setdefault("TRTLLM_DISABLE_FP4_QUANT_FAST_MATH", "1")
-    return {**flashinfer_env, "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": os.environ["TRTLLM_DISABLE_FP4_QUANT_FAST_MATH"]}
+def _nvfp4_4over6_enabled() -> bool:
+    return os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all")
 
 
-@contextmanager
-def flashinfer_nvfp4_env_from_nvte():
-    flashinfer_nvfp4_env_keys = (
-        "FLASHINFER_NVFP4_4OVER6",
-        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256",
-        "FLASHINFER_NVFP4_4OVER6_ERR_MODE",
-        "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH",
-        "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH",
-    )
-    original_env = {key: os.environ.get(key) for key in flashinfer_nvfp4_env_keys}
-    try:
-        sync_flashinfer_nvfp4_env_from_nvte()
-        yield
-    finally:
-        for key, value in original_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-try:
-    from flashinfer import nvfp4_quantize as _flashinfer_nvfp4_quantize
-    from flashinfer.tllm_enums import SfLayout
-except ImportError:
-    _flashinfer_nvfp4_quantize = None
-    SfLayout = None
-    logger.warning("FlashInfer nvfp4_quantize not available; falling back to TransformerEngine reference.")
-
-
-def _te_nvfp4_quantize_1d(
-    weight: torch.Tensor,
-    global_amax: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    try:
-        from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-    except ImportError:
-        from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
-
-    weight_4over6_enabled = os.getenv("NVTE_NVFP4_4OVER6", "").strip().lower() in ("weights", "all")
-    nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
-    try:
-        qweight, block_scale = NVFP4QuantizerRef._quantize_blockwise_reference(
-            weight,
-            global_amax,
-            NVFP4_GROUP_SIZE,
-            1,
-            pow_2_scales=False,
-            nvfp4_use_4over6=weight_4over6_enabled,
-            nvfp4_e4m3_max=nvfp4_e4m3_max,
-            nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
-            eps=0.0,
-        )
-    except TypeError:
-        if weight_4over6_enabled:
-            raise
-        qweight, block_scale = NVFP4QuantizerRef._quantize_blockwise_reference(
-            weight,
-            global_amax,
-            NVFP4_GROUP_SIZE,
-            1,
-            pow_2_scales=False,
-            eps=0.0,
-        )
-    return qweight, block_scale, nvfp4_global_decode_scale_te(global_amax, nvfp4_e4m3_max)
+def _pad_rows_for_te_quantizer(weight: torch.Tensor) -> torch.Tensor:
+    pad_rows = (-weight.shape[0]) % TE_NVFP4_ROW_ALIGNMENT
+    if pad_rows == 0:
+        return weight
+    padding = torch.zeros((pad_rows, weight.shape[1]), device=weight.device, dtype=weight.dtype)
+    return torch.cat((weight, padding), dim=0)
 
 
 def nvfp4_quantize_1d(
     weight: torch.Tensor,
-    global_amax: torch.Tensor,
+    global_amax: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if _flashinfer_nvfp4_quantize is None or weight.dtype == torch.float32 or not weight.is_cuda:
-        return _te_nvfp4_quantize_1d(weight, global_amax)
-
+    weight = weight.contiguous()
+    num_rows, num_cols = weight.shape
+    row_scaled_nvfp4 = global_amax is not None and global_amax.ndim > 0 and global_amax.numel() == num_rows
     nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
-    global_encode_scale = nvfp4_global_encode_scale_te(global_amax, nvfp4_e4m3_max)
-    with flashinfer_nvfp4_env_from_nvte():
-        qweight, block_scale = _flashinfer_nvfp4_quantize(
-            weight,
-            global_encode_scale.reshape(1).contiguous(),
-            sfLayout=SfLayout.layout_linear,
-            do_shuffle=False,
-            sf_vec_size=NVFP4_GROUP_SIZE,
-            backend="cuda",
-        )
-    return qweight, block_scale.view(torch.float8_e4m3fn), nvfp4_global_decode_scale_te(global_amax, nvfp4_e4m3_max)
+
+    quantizer = NVFP4Quantizer(
+        rowwise=True,
+        columnwise=False,
+        with_amax_reduction=False,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=False,
+        stochastic_rounding=False,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=_nvfp4_4over6_enabled(),
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
+        with_random_sign_mask=False,
+    )
+
+    quant_input = weight
+    if global_amax is not None and not row_scaled_nvfp4:
+        amax_row = torch.zeros((1, num_cols), device=weight.device, dtype=weight.dtype)
+        amax_row[0, 0] = global_amax.to(device=weight.device, dtype=weight.dtype).reshape(())
+        quant_input = torch.cat((quant_input, amax_row), dim=0)
+
+    quantized = quantizer.quantize(_pad_rows_for_te_quantizer(quant_input))
+    qweight = quantized._rowwise_data[:num_rows, : num_cols // 2].contiguous()
+    block_scale = quantized._rowwise_scale_inv[:num_rows, : num_cols // NVFP4_GROUP_SIZE].contiguous()
+    if row_scaled_nvfp4:
+        amax = quantized._amax_rowwise[:num_rows].contiguous()
+    else:
+        amax = quantized._amax_rowwise.reshape(-1)[0]
+    return qweight, block_scale.view(torch.float8_e4m3fn), nvfp4_global_decode_scale_te(amax, nvfp4_e4m3_max)
