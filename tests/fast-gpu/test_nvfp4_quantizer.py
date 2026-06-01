@@ -75,12 +75,12 @@ def _te_nvfp4_reference(
     return qweight, block_scale, nvfp4_global_decode_scale_te(global_amax, nvfp4_e4m3_max)
 
 
-def _global_amax(weight: torch.Tensor, global_scale_mode: str) -> torch.Tensor:
-    if global_scale_mode == "per_tensor":
+def _shared_scalar_amax(weight: torch.Tensor, shared_amax_mode: str) -> torch.Tensor | None:
+    if shared_amax_mode == "te_generated":
+        return None
+    if shared_amax_mode == "shared_scalar":
         return torch.max(torch.abs(weight.to(torch.float32)))
-    if global_scale_mode == "per_token":
-        return torch.max(torch.abs(weight.to(torch.float32)), dim=1).values
-    raise ValueError(f"Unknown global_scale_mode: {global_scale_mode}")
+    raise ValueError(f"Unknown shared_amax_mode: {shared_amax_mode}")
 
 
 def test_nvfp4_quantize_uses_te_direct_rowwise_quantizer(monkeypatch):
@@ -110,7 +110,7 @@ def test_nvfp4_quantize_uses_te_direct_rowwise_quantizer(monkeypatch):
 
     qweight, block_scale, global_scale = nvfp4_utils.nvfp4_quantize_1d(
         torch.ones((3, NVFP4_GROUP_SIZE), dtype=torch.float32),
-        torch.tensor(2.0, dtype=torch.float32),
+        shared_global_amax=torch.tensor(2.0, dtype=torch.float32),
     )
 
     assert calls == [
@@ -218,9 +218,9 @@ def test_nvfp4_hf_should_quantize_respects_extra_high_precision_layers_hf():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("init_data", ["random", "boundary", "zeros", "maxes"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("global_scale_mode", ["per_tensor", "per_token"])
+@pytest.mark.parametrize("shared_amax_mode", ["te_generated", "shared_scalar"])
 def test_nvfp4_quantize_matches_te_reference_bitwise(
-    quantize_fn, shape, dtype, init_data, use_4over6, global_scale_mode, monkeypatch
+    quantize_fn, shape, dtype, init_data, use_4over6, shared_amax_mode, monkeypatch
 ):
     device = "cuda"
     torch.manual_seed(42)
@@ -231,12 +231,15 @@ def test_nvfp4_quantize_matches_te_reference_bitwise(
         monkeypatch.delenv("NVTE_NVFP4_4OVER6", raising=False)
 
     weight = _make_weight(init_data, dtype, shape, device)
-    global_amax = _global_amax(weight, global_scale_mode)
-    qweight, block_scale, global_scale = quantize_fn(weight, global_amax=global_amax)
+    shared_global_amax = _shared_scalar_amax(weight, shared_amax_mode)
+    reference_amax = (
+        shared_global_amax if shared_global_amax is not None else torch.max(torch.abs(weight.to(torch.float32)))
+    )
+    qweight, block_scale, global_scale = quantize_fn(weight, shared_global_amax=shared_global_amax)
     qweight_ref, block_scale_ref, global_scale_ref = _te_nvfp4_reference(
         weight,
-        global_amax,
-        row_scaled_nvfp4=global_scale_mode == "per_token",
+        reference_amax,
+        row_scaled_nvfp4=False,
     )
 
     torch.testing.assert_close(qweight, qweight_ref, rtol=0, atol=0)

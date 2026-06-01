@@ -65,12 +65,13 @@ def _pad_rows_for_te_quantizer(weight: torch.Tensor) -> torch.Tensor:
 
 def nvfp4_quantize_1d(
     weight: torch.Tensor,
-    global_amax: torch.Tensor | None = None,
+    shared_global_amax: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     weight = weight.contiguous()
     num_rows, num_cols = weight.shape
-    row_scaled_nvfp4 = global_amax is not None and global_amax.ndim > 0 and global_amax.numel() == num_rows
     nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
+    if shared_global_amax is not None and shared_global_amax.numel() != 1:
+        raise ValueError("shared_global_amax must be a scalar tensor.")
 
     quantizer = NVFP4Quantizer(
         rowwise=True,
@@ -80,7 +81,7 @@ def nvfp4_quantize_1d(
         with_post_rht_amax=False,
         with_2d_quantization=False,
         stochastic_rounding=False,
-        row_scaled_nvfp4=row_scaled_nvfp4,
+        row_scaled_nvfp4=False,
         nvfp4_use_4over6=_nvfp4_4over6_enabled(),
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
@@ -88,16 +89,13 @@ def nvfp4_quantize_1d(
     )
 
     quant_input = weight
-    if global_amax is not None and not row_scaled_nvfp4:
+    if shared_global_amax is not None:
         amax_row = torch.zeros((1, num_cols), device=weight.device, dtype=weight.dtype)
-        amax_row[0, 0] = global_amax.to(device=weight.device, dtype=weight.dtype).reshape(())
+        amax_row[0, 0] = shared_global_amax.to(device=weight.device, dtype=weight.dtype).reshape(())
         quant_input = torch.cat((quant_input, amax_row), dim=0)
 
     quantized = quantizer.quantize(_pad_rows_for_te_quantizer(quant_input))
     qweight = quantized._rowwise_data[:num_rows, : num_cols // 2].contiguous()
     block_scale = quantized._rowwise_scale_inv[:num_rows, : num_cols // NVFP4_GROUP_SIZE].contiguous()
-    if row_scaled_nvfp4:
-        amax = quantized._amax_rowwise[:num_rows].contiguous()
-    else:
-        amax = quantized._amax_rowwise.reshape(-1)[0]
+    amax = quantized._amax_rowwise.reshape(-1)[0]
     return qweight, block_scale.view(torch.float8_e4m3fn), nvfp4_global_decode_scale_te(amax, nvfp4_e4m3_max)

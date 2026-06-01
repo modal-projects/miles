@@ -102,7 +102,7 @@ def should_quantize(
 
 def _quantize_nvfp4_1d(
     weight: torch.Tensor,
-    global_amax: torch.Tensor | None = None,
+    shared_global_amax: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     NVFP4 1D quantization (tile shape = 1x16).
@@ -117,23 +117,21 @@ def _quantize_nvfp4_1d(
     if n % NVFP4_GROUP_SIZE != 0:
         raise ValueError(f"NVFP4 requires K divisible by {NVFP4_GROUP_SIZE}, got {n}.")
 
-    if global_amax is None:
-        global_amax = torch.max(torch.abs(weight.to(torch.float32)))
-    else:
-        global_amax = global_amax.to(device=weight.device, dtype=torch.float32)
+    if shared_global_amax is not None:
+        shared_global_amax = shared_global_amax.to(device=weight.device, dtype=torch.float32)
 
-    return nvfp4_quantize_1d(weight, global_amax)
+    return nvfp4_quantize_1d(weight, shared_global_amax)
 
 
 def quantize_nvfp4(
     weight: torch.Tensor,
-    global_amax: torch.Tensor | None = None,
+    shared_global_amax: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if weight.dim() == 2:
-        return _quantize_nvfp4_1d(weight, global_amax=global_amax)
+        return _quantize_nvfp4_1d(weight, shared_global_amax=shared_global_amax)
     if weight.dim() == 3:
-        if global_amax is not None:
-            raise ValueError("global_amax override is only supported for 2D weights.")
+        if shared_global_amax is not None:
+            raise ValueError("shared_global_amax override is only supported for 2D weights.")
         qweights = []
         block_scales = []
         global_scales = []
@@ -308,8 +306,10 @@ def process_file(
             tensor = f.get_tensor(key)
             if should_quantize(key, tensor, skip_weight_substrings=dynamic_skip_substrings):
                 base, _role = _split_gated_pair_name(key)
-                global_amax = shared_global_amax.get(base) if base else None
-                qweight, block_scale, weight_scale_2 = quantize_nvfp4(tensor, global_amax=global_amax)
+                qweight, block_scale, weight_scale_2 = quantize_nvfp4(
+                    tensor,
+                    shared_global_amax=shared_global_amax.get(base) if base else None,
+                )
                 q_weights[key] = qweight
                 q_weights[key.replace(".weight", ".weight_scale")] = block_scale
                 q_weights[key.replace(".weight", ".weight_scale_2")] = weight_scale_2
