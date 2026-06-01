@@ -306,6 +306,34 @@ def test_nvfp4_hf_converter_quantizes_cross_shard_gated_pair_together(tmp_path, 
         )
 
 
+def test_nvfp4_hf_converter_quantizes_same_shard_gated_pair_together(tmp_path, monkeypatch):
+    monkeypatch.delenv("NVTE_NVFP4_4OVER6", raising=False)
+    model_dir = tmp_path / "model"
+    save_dir = tmp_path / "converted"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text('{"num_hidden_layers": 1}')
+
+    gate_key = "model.layers.0.mlp.experts.0.gate_proj.weight"
+    up_key = "model.layers.0.mlp.experts.0.up_proj.weight"
+    gate = torch.randn((3, 128), dtype=torch.bfloat16)
+    up = torch.randn((5, 128), dtype=torch.bfloat16)
+    safetensors.torch.save_file(
+        {
+            gate_key: gate,
+            up_key: up,
+        },
+        model_dir / "model.safetensors",
+        metadata={"format": "pt"},
+    )
+
+    convert_nvfp4(str(model_dir), str(save_dir), device="cuda")
+
+    with safetensors.safe_open(save_dir / "model.safetensors", framework="pt", device="cuda") as f:
+        gate_global_scale = f.get_tensor(gate_key.replace(".weight", ".weight_scale_2"))
+        up_global_scale = f.get_tensor(up_key.replace(".weight", ".weight_scale_2"))
+        torch.testing.assert_close(gate_global_scale, up_global_scale, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "quantize_fn",
     [processor_quantize_nvfp4, tool_quantize_nvfp4],

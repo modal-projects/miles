@@ -113,11 +113,11 @@ def nvfp4_quantize_1d_pair(
     first_result = (
         combined_qweight[:first_rows].contiguous(),
         combined_block_scale[:first_rows].contiguous(),
-        global_scale,
+        global_scale.clone(),
     )
     second_result = (
         combined_qweight[first_rows:].contiguous(),
         combined_block_scale[first_rows:].contiguous(),
-        global_scale,
+        global_scale.clone(),
     )
     return first_result, second_result
