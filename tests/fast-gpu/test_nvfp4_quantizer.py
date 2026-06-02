@@ -83,102 +83,6 @@ def _te_nvfp4_reference(
     return qweight, block_scale, nvfp4_global_decode_scale_te(global_amax, nvfp4_e4m3_max)
 
 
-def test_nvfp4_quantize_uses_te_direct_rowwise_quantizer(monkeypatch):
-    import miles.utils.nvfp4 as nvfp4_utils
-
-    calls = []
-
-    class FakeQuantizedTensor:
-        def __init__(self, tensor: torch.Tensor):
-            self._rowwise_data = torch.arange(tensor.shape[0] * (tensor.shape[1] // 2), dtype=torch.uint8).reshape(
-                tensor.shape[0], tensor.shape[1] // 2
-            )
-            self._rowwise_scale_inv = torch.arange(
-                tensor.shape[0] * (tensor.shape[1] // NVFP4_GROUP_SIZE), dtype=torch.uint8
-            ).reshape(tensor.shape[0], tensor.shape[1] // NVFP4_GROUP_SIZE)
-            self._amax_rowwise = torch.tensor([2.0], dtype=torch.float32)
-
-    class FakeQuantizer:
-        def __init__(self, **kwargs):
-            calls.append(kwargs)
-
-        def quantize(self, tensor: torch.Tensor) -> FakeQuantizedTensor:
-            assert tensor.shape == (16, NVFP4_GROUP_SIZE)
-            return FakeQuantizedTensor(tensor)
-
-    monkeypatch.setattr(nvfp4_utils, "NVFP4Quantizer", FakeQuantizer)
-
-    qweight, block_scale, global_scale = nvfp4_utils.nvfp4_quantize_1d(
-        torch.ones((3, NVFP4_GROUP_SIZE), dtype=torch.float32),
-    )
-
-    assert calls == [
-        {
-            "rowwise": True,
-            "columnwise": False,
-            "with_amax_reduction": False,
-            "with_rht": False,
-            "with_post_rht_amax": False,
-            "with_2d_quantization": False,
-            "stochastic_rounding": False,
-            "row_scaled_nvfp4": False,
-            "nvfp4_use_4over6": False,
-            "nvfp4_e4m3_max": 448,
-            "nvfp4_4over6_err_mode": "MAE",
-            "with_random_sign_mask": False,
-        }
-    ]
-    assert qweight.shape == (3, NVFP4_GROUP_SIZE // 2)
-    assert block_scale.shape == (3, 1)
-    assert block_scale.dtype == torch.float8_e4m3fn
-    torch.testing.assert_close(global_scale, nvfp4_global_decode_scale_te(torch.tensor(2.0), 448), rtol=0, atol=0)
-
-
-def test_nvfp4_quantize_pair_concats_before_te_quantizer(monkeypatch):
-    import miles.utils.nvfp4 as nvfp4_utils
-
-    quantized_input = None
-
-    class FakeQuantizedTensor:
-        def __init__(self, tensor: torch.Tensor):
-            self._rowwise_data = torch.arange(tensor.shape[0] * (tensor.shape[1] // 2), dtype=torch.uint8).reshape(
-                tensor.shape[0], tensor.shape[1] // 2
-            )
-            self._rowwise_scale_inv = torch.arange(
-                tensor.shape[0] * (tensor.shape[1] // NVFP4_GROUP_SIZE), dtype=torch.uint8
-            ).reshape(tensor.shape[0], tensor.shape[1] // NVFP4_GROUP_SIZE)
-            self._amax_rowwise = torch.tensor([7.0], dtype=torch.float32)
-
-    class FakeQuantizer:
-        def __init__(self, **kwargs):
-            pass
-
-        def quantize(self, tensor: torch.Tensor) -> FakeQuantizedTensor:
-            nonlocal quantized_input
-            quantized_input = tensor.clone()
-            return FakeQuantizedTensor(tensor)
-
-    monkeypatch.setattr(nvfp4_utils, "NVFP4Quantizer", FakeQuantizer)
-
-    gate = torch.ones((3, NVFP4_GROUP_SIZE), dtype=torch.float32)
-    up = torch.full((5, NVFP4_GROUP_SIZE), 2.0, dtype=torch.float32)
-    (gate_qweight, gate_block_scale, gate_global_scale), (
-        up_qweight,
-        up_block_scale,
-        up_global_scale,
-    ) = nvfp4_utils.nvfp4_quantize_1d_pair(gate, up)
-
-    assert quantized_input.shape == (16, NVFP4_GROUP_SIZE)
-    torch.testing.assert_close(quantized_input[:3], gate)
-    torch.testing.assert_close(quantized_input[3:8], up)
-    torch.testing.assert_close(quantized_input[8:], torch.zeros_like(quantized_input[8:]))
-    assert gate_qweight.shape == (3, NVFP4_GROUP_SIZE // 2)
-    assert up_qweight.shape == (5, NVFP4_GROUP_SIZE // 2)
-    assert gate_block_scale.shape == (3, 1)
-    assert up_block_scale.shape == (5, 1)
-    torch.testing.assert_close(gate_global_scale, up_global_scale, rtol=0, atol=0)
-
-
 def test_nvfp4_quantize_params_requires_complete_gated_pair():
     weight = torch.randn((4, NVFP4_GROUP_SIZE), dtype=torch.float32)
     with pytest.raises(ValueError, match="requires gate/up tensors to be quantized together"):
@@ -366,9 +270,11 @@ def test_nvfp4_quantize_matches_te_reference_bitwise(quantize_fn, shape, dtype, 
     torch.testing.assert_close(global_scale, global_scale_ref, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("shape", NVFP4_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("init_data", ["random", "boundary", "zeros", "maxes"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-def test_nvfp4_quantize_pair_matches_te_reference_bitwise(dtype, use_4over6, monkeypatch):
+def test_nvfp4_quantize_pair_matches_te_reference_bitwise(shape, dtype, init_data, use_4over6, monkeypatch):
     device = "cuda"
     torch.manual_seed(42)
     if use_4over6:
@@ -377,8 +283,8 @@ def test_nvfp4_quantize_pair_matches_te_reference_bitwise(dtype, use_4over6, mon
     else:
         monkeypatch.delenv("NVTE_NVFP4_4OVER6", raising=False)
 
-    gate = _make_weight("random", dtype, (3, 128), device)
-    up = _make_weight("boundary", dtype, (5, 128), device)
+    gate = _make_weight(init_data, dtype, shape, device)
+    up = _make_weight(init_data, dtype, shape, device)
     (gate_qweight, gate_block_scale, gate_global_scale), (
         up_qweight,
         up_block_scale,
