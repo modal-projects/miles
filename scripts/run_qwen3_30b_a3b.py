@@ -92,6 +92,7 @@ def prepare(args: ScriptArgs):
         nvfp4_env_vars = {
             "NVTE_USE_FAST_MATH": "0",
             "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "1",
+            "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "1",
             **{
                 key: value
                 for key, value in os.environ.items()
@@ -377,6 +378,7 @@ matchers:
                 misc_env_vars |= {
                     "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": "1",
                     "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "1",
+                    "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "1",
                 }
                 misc_env_vars |= {
                     key: value
