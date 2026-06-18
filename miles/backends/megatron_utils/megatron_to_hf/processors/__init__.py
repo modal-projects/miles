@@ -17,13 +17,12 @@ __all__ = [
 def quantize_params(args, megatron_name, converted_named_params, quantization_config):
     if quantization_config is None:
         return converted_named_params
-    elif quantization_config.get("quant_method") == "fp8":
+    elif quantization_config["quant_method"] == "fp8":
         return quantize_params_fp8(args, megatron_name, converted_named_params, quantization_config)
-    elif quantization_config.get("quant_method") == "mxfp8":
+    elif quantization_config["quant_method"] == "mxfp8":
         return quantize_params_mxfp8(args, megatron_name, converted_named_params, quantization_config)
-    elif quantization_config.get("quant_algo") == "NVFP4" or quantization_config.get("quant_method") == "nvfp4":
+    elif quantization_config.get("quant_algo") == "NVFP4" or quantization_config["quant_method"] == "nvfp4":
         return quantize_params_nvfp4(args, megatron_name, converted_named_params, quantization_config)
-    elif quantization_config.get("quant_method") == "compressed-tensors":
+    elif quantization_config["quant_method"] == "compressed-tensors":
         # only int4 at the moment.
         return quantize_params_compressed_tensors(converted_named_params, quantization_config)
-    return converted_named_params
