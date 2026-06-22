@@ -12,11 +12,12 @@ from ray.actor import ActorHandle
 from torch_memory_saver import torch_memory_saver
 
 from miles.ray.train_actor import TrainRayActor
-from miles.utils import train_dump_utils
+from miles.utils import tracking_utils, train_dump_utils
 from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group, init_process_group
 from miles.utils.hf_config import load_hf_config
 from miles.utils.memory_utils import clear_memory, print_memory
+from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.processing_utils import load_tokenizer
 from miles.utils.ray_utils import Box
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
@@ -174,11 +175,22 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.colocate:
             update_weight_cls = UpdateWeightFromTensor
+        elif self.args.update_weight_transfer_mode == "broadcast":
+            update_weight_cls = UpdateWeightFromDistributed
+        elif self.args.update_weight_transfer_mode == "p2p":
+            update_weight_cls = UpdateWeightP2P
         else:
-            if self.args.update_weight_transfer_mode == "broadcast":
-                update_weight_cls = UpdateWeightFromDistributed
+            assert self.args.update_weight_transfer_mode == "disk"
+            # Lazy import: disk sync pulls numpy/zstandard/safetensors codecs that the default
+            # broadcast/p2p paths don't need, so don't make every run import them.
+            if self.args.update_weight_disk_delta:
+                from .update_weight.update_weight_from_disk_delta import UpdateWeightFromDiskDelta
+
+                update_weight_cls = UpdateWeightFromDiskDelta
             else:
-                update_weight_cls = UpdateWeightP2P
+                from .update_weight.update_weight_from_disk import UpdateWeightFromDisk
+
+                update_weight_cls = UpdateWeightFromDisk
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
@@ -498,6 +510,12 @@ class MegatronTrainRayActor(TrainRayActor):
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
+
+            # disk sync stashes changed-fraction / wire size on rank 0; surface it on the step log.
+            pop_metrics = getattr(self.weight_updater, "pop_metrics", None)
+            if dist.get_rank() == 0 and pop_metrics and (metrics := pop_metrics()):
+                step = compute_rollout_step(self.args, getattr(self, "_last_rollout_id", 0))
+                tracking_utils.log(self.args, {**metrics, "rollout/step": step}, step_key="rollout/step")
 
             if self.args.ci_test and len(rollout_engines) > 0 and not is_lora_enabled(self.args):
                 engine = random.choice(rollout_engines)

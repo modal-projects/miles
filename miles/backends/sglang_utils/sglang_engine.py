@@ -3,6 +3,7 @@ import ipaddress
 import logging
 import multiprocessing
 import os
+import threading
 import time
 from urllib.parse import quote
 
@@ -190,6 +191,19 @@ class SGLangEngine(RayActor):
             self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
         else:
             self._init_normal(server_args_dict)
+
+        # Warm the host-local base off the actor's main thread: sglang serves the first rollout from
+        # its init-loaded weights, so the materialize (a full base copy) only has to finish before the
+        # first delta reload. init_local_checkpoint is idempotent and flock-guarded, so the first
+        # sync_local_checkpoint either finds it done or blocks on the same lock — no join needed.
+        if self.args.update_weight_transfer_mode == "disk" and self.args.update_weight_disk_delta:
+            from miles.utils.disk_delta import init_local_checkpoint
+
+            threading.Thread(
+                target=init_local_checkpoint,
+                args=(self.args.update_weight_local_checkpoint_dir, self.args.hf_checkpoint),
+                daemon=True,
+            ).start()
 
     def _init_external(self, expect_server_args, external_engine_need_check_fields):
         logger.info(f"Use external SGLang engine (rank={self.rank}, expect_server_args={expect_server_args})")
@@ -489,15 +503,39 @@ class SGLangEngine(RayActor):
     def check_weights(self, action: str):
         return self._make_request("weights_checker", {"action": action})
 
-    def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
+    def sync_local_checkpoint(self, target_version: int):
+        """Apply the published deltas into this host's local checkpoint up to target_version; the
+        engine reloads it afterwards. Assumes this actor shares the checkpoint filesystem with the
+        sglang it drives (true for framework-launched engines)."""
+        from miles.utils.disk_delta import apply_deltas, init_local_checkpoint
+
+        init_local_checkpoint(self.args.update_weight_local_checkpoint_dir, self.args.hf_checkpoint)  # idempotent
+        # non-POSIX filesystems lack cross-host read-after-write consistency, so the trainer's
+        # just-written delta isn't visible on this mount until the hook refreshes it.
+        if self.args.custom_delta_pre_read_path:
+            from miles.utils.misc import load_function
+
+            load_function(self.args.custom_delta_pre_read_path)(self.args.update_weight_disk_dir, target_version)
+        apply_deltas(
+            self.args.update_weight_local_checkpoint_dir,
+            self.args.update_weight_disk_dir,
+            target_version,
+        )
+
+    def update_weights_from_disk(
+        self, model_path: str, load_format: str | None = None, weight_version: str | None = None
+    ):
         """Reload weights from *model_path* without restarting the engine.
 
         Used for non-updatable (frozen) models that overlap with megatron:
-        after offload, weights are restored from disk instead of CPU cache.
+        after offload, weights are restored from disk instead of CPU cache. Also the reload step of
+        disk weight sync, where *weight_version* keeps the engine's reported version in step.
         """
         payload = {"model_path": model_path}
         if load_format is not None:
             payload["load_format"] = load_format
+        if weight_version is not None:
+            payload["weight_version"] = weight_version
         return self._make_request("update_weights_from_disk", payload)
 
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):

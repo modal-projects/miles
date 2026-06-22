@@ -563,9 +563,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--update-weight-transfer-mode",
-                choices=["broadcast", "p2p"],
+                choices=["broadcast", "p2p", "disk"],
                 default="broadcast",
-                help="The method to transfer weights to remote rollout engines during update weight.",
+                help=(
+                    "How to transfer weights to remote rollout engines. 'broadcast' and 'p2p' push "
+                    "over the network (intra-cluster). 'disk' writes an HF checkpoint to a shared "
+                    "filesystem and the engines reload it via update_weights_from_disk — for "
+                    "training/inference disaggregation across clusters."
+                ),
             )
             parser.add_argument(
                 "--p2p-transfer-num-workers",
@@ -578,6 +583,91 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=float,
                 default=30.0,
                 help="Timeout in seconds for each P2P transfer operation.",
+            )
+            # disk weight sync (--update-weight-transfer-mode=disk)
+            parser.add_argument(
+                "--update-weight-disk-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Filesystem directory shared between the trainer and the rollout engines for "
+                    "disk weight sync. Full mode writes one complete HF checkpoint per sync; delta "
+                    "mode writes one delta directory (changed tensors only) per sync. Required for "
+                    "--update-weight-transfer-mode=disk."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-disk-keep-files",
+                action="store_true",
+                default=False,
+                help="Skip cleanup of the per-sync full-checkpoint directories (disk full mode). Useful for debugging.",
+            )
+            parser.add_argument(
+                "--update-weight-disk-delta",
+                action="store_true",
+                default=False,
+                help=(
+                    "Ship per-tensor deltas instead of a full checkpoint on top of "
+                    "--update-weight-transfer-mode=disk. The trainer diffs each sync against a CPU "
+                    "snapshot of the previous one and publishes only the changed bytes; each host "
+                    "applies the delta into its local checkpoint and reloads via update_weights_from_disk."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-local-checkpoint-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Rollout-host-local directory (e.g. NVMe) holding a full HF checkpoint that "
+                    "disk-delta sync patches in place. Each host materializes it from --hf-checkpoint "
+                    "at engine start, applies each version's delta there, and the engines reload from "
+                    "it. Required when --update-weight-disk-delta is set."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-encoding",
+                choices=["xor", "overwrite"],
+                default="xor",
+                help=(
+                    "On-disk delta encoding for --update-weight-disk-delta. 'xor' (default): new ^ old "
+                    "— smallest wire and fastest, but an involution that must be applied exactly once "
+                    "against the correct base (applying it twice reverts). 'overwrite': changed "
+                    "positions + new absolute values — larger, but idempotent (re-applicable any number "
+                    "of times). Both are byte-level and dtype-blind."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-checksum",
+                choices=["xxh3-128", "blake3", "adler32"],
+                default="xxh3-128",
+                help=(
+                    "Per-tensor integrity checksum for disk-delta apply. 'xxh3-128' (default): fast "
+                    "non-cryptographic digest. 'blake3': cryptographic, for untrusted storage. "
+                    "'adler32': 32-bit, for interop. The engine reads the choice from each version's "
+                    "index metadata."
+                ),
+            )
+            parser.add_argument(
+                "--custom-delta-pre-push-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom function called on each trainer rank after its delta files are "
+                    "written, before the engines read them — to publish the writes on a non-POSIX "
+                    "filesystem (no cross-host visibility without an explicit sync). Signature: "
+                    "``def hook(args, version_dir: str, rollout_engines) -> None``; the hook gates itself."
+                ),
+            )
+            parser.add_argument(
+                "--custom-delta-pre-read-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom function called on each rollout host before it reads the "
+                    "published delta directory — refreshes the mount so the just-published version is "
+                    "visible on a non-POSIX filesystem. Signature: "
+                    "``def hook(delta_dir: str, target_version: int) -> None``."
+                ),
             )
             return parser
 
@@ -2272,6 +2362,26 @@ def miles_validate_args(args):
             getattr(args, "prefill_num_servers", None) is None
         ), "P2P weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
+
+    if args.update_weight_transfer_mode == "disk":
+        assert not args.colocate, (
+            "Disk weight sync is not compatible with --colocate. Colocate transfers weights via "
+            "CUDA IPC (only a handle crosses processes); writing a checkpoint to disk is pure overhead."
+        )
+        assert args.update_weight_disk_dir, (
+            "--update-weight-transfer-mode=disk requires --update-weight-disk-dir to point at "
+            "a filesystem shared between the trainer and the rollout engines."
+        )
+        if args.update_weight_disk_delta:
+            assert args.update_weight_local_checkpoint_dir, (
+                "--update-weight-disk-delta requires --update-weight-local-checkpoint-dir "
+                "(a rollout-host-local directory the delta is applied into)."
+            )
+            assert args.lora_rank <= 0, "LoRA weight sync is not supported for disk-delta weight transfer."
+    else:
+        assert (
+            not args.update_weight_disk_delta
+        ), "--update-weight-disk-delta requires --update-weight-transfer-mode=disk."
 
     if args.colocate:
         if args.offload_train is None:
