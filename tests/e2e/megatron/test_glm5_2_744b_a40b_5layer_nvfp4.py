@@ -14,8 +14,8 @@ register_cuda_ci(
 )
 
 MODEL_ORG = "Pinaster"
-MODEL_NAME = "GLM-5_5layer"
-MODEL_TYPE = "glm5-744B-A40B_5layer"
+MODEL_NAME = "GLM-5.2_5layer"
+MODEL_TYPE = "glm5.2-744B-A40B_5layer"
 NUM_GPUS = 8
 ACTOR_NUM_GPUS = 4
 ROLLOUT_NUM_GPUS = 4
@@ -54,6 +54,7 @@ NVFP4_ENV = {
 }
 
 GLM5_ENV = {
+    "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "256",
     "SGLANG_NSA_FORCE_MLA": "1",
     "INDEXER_ROPE_NEOX_STYLE": "0",
     "NVSHMEM_DISABLE_NCCL": "1",
@@ -119,7 +120,7 @@ def _validate_glm_checkpoint():
         or config.get("num_hidden_layers") != 5
     ):
         raise RuntimeError(
-            f"{config_path} must use native GLM-5 5-layer config with "
+            f"{config_path} must use native GLM-5.2 5-layer config with "
             f"model_type=glm_moe_dsa, architectures=[GlmMoeDsaForCausalLM], "
             "and num_hidden_layers=5"
         )
@@ -148,7 +149,7 @@ def prepare():
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=ACTOR_NUM_GPUS,
+        num_gpus_per_node=1,
         extra_args=(
             "--tensor-model-parallel-size 1 "
             "--expert-tensor-parallel-size 1 "
@@ -177,12 +178,11 @@ def execute():
         "--rollout-shuffle "
         "--rm-type deepscaler "
         "--num-rollout 2 "
-        "--rollout-batch-size 32 "
+        "--rollout-batch-size 8 "
         "--n-samples-per-prompt 8 "
         "--rollout-max-response-len 100 "
         "--rollout-temperature 1 "
-        "--global-batch-size 256 "
-        "--balance-data "
+        "--global-batch-size 64 "
     )
 
     perf_args = (
@@ -196,19 +196,22 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 32768 "
-        "--data-pad-size-multiplier 4096 "
-        "--log-probs-chunk-size 1024 "
+        "--max-tokens-per-gpu 2048 "
+        "--data-pad-size-multiplier 1024 "
+        "--log-probs-chunk-size 16384 "
     )
 
     grpo_args = (
         "--advantage-estimator grpo "
-        "--use-kl-loss "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
+        "--kl-coef 0.00 "
         "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
+        "--use-tis "
+        "--tis-clip-low 0.5 "
+        "--tis-clip 2.0 "
     )
 
     optimizer_args = (
@@ -225,20 +228,25 @@ def execute():
 
     sglang_args = (
         "--sglang-mem-fraction-static 0.7 "
+        "--sglang-enable-dp-attention "
         "--sglang-attention-backend nsa "
-        "--sglang-nsa-decode-backend flashmla_sparse "
+        "--sglang-nsa-decode-backend flashmla_kv "
         "--sglang-nsa-prefill-backend flashmla_sparse "
-        "--sglang-kv-cache-dtype bf16 "
+        "--sglang-kv-cache-dtype fp8_e4m3 "
         "--sglang-page-size 64 "
         f"--rollout-num-gpus-per-engine {ROLLOUT_GPUS_PER_ENGINE} "
         "--sglang-moe-runner-backend flashinfer_trtllm_routed "
-        f"--sglang-tp-size {ROLLOUT_GPUS_PER_ENGINE} "
         f"--sglang-ep-size {ROLLOUT_GPUS_PER_ENGINE} "
+        f"--sglang-dp-size {ROLLOUT_GPUS_PER_ENGINE} "
+        "--sglang-moe-dense-tp-size 1 "
+        "--sglang-enable-dp-lm-head "
         "--sglang-cuda-graph-max-bs 256 "
+        "--sglang-max-running-requests 512 "
+        f"--sglang-chunked-prefill-size {2048 * ROLLOUT_GPUS_PER_ENGINE} "
         "--sglang-watchdog-timeout 3600 "
     )
 
-    ci_args = "--ci-test --ci-disable-logprobs-checker "
+    ci_args = "--ci-test --ci-disable-logprobs-checker --disable-weights-backuper "
 
     mixed_precision_args = (
         "--transformer-impl transformer_engine "
@@ -269,6 +277,8 @@ def execute():
         f"--num-gpus-per-node {NUM_GPUS} "
         f"--rollout-num-gpus {ROLLOUT_NUM_GPUS} "
         "--use-fault-tolerance "
+        "--moe-enable-deepep "
+        "--moe-token-dispatcher-type flex "
         f"--dump-details /root/shared_data/{RUN_ID}/dump_details "
     )
 
