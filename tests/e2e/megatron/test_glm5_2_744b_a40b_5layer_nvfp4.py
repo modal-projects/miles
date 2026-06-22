@@ -203,6 +203,7 @@ def execute():
 
     grpo_args = (
         "--advantage-estimator grpo "
+        "--use-kl-loss "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "
@@ -246,7 +247,7 @@ def execute():
         "--sglang-watchdog-timeout 3600 "
     )
 
-    ci_args = "--ci-test --ci-disable-logprobs-checker --disable-weights-backuper "
+    ci_args = "--ci-test --ci-disable-logprobs-checker "
 
     mixed_precision_args = (
         "--transformer-impl transformer_engine "
