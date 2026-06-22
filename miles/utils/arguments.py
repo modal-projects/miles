@@ -562,6 +562,31 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Address and ports of the external engines.",
             )
             parser.add_argument(
+                "--rollout-endpoint-url",
+                type=str,
+                default=None,
+                help=(
+                    "Base URL of an opaque HTTP rollout endpoint (an elastic fleet behind one URL). "
+                    "miles launches no engines and sends /generate here; weights are published to "
+                    "--update-weight-disk-dir (with a 'latest' pointer) for the fleet to pull. "
+                    "Requires --update-weight-transfer-mode=disk --update-weight-disk-delta."
+                ),
+            )
+            parser.add_argument(
+                "--custom-rollout-request-hook-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a hook that can mutate each outgoing generate request before it is sent. "
+                    "Signature: def hook(args, sample, request) -> None | dict (may be async), where "
+                    "request holds 'url', 'payload', 'headers', 'max_retries' and 'retry_sleep'. Mutate "
+                    "request in place and return None, or return a dict of updates. Use it to add custom "
+                    "headers, or for weight-version gating against an opaque rollout endpoint by setting "
+                    "request['payload']['weight_version'] and raising max_retries/retry_sleep to wait for "
+                    "the fleet to load it."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-transfer-mode",
                 choices=["broadcast", "p2p", "disk"],
                 default="broadcast",
@@ -2085,6 +2110,17 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
+def _normalize_rollout_endpoint_url(url: str) -> str:
+    """Normalize an opaque HTTP rollout endpoint base URL (drop trailing slash, require absolute)."""
+    from urllib.parse import urlparse
+
+    url = url.rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or parsed.netloc == "":
+        raise ValueError(f"Invalid --rollout-endpoint-url {url!r}. Use an absolute http:// or https:// URL.")
+    return url
+
+
 def miles_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
 
@@ -2373,7 +2409,9 @@ def miles_validate_args(args):
             "a filesystem shared between the trainer and the rollout engines."
         )
         if args.update_weight_disk_delta:
-            assert args.update_weight_local_checkpoint_dir, (
+            # publish-only (--rollout-endpoint-url) applies the delta on the fleet, not on a
+            # miles-host-local copy, so it doesn't need a local checkpoint dir.
+            assert args.update_weight_local_checkpoint_dir or args.rollout_endpoint_url, (
                 "--update-weight-disk-delta requires --update-weight-local-checkpoint-dir "
                 "(a rollout-host-local directory the delta is applied into)."
             )
@@ -2382,6 +2420,16 @@ def miles_validate_args(args):
         assert (
             not args.update_weight_disk_delta
         ), "--update-weight-disk-delta requires --update-weight-transfer-mode=disk."
+
+    if args.rollout_endpoint_url is not None:
+        args.rollout_endpoint_url = _normalize_rollout_endpoint_url(args.rollout_endpoint_url)
+        assert not args.rollout_external, "--rollout-endpoint-url and --rollout-external are mutually exclusive."
+        assert args.update_weight_transfer_mode == "disk" and args.update_weight_disk_delta, (
+            "--rollout-endpoint-url requires --update-weight-transfer-mode=disk --update-weight-disk-delta: "
+            "weights are published to disk for the external fleet to pull."
+        )
+        # No miles-launched rollout engines: don't reserve rollout GPUs in the placement group.
+        args.rollout_num_gpus = 0
 
     if args.colocate:
         if args.offload_train is None:

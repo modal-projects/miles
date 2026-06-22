@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from .dtype_utils import to_model_dtype
+
 
 def convert_qwen3moe_to_hf(args, name, param):
     if name == "module.module.embedding.word_embeddings.weight":
@@ -104,9 +106,9 @@ def convert_qwen3moe_to_hf(args, name, param):
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
         elif rest == "mlp.router.weight":
-            return [(f"model.layers.{layer_idx}.mlp.gate.weight", param)]
+            return [(f"model.layers.{layer_idx}.mlp.gate.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", param)]
+            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", to_model_dtype(args, param))]
 
         # qk norm
         elif rest == "self_attention.q_layernorm.weight":

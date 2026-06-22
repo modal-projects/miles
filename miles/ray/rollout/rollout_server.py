@@ -18,6 +18,13 @@ def start_rollout_servers(args, pg) -> dict[str, "RolloutServer"]:
 
     Returns a dict mapping model name -> ``RolloutServer``.
     """
+    if getattr(args, "rollout_endpoint_url", None):
+        # Rollout served by an opaque HTTP endpoint behind one URL. The fleet is elastic, so miles
+        # holds no per-engine handles and launches nothing — generation routes to the URL via
+        # get_model_url and weights are published to disk for the fleet to pull.
+        logger.info("Rollout served by opaque HTTP endpoint: %s", args.rollout_endpoint_url)
+        return {"default": RolloutServer(server_groups=[], model_name="default", update_weights=True)}
+
     config = _resolve_sglang_config(args)
 
     servers: dict[str, RolloutServer] = {}

@@ -1,6 +1,7 @@
 import re
 
 from ..update_weight.common import AtomicUpdateGroup
+from .dtype_utils import to_model_dtype
 
 
 def get_deepseek_v4_atomic_update_groups():
@@ -138,9 +139,9 @@ def convert_deepseekv4_to_hf(args, name, param):
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
 
         elif rest == "mlp.router.weight":
-            return [(f"model.layers.{layer_idx}.mlp.gate.weight", param)]
+            return [(f"model.layers.{layer_idx}.mlp.gate.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", param)]
+            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", to_model_dtype(args, param))]
         elif rest == "mlp.router.tid2eid":
             return [(f"model.layers.{layer_idx}.mlp.topk.tid2eid", param)]
 

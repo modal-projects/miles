@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import logging
 import uuid
 from argparse import Namespace
@@ -50,13 +51,47 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
         resp = await post(url, json=payload)
 
     Falls back to the default router if *model_name* is not found or
-    ``sglang_model_routers`` is not set.
+    ``sglang_model_routers`` is not set. With ``--rollout-endpoint-url`` set, returns that opaque
+    endpoint with *endpoint* appended (no router APIs are assumed to exist).
     """
+    if getattr(args, "rollout_endpoint_url", None):
+        return f"{args.rollout_endpoint_url}{endpoint}"
     routers = getattr(args, "sglang_model_routers", None)
     if routers and model_name in routers:
         ip, port = routers[model_name]
         return f"http://{ip}:{port}{endpoint}"
     return f"http://{args.sglang_router_ip}:{args.sglang_router_port}{endpoint}"
+
+
+async def apply_rollout_request_hook(
+    args: Namespace,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    headers: dict | None,
+    sample: Sample,
+) -> dict[str, Any]:
+    """Run ``custom_rollout_request_hook_path`` on one outgoing /generate request.
+
+    The hook receives ``request = {"url", "payload", "headers", "max_retries", "retry_sleep"}`` along
+    with ``args`` and ``sample`` (which carries its own context, e.g. ``sample.index``) — everything
+    about how this one request is sent, and nothing about the rollout itself. It mutates ``request``
+    in place and returns None, or returns a dict of updates; this returns the resulting request.
+    Callers invoke this only when a hook is set, so the default path keeps calling ``post`` directly.
+    """
+    request = {"url": url, "payload": payload, "headers": headers, "max_retries": 60, "retry_sleep": 1.0}
+    hook = load_function(args.custom_rollout_request_hook_path)
+    result = hook(args, sample, request)
+    if inspect.isawaitable(result):
+        result = await result
+    if result is not None:
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"{args.custom_rollout_request_hook_path} must return None or a dict of request updates, "
+                f"got {type(result).__name__}"
+            )
+        request.update(result)
+    return request
 
 
 class GenerateState(metaclass=SingletonMeta):
@@ -136,7 +171,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = get_model_url(args, "default", "/generate")
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -197,7 +232,17 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if args.sglang_router_policy == "consistent_hashing" and sample.session_id:
         headers = {"X-SMG-Routing-Key": sample.session_id}
 
-    output = await post(url, payload, headers=headers)
+    if getattr(args, "custom_rollout_request_hook_path", None):
+        request = await apply_rollout_request_hook(args, url, payload, headers=headers, sample=sample)
+        output = await post(
+            request["url"],
+            request["payload"],
+            headers=request["headers"],
+            max_retries=request["max_retries"],
+            retry_sleep=request["retry_sleep"],
+        )
+    else:
+        output = await post(url, payload, headers=headers)
     if getattr(args, "use_opd", False) and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":
         output_top_logprobs = output.get("meta_info", {}).get("output_top_logprobs")
         if output_top_logprobs is not None:
@@ -347,19 +392,31 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     assert not state.aborted
     state.aborted = True
 
-    if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_miles_router:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
-        urls = response["urls"]
+    if getattr(args, "rollout_endpoint_url", None):
+        # Opaque endpoint: no worker API to call. Cancelling the client tasks disconnects the
+        # requests, which aborts them on the fleet.
+        if not args.partial_rollout:
+            # surplus discarded: cancel locally, nothing to collect.
+            for task in state.pendings:
+                task.cancel()
+            await asyncio.gather(*state.pendings, return_exceptions=True)
+            state.pendings = set()
+            return aborted_samples
+        # partial_rollout: fall through to drain pendings and collect partials (no worker abort).
     else:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
-        urls = [worker["url"] for worker in response["workers"]]
+        if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_miles_router:
+            response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
+            urls = response["urls"]
+        else:
+            response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
+            urls = [worker["url"] for worker in response["workers"]]
 
-    logger.info(f"Abort request for {urls}")
-    abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
-    abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
-    for url, result in zip(urls, abort_results, strict=False):
-        if isinstance(result, Exception):
-            logger.warning(f"Failed to abort worker at {url}: {result}")
+        logger.info(f"Abort request for {urls}")
+        abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
+        abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
+        for url, result in zip(urls, abort_results, strict=False):
+            if isinstance(result, Exception):
+                logger.warning(f"Failed to abort worker at {url}: {result}")
 
     # make sure all the pending tasks are finished
     count = 0

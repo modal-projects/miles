@@ -488,7 +488,11 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             reload_process_groups()
 
-        if has_new_engines:
+        # An opaque HTTP rollout fleet exposes no engine handles; the trainer publishes the delta to
+        # disk instead of pushing, so it still connects (with zero engines) and runs update_weights.
+        publish_only = bool(getattr(self.args, "rollout_endpoint_url", None))
+
+        if has_new_engines or publish_only:
             self.weight_updater.connect_rollout_engines(
                 rollout_engines,
                 rollout_engine_lock,

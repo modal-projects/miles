@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from .dtype_utils import to_model_dtype
+
 
 def _convert_mtp_layer(args, name, param, layer_idx):
     """Convert MTP layer parameters from Megatron to HuggingFace format."""
@@ -158,9 +160,9 @@ def convert_qwen3_5_to_hf(args, name, param):
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"{prefix}.post_attention_layernorm.weight", param)]
         elif rest == "mlp.router.weight":
-            return [(f"{prefix}.mlp.gate.weight", param)]
+            return [(f"{prefix}.mlp.gate.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"{prefix}.mlp.gate.e_score_correction_bias", param)]
+            return [(f"{prefix}.mlp.gate.e_score_correction_bias", to_model_dtype(args, param))]
 
         # qk norm
         elif rest == "self_attention.q_layernorm.weight":

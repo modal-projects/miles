@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from .dtype_utils import to_model_dtype
+
 
 def convert_kimivl_to_hf(args, name, param):
     if name.startswith("module.module.vision_model."):
@@ -132,8 +134,13 @@ def convert_language_model_to_hf(args, name, param):
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"language_model.model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
         elif rest == "mlp.router.weight":
-            return [(f"language_model.model.layers.{layer_idx}.mlp.gate.weight", param)]
+            return [(f"language_model.model.layers.{layer_idx}.mlp.gate.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"language_model.model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", param)]
+            return [
+                (
+                    f"language_model.model.layers.{layer_idx}.mlp.gate.e_score_correction_bias",
+                    to_model_dtype(args, param),
+                )
+            ]
 
     raise ValueError(f"Unknown parameter name: {name}")
