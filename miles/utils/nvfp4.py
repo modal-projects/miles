@@ -107,9 +107,10 @@ def nvfp4_quantize_1d_pair(
         )
 
     first_rows = first.shape[0]
-    combined_qweight, combined_block_scale, global_scale = nvfp4_quantize_1d(
-        torch.cat((first.contiguous(), second.contiguous()), dim=0)
-    )
+    combined = _contiguous_pair_view(first, second)
+    if combined is None:
+        combined = torch.cat((first.contiguous(), second.contiguous()), dim=0)
+    combined_qweight, combined_block_scale, global_scale = nvfp4_quantize_1d(combined)
     first_result = (
         combined_qweight[:first_rows].contiguous(),
         combined_block_scale[:first_rows].contiguous(),
@@ -121,3 +122,23 @@ def nvfp4_quantize_1d_pair(
         global_scale.clone(),
     )
     return first_result, second_result
+
+
+def _contiguous_pair_view(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor | None:
+    if not first.is_contiguous() or not second.is_contiguous():
+        return None
+    if first.device != second.device or first.dtype != second.dtype or first.stride() != second.stride():
+        return None
+    if first.untyped_storage().data_ptr() != second.untyped_storage().data_ptr():
+        return None
+    if first.storage_offset() + first.numel() != second.storage_offset():
+        return None
+
+    try:
+        return first.as_strided(
+            (first.shape[0] + second.shape[0], first.shape[1]),
+            first.stride(),
+            first.storage_offset(),
+        )
+    except RuntimeError:
+        return None
