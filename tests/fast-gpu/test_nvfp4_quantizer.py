@@ -238,6 +238,22 @@ def test_nvfp4_hf_converter_quantizes_same_shard_gated_pair_together(tmp_path, m
         torch.testing.assert_close(gate_global_scale, up_global_scale, rtol=0, atol=0)
 
 
+def test_nvfp4_quantize_pair_reuses_adjacent_storage(monkeypatch):
+    base = torch.randn((32, 64), dtype=torch.bfloat16, device="cuda")
+    gate, up = base.chunk(2, dim=0)
+
+    def fail_cat(*args, **kwargs):
+        raise AssertionError("adjacent gate/up pair should not be materialized with torch.cat")
+
+    monkeypatch.setattr(torch, "cat", fail_cat)
+    (gate_qweight, gate_block_scale, _), (up_qweight, up_block_scale, _) = nvfp4_quantize_1d_pair(gate, up)
+
+    assert gate_qweight.shape == (16, 32)
+    assert up_qweight.shape == (16, 32)
+    assert gate_block_scale.shape == (16, 4)
+    assert up_block_scale.shape == (16, 4)
+
+
 @pytest.mark.parametrize(
     "quantize_fn",
     [processor_quantize_nvfp4, tool_quantize_nvfp4],
