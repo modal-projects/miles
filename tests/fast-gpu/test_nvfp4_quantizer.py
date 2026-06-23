@@ -142,6 +142,35 @@ def test_nvfp4_quantize_params_respects_first_last_layers_bf16(layer_idx):
     assert out is converted_named_params
 
 
+def test_nvfp4_quantize_params_omits_static_input_scale(monkeypatch):
+    weight = torch.randn((4, NVFP4_GROUP_SIZE), dtype=torch.bfloat16)
+    qweight = torch.empty((4, NVFP4_GROUP_SIZE // 2), dtype=torch.uint8)
+    block_scale = torch.empty((4, 1), dtype=torch.float8_e4m3fn)
+    global_scale = torch.ones((), dtype=torch.float32)
+
+    def fake_quantize_1d_pair(_gate, _up):
+        return (qweight, block_scale, global_scale), (qweight, block_scale, global_scale)
+
+    monkeypatch.setattr(
+        "miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_nvfp4.nvfp4_quantize_1d_pair",
+        fake_quantize_1d_pair,
+    )
+
+    out = quantize_params_nvfp4(
+        args=None,
+        megatron_name="decoder.layers.0.mlp.experts.linear_fc1.weight0",
+        converted_named_params=[
+            ("model.layers.0.mlp.experts.0.gate_proj.weight", weight),
+            ("model.layers.0.mlp.experts.0.up_proj.weight", weight),
+        ],
+        quantization_config={"quant_method": "nvfp4"},
+    )
+
+    names = [name for name, _ in out]
+    assert "model.layers.0.mlp.experts.0.gate_proj.input_scale" not in names
+    assert "model.layers.0.mlp.experts.0.up_proj.input_scale" not in names
+
+
 def test_nvfp4_hf_should_quantize_respects_extra_high_precision_layers_hf():
     weight = torch.randn((4, NVFP4_GROUP_SIZE), dtype=torch.bfloat16)
 

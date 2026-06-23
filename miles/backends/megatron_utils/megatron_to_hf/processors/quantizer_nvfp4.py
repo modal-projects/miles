@@ -137,9 +137,6 @@ def _quantize_moe_params(converted_named_params, ignore_rules):
         quantize_named_params.append((converted_name, qweight))
         quantize_named_params.append((converted_name.replace(".weight", ".weight_scale"), block_scale))
         quantize_named_params.append((converted_name.replace(".weight", ".weight_scale_2"), weight_scale_2))
-        quantize_named_params.append(
-            (converted_name.replace(".weight", ".input_scale"), torch.ones_like(weight_scale_2, dtype=torch.float32))
-        )
 
     return quantize_named_params
 
