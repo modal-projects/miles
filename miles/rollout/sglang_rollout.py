@@ -107,9 +107,17 @@ class GenerateState(metaclass=SingletonMeta):
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-        )
+        if getattr(args, "rollout_endpoint_url", None):
+            # Publish-only / disaggregated: no miles-launched engines, so
+            # rollout_num_gpus == 0 and the GPU-based formula below would be 0,
+            # making asyncio.Semaphore(0) deadlock every rollout. Bound generation
+            # concurrency by the external pool's per-engine concurrency instead.
+            generation_concurrency = args.sglang_server_concurrency
+        else:
+            generation_concurrency = (
+                args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+            )
+        self.semaphore = asyncio.Semaphore(generation_concurrency)
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,

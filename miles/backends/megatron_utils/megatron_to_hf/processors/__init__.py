@@ -2,6 +2,7 @@ from .padding_remover import remove_padding
 from .quantizer_compressed_tensors import quantize_params_compressed_tensors
 from .quantizer_fp8 import quantize_params_fp8
 from .quantizer_mxfp8 import quantize_params_mxfp8
+from .quantizer_nvfp4 import quantize_params_nvfp4
 
 __all__ = [
     "remove_padding",
@@ -9,6 +10,7 @@ __all__ = [
     "quantize_params_fp8",
     "quantize_params_mxfp8",
     "quantize_params_compressed_tensors",
+    "quantize_params_nvfp4",
 ]
 
 
@@ -22,3 +24,7 @@ def quantize_params(args, megatron_name, converted_named_params, quantization_co
     elif quantization_config["quant_method"] == "compressed-tensors":
         # only int4 at the moment.
         return quantize_params_compressed_tensors(converted_named_params, quantization_config)
+    elif quantization_config.get("quant_algo") == "NVFP4" or quantization_config.get("quant_method") == "nvfp4":
+        # modelopt NVFP4 checkpoints (e.g. nvidia/Kimi-K2.6-NVFP4) advertise
+        # quant_method="modelopt", so route on quant_algo, not quant_method.
+        return quantize_params_nvfp4(args, megatron_name, converted_named_params, quantization_config)
