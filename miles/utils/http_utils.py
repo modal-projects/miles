@@ -227,10 +227,18 @@ async def _post(client, url, payload, max_retries=60, action="post", headers=Non
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
-    if not args.rollout_num_gpus:
+    publish_only = bool(getattr(args, "rollout_endpoint_url", None))
+    if not args.rollout_num_gpus and not publish_only:
         return
 
-    _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+    if publish_only:
+        # Disaggregated / publish-only: no miles-launched engines, so
+        # rollout_num_gpus == 0 and the GPU-based formula below would be 0 — the
+        # client would never be created (NoneType.post). The external pool bounds
+        # concurrency instead.
+        _client_concurrency = args.sglang_server_concurrency
+    else:
+        _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),

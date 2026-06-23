@@ -143,7 +143,8 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             try:
                 self._snapshot[name] = self._baseline_reader(name)
             except KeyError:
-                self._snapshot[name] = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().reshape(-1)
+                # flatten before the byte-view (0-dim scalars like NVFP4 scales)
+                self._snapshot[name] = tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
                 logger.warning("seed: %s absent from hf_checkpoint; seeding from current weights", name)
         converted_named_tensors.clear()
 
@@ -196,7 +197,11 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         """Copy each gathered HF tensor to host and submit it to the diff/compress pool, draining
         once enough work is in flight to backpressure the gather (source ranks only)."""
         for name, tensor in converted_named_tensors:
-            flat = tensor.detach().contiguous().view(torch.uint8).reshape(-1)
+            # Flatten to 1-D *before* the byte-view: NVFP4 export emits 0-dim
+            # scalar tensors (weight_scale_2, input_scale), and .view(torch.uint8)
+            # cannot reinterpret a 0-dim tensor ("self.dim() cannot be 0 to view
+            # Float as Byte"). reshape(-1) on a 0-dim tensor yields [1] first.
+            flat = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
             nbytes = int(flat.numel())
             if self._use_pinned and nbytes <= self._max_bytes:
                 buf = self._free_q.get()  # blocks when all buffers are in flight -> backpressures the gather
