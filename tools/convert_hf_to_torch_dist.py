@@ -127,19 +127,21 @@ def main():
 
     save_checkpoint(1, model, None, None, 0)
 
-    if dist.get_rank() == 0:
-        source_dir = get_checkpoint_name(args.save, 1, False, return_base_dir=True)
-        target_dir = get_checkpoint_name(args.save, -1, True, return_base_dir=True)
-        shutil.move(source_dir, target_dir)
-
     dist.barrier()
 
-    # This modification must be the *last* step and after a `dist.barrier`
-    # because the higher-level scripts consider this as a signal that the script has been executed successfully
+    # NOTE: the upstream version here does shutil.move(iter_0000001 -> release/) on rank 0
+    # and writes tracker "release". On Modal each node mounts the save Volume separately, so
+    # the multi-node distcp save scatters its .distcp shards across per-node mounts — rank 0's
+    # move would relocate only node 0's shards and orphan the rest. Skip the move and load
+    # straight from iter_0000001 (tracker = the iteration). The launcher commits the Volume on
+    # *every* node so all shards land under the one iter dir.
+    #
+    # This must be the *last* step and after a dist.barrier — higher-level scripts treat the
+    # tracker write as the success signal.
     if dist.get_rank() == 0:
         tracker_filename = get_checkpoint_tracker_filename(args.save)
         with open(tracker_filename, "w") as f:
-            f.write("release")
+            f.write("1")
 
     dist.destroy_process_group()
 
