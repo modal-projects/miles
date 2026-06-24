@@ -143,10 +143,14 @@ def convert_language_model_to_hf(args, name, param):
         elif rest == "mlp.router.weight":
             return [(f"language_model.model.layers.{layer_idx}.mlp.gate.weight", to_model_dtype(args, param))]
         elif rest == "mlp.router.expert_bias":
+            # Megatron maintains the aux-loss-free router bias in fp32, and the
+            # served NVFP4 base (dequantized masters) stores e_score_correction_bias
+            # in fp32 too. Casting the export to bf16 here makes the disk-delta XOR
+            # mismatch (new fp32->bf16 vs old fp32). Keep fp32 to match the base.
             return [
                 (
                     f"language_model.model.layers.{layer_idx}.mlp.gate.e_score_correction_bias",
-                    to_model_dtype(args, param),
+                    param,
                 )
             ]
 

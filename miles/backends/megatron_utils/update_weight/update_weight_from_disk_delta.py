@@ -224,6 +224,12 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         else:
             new = buf
         old = self._snapshot[name]
+        if getattr(new, "shape", None) != getattr(old, "shape", None):
+            import logging
+
+            logging.getLogger(__name__).error(
+                "[delta-shape-mismatch] name=%s new=%s old=%s", name, getattr(new, "shape", None), getattr(old, "shape", None)
+            )
         if self.delta_encoding == "xor":
             diff = new ^ old
             changed = int(np.count_nonzero(diff))
