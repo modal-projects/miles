@@ -30,6 +30,13 @@ def convert_kimi_k25_to_hf(args, name, param):
 
 
 def convert_language_model_to_hf(args, name, param):
+    # This converter was written for a VLM-structured Megatron model (LM nested
+    # under a `language_model.` submodule). We build the LM as a plain DeepSeek-V3
+    # GPTModel (raw mode from MODEL_ARGS), so its params have no `language_model.`
+    # segment (e.g. module.module.embedding.* not module.module.language_model.*).
+    # Normalize so the existing VLM-form name checks below match.
+    if name.startswith("module.module.") and not name.startswith("module.module.language_model."):
+        name = "module.module.language_model." + name[len("module.module.") :]
     if name == "module.module.language_model.embedding.word_embeddings.weight":
         return [("language_model.model.embed_tokens.weight", param)]
     if name == "module.module.language_model.output_layer.weight":
