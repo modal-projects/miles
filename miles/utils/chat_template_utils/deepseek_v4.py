@@ -7,7 +7,10 @@ import logging
 import os
 from typing import Any
 
-from sglang.srt.entrypoints.openai import encoding_dsv4
+try:
+    from sglang.srt.entrypoints.openai import encoding_dsv4
+except ImportError:  # older sglang-miles without the DeepSeek-V4 encoder; fine for non-V4 models
+    encoding_dsv4 = None
 from sglang.srt.entrypoints.openai.protocol import Tool
 
 logger = logging.getLogger(__name__)
