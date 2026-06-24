@@ -52,7 +52,11 @@ def get_args():
     def ceildiv(a, b):
         return -(a // -b)
 
-    if args.pipeline_model_parallel_size == 1 and world_size > 1:
+    # Auto-derive pipeline parallelism ONLY when experts aren't being EP-sharded.
+    # For a large MoE (e.g. 1T K2.6) pure PP=world_size with EP=1 leaves all experts
+    # on every rank -> OOM; the caller passes --expert-model-parallel-size instead,
+    # and we must keep the explicit pp (here 1) rather than override to world_size.
+    if args.pipeline_model_parallel_size == 1 and world_size > 1 and args.expert_model_parallel_size <= 1:
         pp_size = world_size
         while True:
             args.pipeline_model_parallel_size = pp_size
