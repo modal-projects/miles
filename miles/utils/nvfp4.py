@@ -70,7 +70,7 @@ def nvfp4_quantize_1d(
     num_rows, num_cols = weight.shape
     nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
 
-    quantizer = NVFP4Quantizer(
+    _quantizer_kwargs = dict(
         rowwise=True,
         columnwise=False,
         with_amax_reduction=False,
@@ -84,6 +84,13 @@ def nvfp4_quantize_1d(
         nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
         with_random_sign_mask=False,
     )
+    # Image-TE compat (#1261 targets a newer TransformerEngine): pass only the
+    # kwargs this TE's NVFP4Quantizer accepts. The dropped ones are newer NVFP4
+    # toggles that default off and are also governed by the NVTE_NVFP4_* env vars.
+    import inspect
+
+    _supported = set(inspect.signature(NVFP4Quantizer.__init__).parameters)
+    quantizer = NVFP4Quantizer(**{k: v for k, v in _quantizer_kwargs.items() if k in _supported})
 
     quantized = quantizer.quantize(_pad_rows_for_te_quantizer(weight))
     qweight = quantized._rowwise_data[:num_rows, : num_cols // 2].contiguous()
