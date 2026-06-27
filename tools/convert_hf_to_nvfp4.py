@@ -43,7 +43,12 @@ EXPERT_WEIGHT_SUFFIXES = (
 
 EXPERT_NAME_MARKERS = (
     ".experts.",
-    ".shared_experts.",
+    # NOTE: ``.shared_experts.`` intentionally EXCLUDED. The trainer's te_precision only
+    # scopes NVFP4 to ``*.mlp.experts.linear_fc1/fc2`` (routed experts); shared experts
+    # train + export in bf16. Quantizing them here diverged the served base from the
+    # trainer export (broke the byte-exact disk-delta invariant) AND produced NVFP4
+    # shared-expert gate_up tensors that SGLang's update_weights_from_disk reload
+    # mis-allocates. nvidia/Kimi-K2.6-NVFP4 (routed-experts-only) reloads cleanly; this matches it.
     "block_sparse_moe.experts.",
     ".moe.experts.",
 )
