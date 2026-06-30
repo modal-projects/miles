@@ -110,9 +110,11 @@ def convert_glm4moe_to_hf(args, name, param):
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
         elif rest == "mlp.router.weight":
-            return [(f"model.layers.{layer_idx}.mlp.gate.weight", to_model_dtype(args, param))]
+            hf_name = f"model.layers.{layer_idx}.mlp.gate.weight"
+            return [(hf_name, to_model_dtype(args, param, hf_name))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", to_model_dtype(args, param))]
+            hf_name = f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"
+            return [(hf_name, to_model_dtype(args, param, hf_name))]
 
         # qk norm
         elif rest == "self_attention.q_layernorm.weight":

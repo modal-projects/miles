@@ -28,7 +28,7 @@ CONFIG = {
 def _quantize_names(name, ignore_rules):
     """Run quantization on a single 2D weight and return output names."""
     config = {**CONFIG, "ignore": ignore_rules}
-    results = quantize_params_compressed_tensors([(name, torch.randn(256, 256, device="cuda"))], config)
+    results = quantize_params_compressed_tensors(None, [(name, torch.randn(256, 256, device="cuda"))], config)
     return [r[0] for r in results]
 
 
@@ -68,7 +68,7 @@ class TestIgnoreRulePrefixMatching:
             ("model.layers.0.self_attn.k_proj.weight", torch.randn(256, 256, device="cuda")),
             ("model.layers.0.mlp.gate_proj.weight", torch.randn(256, 256, device="cuda")),
         ]
-        result_names = [r[0] for r in quantize_params_compressed_tensors(params, config)]
+        result_names = [r[0] for r in quantize_params_compressed_tensors(None, params, config)]
 
         # self_attn params ignored (passed through)
         assert "model.layers.0.self_attn.q_proj.weight" in result_names
