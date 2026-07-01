@@ -84,6 +84,15 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
                 is_lora=False,
             )
 
+    @property
+    def _is_delta_source(self) -> bool:
+        # The raw iterator is PP-sharded, so every broadcast source owns a disjoint
+        # slice. Bridge exports a full HF checkpoint per source rank; let one rank
+        # publish it or XOR apply would replay duplicate tensor deltas.
+        if self._hf_weight_iterator_mode == "bridge":
+            return dist.get_rank() == 0
+        return self._is_source
+
     def connect_rollout_engines(
         self,
         rollout_engines: Sequence[ActorHandle],
@@ -137,7 +146,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
                 self._commit_hook(self.args, self.delta_dir, list(self.rollout_engines))
         dist.barrier(group=get_gloo_group())
 
-        self._baseline_reader = make_tensor_reader(self.args.hf_checkpoint) if self._is_source else None
+        self._baseline_reader = make_tensor_reader(self.args.hf_checkpoint) if self._is_delta_source else None
         self._for_each_hf_weight_bucket(self._snapshot_bucket)
         self._baseline_reader = None
         if dist.get_rank() == 0:
@@ -176,7 +185,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         self._pool: ThreadPoolExecutor | None = None
         self._inflight: deque[Future] = deque()
 
-        if self._is_source:
+        if self._is_delta_source:
             os.makedirs(self._version_dir, exist_ok=True)
             self._setup_encode_buffers()
             self._pool = ThreadPoolExecutor(max_workers=NUM_WORKERS)
@@ -207,7 +216,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             megatron_local_weights,
             weight_type="base",
         ):
-            if self._is_source:
+            if self._is_delta_source:
                 callback(hf_named_tensors)
         dist.barrier(group=get_gloo_group())
 
@@ -315,7 +324,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
                     "compression_format": "zstd",
                     "checksum_format": self.checksum_algorithm,
                 },
-                "weight_map": {name: f for m in maps for name, f in m.items()},
+                "weight_map": _merge_weight_maps(maps),
             }
             _atomic_write(os.path.join(self._version_dir, "model.safetensors.index.json"), json.dumps(index).encode())
         dist.barrier(group=group)
@@ -377,3 +386,25 @@ def _atomic_write(path: str, data: bytes) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def _merge_weight_maps(maps: Sequence[Mapping[str, str | None] | None]) -> dict[str, str]:
+    weight_map: dict[str, str] = {}
+    duplicates: dict[str, list[str | None]] = {}
+    for m in maps:
+        if not m:
+            continue
+        for name, filename in m.items():
+            if name in weight_map:
+                duplicates.setdefault(name, [weight_map[name]]).append(filename)
+                continue
+            if filename is None:
+                raise RuntimeError(f"delta tensor {name!r} has no shard filename")
+            weight_map[name] = filename
+    if duplicates:
+        sample = {name: files for name, files in sorted(duplicates.items())[:20]}
+        raise RuntimeError(
+            "duplicate disk-delta tensor names across publisher ranks; "
+            f"sample={sample}"
+        )
+    return weight_map
