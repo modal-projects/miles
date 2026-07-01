@@ -3,16 +3,20 @@ from abc import ABC, abstractmethod
 
 class HfWeightIteratorBase(ABC):
     @staticmethod
-    def create(args, model, **kwargs):
+    def create(args, model, *, mode: str | None = None, **kwargs):
+        mode = mode or args.megatron_to_hf_mode
+        if mode not in {"raw", "bridge"}:
+            raise ValueError(f"Unknown HF weight iterator mode: {mode!r}")
+
         from .hf_weight_iterator_bridge import HfWeightIteratorBridge
         from .hf_weight_iterator_direct import HfWeightIteratorDirect
 
-        c = {
+        iterators = {
             "raw": HfWeightIteratorDirect,
             "bridge": HfWeightIteratorBridge,
-        }[args.megatron_to_hf_mode]
+        }
 
-        return c(args, model, **kwargs)
+        return iterators[mode](args, model, **kwargs)
 
     def __init__(self, args, model, model_name, quantization_config, **kwargs):
         self.args = args

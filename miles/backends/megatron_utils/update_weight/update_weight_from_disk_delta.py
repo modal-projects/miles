@@ -22,6 +22,8 @@ from miles.utils.disk_delta import NUM_WORKERS, checksum, make_tensor_reader, ov
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.misc import load_function
 
+from .common import named_params_and_buffers
+from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed.broadcast import UpdateWeightFromDistributed
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,17 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             load_function(args.custom_delta_pre_push_path) if args.custom_delta_pre_push_path else None
         )
         self.update_weight_metrics: dict[str, float] = {}
+        self._hf_weight_iterator_mode = getattr(args, "update_weight_hf_iterator_mode", None)
+        self._hf_weight_iterator = None
+        if self._hf_weight_iterator_mode is not None:
+            self._hf_weight_iterator = HfWeightIteratorBase.create(
+                args=args,
+                model=model,
+                mode=self._hf_weight_iterator_mode,
+                model_name=model_name,
+                quantization_config=quantization_config,
+                is_lora=False,
+            )
 
     def connect_rollout_engines(
         self,
@@ -125,10 +138,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         dist.barrier(group=get_gloo_group())
 
         self._baseline_reader = make_tensor_reader(self.args.hf_checkpoint) if self._is_source else None
-        self._gather_and_update_non_expert_weights(self._snapshot_bucket)
-        dist.barrier(group=get_gloo_group())
-        self._gather_and_update_expert_weights(self._snapshot_bucket)
-        dist.barrier(group=get_gloo_group())
+        self._for_each_hf_weight_bucket(self._snapshot_bucket)
         self._baseline_reader = None
         if dist.get_rank() == 0:
             logger.info(
@@ -171,14 +181,35 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             self._setup_encode_buffers()
             self._pool = ThreadPoolExecutor(max_workers=NUM_WORKERS)
         try:
-            self._gather_and_update_non_expert_weights(self._encode_bucket)
-            dist.barrier(group=get_gloo_group())
-            self._gather_and_update_expert_weights(self._encode_bucket)
+            self._for_each_hf_weight_bucket(self._encode_bucket)
             while self._inflight:
                 self._collect(self._inflight.popleft())
         finally:
             if self._pool is not None:
                 self._pool.shutdown()
+
+    def _for_each_hf_weight_bucket(self, callback: Callable[..., None]) -> None:
+        if self._hf_weight_iterator is None:
+            self._gather_and_update_non_expert_weights(callback)
+            dist.barrier(group=get_gloo_group())
+            self._gather_and_update_expert_weights(callback)
+            dist.barrier(group=get_gloo_group())
+            return
+
+        megatron_local_weights = dict(
+            named_params_and_buffers(
+                self.args,
+                self.model,
+                convert_to_global_name=False,
+            )
+        )
+        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+            megatron_local_weights,
+            weight_type="base",
+        ):
+            if self._is_source:
+                callback(hf_named_tensors)
+        dist.barrier(group=get_gloo_group())
 
     def _setup_encode_buffers(self) -> None:
         # A pinned non_blocking GPU->CPU copy is far faster than .cpu(); fall back to pageable if a
