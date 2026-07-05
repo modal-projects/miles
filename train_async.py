@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from miles.utils.arguments import parse_args
@@ -66,8 +68,15 @@ async def train(args):
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
             # sync generate before update weights to prevent update weight in the middle of generation
+            quiesce_start = time.perf_counter()
             rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
             rollout_data_next_future = None
+            # The quiesce sits outside update_weights, so the publish-stage
+            # timers never see it; log it here or the stall stays invisible.
+            logging.getLogger(__name__).info(
+                "[disk delta] pre-publish generation quiesce: %.2fs",
+                time.perf_counter() - quiesce_start,
+            )
             await actor_model.update_weights()
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):

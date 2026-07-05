@@ -5,10 +5,12 @@ import logging
 import os
 import queue
 import shutil
+import time
 from argparse import Namespace
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 
 import numpy as np
 import ray
@@ -70,6 +72,18 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             load_function(args.custom_delta_pre_push_path) if args.custom_delta_pre_push_path else None
         )
         self.update_weight_metrics: dict[str, float] = {}
+        # Wall-clock seconds per publish stage on THIS rank; _record_metrics
+        # gathers the per-rank spans and keeps the max (a stage's wall time is
+        # bounded by its slowest rank) on rank 0, where pop_metrics drains.
+        self._stage_s: dict[str, float] = {}
+
+    @contextmanager
+    def _stage_timer(self, name: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._stage_s[name] = time.perf_counter() - start
 
     def connect_rollout_engines(
         self,
@@ -89,25 +103,31 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
 
     @torch.no_grad()
     def update_weights(self) -> None:
+        self._stage_s = {}
         # The first call only captures the baseline snapshot the next sync diffs against.
         if not self._baseline_captured:
-            self._capture_baseline()
+            with self._stage_timer("baseline_capture"):
+                self._capture_baseline()
             self._baseline_captured = True
+            self._record_metrics()
             return
 
         self.weight_version += 1
-        if dist.get_rank() == 0 and not self._publish_only:
-            mode = self.args.pause_generation_mode
-            ray.get([engine.pause_generation.remote(mode=mode) for engine in self.rollout_engines])
-            if mode != "in_place":
-                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
+        with self._stage_timer("pause_engines"):
+            if dist.get_rank() == 0 and not self._publish_only:
+                mode = self.args.pause_generation_mode
+                ray.get([engine.pause_generation.remote(mode=mode) for engine in self.rollout_engines])
+                if mode != "in_place":
+                    ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            dist.barrier(group=get_gloo_group())
 
         self._publish()
         if self._publish_only:
-            self._announce_version()
+            with self._stage_timer("announce"):
+                self._announce_version()
         else:
-            self._reload_engines()
+            with self._stage_timer("reload_engines"):
+                self._reload_engines()
         self._record_metrics()
 
     def _capture_baseline(self) -> None:
@@ -150,9 +170,11 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
 
     def _publish(self) -> None:
         """Encode this version's changed tensors (source ranks), then write it as a canonical HF dir."""
-        self._encode_delta()
-        dist.barrier(group=get_gloo_group())
-        self._write_delta_files()
+        with self._stage_timer("encode"):
+            self._encode_delta()
+            dist.barrier(group=get_gloo_group())
+        with self._stage_timer("write"):
+            self._write_delta_files()
 
     def _encode_delta(self) -> None:
         """Diff each gathered HF tensor against the snapshot, keeping the changed ones (compressed)
@@ -319,23 +341,35 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         dist.barrier(group=get_gloo_group())
 
     def _record_metrics(self) -> None:
-        """All-reduce the byte counts and record changed-fraction / wire size; the actor drains
+        """All-reduce the byte counts, gather the per-rank stage walls (keeping the max — a stage's
+        wall time is its slowest rank's), and record everything on rank 0, where the actor drains
         update_weight_metrics onto the step log."""
         counts = torch.tensor(
-            [self.changed_bytes, self.total_bytes, self.wire_bytes],
+            # getattr defaults: the baseline-capture call records stages but never encodes.
+            [getattr(self, "changed_bytes", 0), getattr(self, "total_bytes", 0), getattr(self, "wire_bytes", 0)],
             dtype=torch.int64,
             device=torch.cuda.current_device(),
         )
         dist.all_reduce(counts)
+        gathered: list = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, self._stage_s, group=get_gloo_group())
+        stage_max: dict[str, float] = {}
+        for spans in gathered:
+            for name, seconds in (spans or {}).items():
+                stage_max[name] = max(stage_max.get(name, 0.0), seconds)
         changed, total, wire = counts.tolist()
         if dist.get_rank() == 0:  # only rank 0 logs, so only rank 0 keeps the metrics
-            self.update_weight_metrics["perf/update_weights_density"] = changed / max(total, 1)
-            self.update_weight_metrics["perf/update_weights_wire_bytes"] = wire
+            for name, seconds in sorted(stage_max.items()):
+                self.update_weight_metrics[f"perf/update_weights_{name}_time"] = round(seconds, 3)
+            if total:
+                self.update_weight_metrics["perf/update_weights_density"] = changed / max(total, 1)
+                self.update_weight_metrics["perf/update_weights_wire_bytes"] = wire
             logger.info(
-                "[disk delta v=%s] density=%.2f%% wire=%.2f GB",
+                "[disk delta v=%s] density=%.2f%% wire=%.2f GB stages: %s",
                 self.weight_version,
                 100.0 * changed / max(total, 1),
                 wire / 1e9,
+                " ".join(f"{name}={seconds:.2f}s" for name, seconds in sorted(stage_max.items())),
             )
 
 

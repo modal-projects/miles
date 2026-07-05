@@ -10,6 +10,7 @@ import os
 import shutil
 import struct
 import threading
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -152,14 +153,15 @@ def make_tensor_reader(ckpt_dir: str):
     return read
 
 
-def _apply_version(local_ckpt_dir: str, version_dir: str) -> None:
+def _apply_version(local_ckpt_dir: str, version_dir: str) -> dict | None:
     """Apply one version's delta in place: decompress + apply + checksum each tensor across a thread
-    pool (each writes a distinct mmap region, so the writes don't conflict). Any mismatch raises."""
+    pool (each writes a distinct mmap region, so the writes don't conflict). Any mismatch raises.
+    Returns a per-phase timing/byte breakdown (None when the version was already applied)."""
     with open(os.path.join(version_dir, "model.safetensors.index.json")) as f:
         meta = json.load(f)["metadata"]
     applied = _read_applied_version(local_ckpt_dir)
     if applied == meta["version"]:
-        return
+        return None
     if applied != meta["base_version"]:
         raise RuntimeError(f"out-of-order delta: local at {applied}, delta builds on {meta['base_version']}")
     if meta["compression_format"] != "zstd":
@@ -170,9 +172,12 @@ def _apply_version(local_ckpt_dir: str, version_dir: str) -> None:
     open_mmaps: dict[str, tuple] = {}
     mismatches: list[str] = []
     lock = threading.Lock()
+    # Thread-seconds per phase, summed across workers (wall time is the pool span).
+    thread_s = {"decompress": 0.0, "patch": 0.0, "checksum": 0.0}
     file_bytes: list[bytes] = []  # keep alive: items hold zero-copy views into these
     items: list[tuple] = []  # (name, compressed_view, path, offset, nbytes, want_checksum)
     try:
+        t0 = time.perf_counter()
         for delta_file in sorted(glob.glob(os.path.join(version_dir, "*.safetensors"))):
             with open(delta_file, "rb") as f:
                 blob = f.read()
@@ -193,42 +198,66 @@ def _apply_version(local_ckpt_dir: str, version_dir: str) -> None:
                 items.append(
                     (name, view[data_start + begin : data_start + end], path, offset, nbytes, want_checksums.get(name))
                 )
+        read_s = time.perf_counter() - t0
 
         # prefetch into page cache (evicted during the rollout) so the apply doesn't fault from cold storage
+        t0 = time.perf_counter()
         for _, mm in open_mmaps.values():
             try:
                 mm.madvise(mmap.MADV_WILLNEED)
             except (OSError, AttributeError, ValueError):
                 pass
+        madvise_s = time.perf_counter() - t0
 
         def apply_xor(item) -> None:
             name, compressed, path, offset, nbytes, want = item
             region = np.ndarray((nbytes,), dtype=np.uint8, buffer=open_mmaps[path][1], offset=offset)
             hasher = _new_hasher(algorithm)
             reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(bytes(compressed)))
+            t_dec = t_patch = t_sum = 0.0
             pos = 0
             while pos < nbytes:  # 2 MB chunks stay L2-resident across decompress -> XOR -> checksum
+                t = time.perf_counter()
                 block = reader.read(min(2 << 20, nbytes - pos))
+                t_dec += time.perf_counter() - t
                 if not block:
                     break
                 chunk = np.frombuffer(block, dtype=np.uint8)
+                t = time.perf_counter()
                 region[pos : pos + chunk.size] ^= chunk
+                t_patch += time.perf_counter() - t
+                t = time.perf_counter()
                 hasher.update(region[pos : pos + chunk.size])
+                t_sum += time.perf_counter() - t
                 pos += chunk.size
-            if hasher.hexdigest() != want:
-                with lock:
+            ok = hasher.hexdigest() == want
+            with lock:
+                if not ok:
                     mismatches.append(name)
+                thread_s["decompress"] += t_dec
+                thread_s["patch"] += t_patch
+                thread_s["checksum"] += t_sum
 
         def apply_overwrite(item) -> None:
             name, compressed, path, offset, nbytes, want = item
+            t = time.perf_counter()
             delta = np.frombuffer(zstandard.ZstdDecompressor().decompress(bytes(compressed)), dtype=np.uint8)
+            t_dec = time.perf_counter() - t
             region = np.ndarray((nbytes,), dtype=np.uint8, buffer=open_mmaps[path][1], offset=offset)
             count = int.from_bytes(delta[:4].tobytes(), "little")
             positions = np.frombuffer(delta[4 : 4 + 4 * count].tobytes(), dtype="<u4")
+            t = time.perf_counter()
             region[positions] = delta[4 + 4 * count :]
-            if checksum(algorithm, region) != want:
-                with lock:
+            t_patch = time.perf_counter() - t
+            t = time.perf_counter()
+            ok = checksum(algorithm, region) == want
+            t_sum = time.perf_counter() - t
+            with lock:
+                if not ok:
                     mismatches.append(name)
+                thread_s["decompress"] += t_dec
+                thread_s["patch"] += t_patch
+                thread_s["checksum"] += t_sum
 
         if encoding == "xor":
             apply_tensor = apply_xor
@@ -236,8 +265,10 @@ def _apply_version(local_ckpt_dir: str, version_dir: str) -> None:
             apply_tensor = apply_overwrite
         else:
             raise NotImplementedError(f"delta encoding {encoding!r} not supported")
+        t0 = time.perf_counter()
         with ThreadPoolExecutor(max_workers=NUM_WORKERS) as pool:
             list(pool.map(apply_tensor, items))
+        apply_s = time.perf_counter() - t0
         # no msync: the engine reads these pages via the shared cache; durability isn't needed
         # (a host that loses the cache rebuilds from base)
     finally:
@@ -250,15 +281,47 @@ def _apply_version(local_ckpt_dir: str, version_dir: str) -> None:
             f"{sorted(mismatches)[:20]}"
         )
     _write_applied_version(local_ckpt_dir, meta["version"])
+    stats = {
+        "version": meta["version"],
+        "read_s": round(read_s, 3),
+        "madvise_s": round(madvise_s, 3),
+        "apply_s": round(apply_s, 3),
+        "decompress_thread_s": round(thread_s["decompress"], 3),
+        "patch_thread_s": round(thread_s["patch"], 3),
+        "checksum_thread_s": round(thread_s["checksum"], 3),
+        "tensors": len(items),
+        "compressed_bytes": sum(len(compressed) for _, compressed, *_ in items),
+        "touched_bytes": sum(nbytes for *_, nbytes, _ in items),
+    }
+    logger.info(
+        "[disk delta apply] v=%s read=%.2fs madvise=%.2fs apply=%.2fs "
+        "(thread-s: decompress=%.1f patch=%.1f checksum=%.1f) tensors=%d compressed=%.3fGB touched=%.3fGB",
+        meta["version"],
+        stats["read_s"],
+        stats["madvise_s"],
+        stats["apply_s"],
+        stats["decompress_thread_s"],
+        stats["patch_thread_s"],
+        stats["checksum_thread_s"],
+        stats["tensors"],
+        stats["compressed_bytes"] / 1e9,
+        stats["touched_bytes"] / 1e9,
+    )
+    return stats
 
 
-def apply_deltas(local_ckpt_dir: str, delta_root: str, target_version: int) -> None:
+def apply_deltas(local_ckpt_dir: str, delta_root: str, target_version: int) -> list[dict]:
     """Apply the delta chain in order to bring the local checkpoint up to target_version, in place.
     A per-tensor checksum guards every write and any mismatch raises (fail loud, never serve bad
-    weights). Serialized per host by the lock (co-located actors collapse to one apply)."""
+    weights). Serialized per host by the lock (co-located actors collapse to one apply).
+    Returns the per-version phase breakdowns (empty when everything was already applied)."""
+    stats: list[dict] = []
     with _apply_lock(local_ckpt_dir):
         applied = _read_applied_version(local_ckpt_dir)
         if applied is None:
             raise RuntimeError("local checkpoint not materialized")
         for version in range(int(applied) + 1, target_version + 1):
-            _apply_version(local_ckpt_dir, os.path.join(delta_root, f"weight_v{version:06d}"))
+            version_stats = _apply_version(local_ckpt_dir, os.path.join(delta_root, f"weight_v{version:06d}"))
+            if version_stats is not None:
+                stats.append(version_stats)
+    return stats
