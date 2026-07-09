@@ -107,6 +107,8 @@ RUN if [ "${ENABLE_CUDA_13}" = "1" ]; then \
     fi
 
 # TE patches (cu13): B300/GB300 FA2 and backward override fixes
+# te_dequantized_backward_override.patch is a hot fix from
+# https://github.com/NVIDIA/TransformerEngine/pull/3141; drop it after TE v2.18.
 COPY docker/patch/ /tmp/patches/
 RUN if [ "${ENABLE_CUDA_13}" = "1" ] && [ -d /tmp/patches/cu13 ]; then \
       TE_DIR=$(python -c 'import transformer_engine; print(transformer_engine.__path__[0])') && \
