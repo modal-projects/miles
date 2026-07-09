@@ -106,7 +106,7 @@ RUN if [ "${ENABLE_CUDA_13}" = "1" ]; then \
       pip -v install --no-build-isolation "transformer_engine[pytorch]==2.17.0"; \
     fi
 
-# TE patches (cu13): B300/GB300 sm103 FA2 whitelist fix
+# TE patches (cu13): B300/GB300 FA2 and backward override fixes
 COPY docker/patch/ /tmp/patches/
 RUN if [ "${ENABLE_CUDA_13}" = "1" ] && [ -d /tmp/patches/cu13 ]; then \
       TE_DIR=$(python -c 'import transformer_engine; print(transformer_engine.__path__[0])') && \
