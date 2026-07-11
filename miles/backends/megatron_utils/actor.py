@@ -580,7 +580,11 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             reload_process_groups()
 
-        if has_new_engines or not self.weight_updater.is_rollout_engines_fresh():
+        # Publish-only (opaque fleet endpoint) has zero engine handles, so
+        # has_new_engines never fires after startup; the updater must still
+        # connect (with an empty engine list) and publish every sync.
+        publish_only = bool(getattr(self.args, "rollout_endpoint_url", None))
+        if has_new_engines or publish_only or not self.weight_updater.is_rollout_engines_fresh():
             self.weight_updater.connect_rollout_engines(
                 rollout_engines,
                 rollout_engine_lock,

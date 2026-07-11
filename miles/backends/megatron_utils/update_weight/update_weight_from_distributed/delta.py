@@ -68,6 +68,10 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
             from miles.utils.misc import load_function
 
             self._post_write_hook = load_function(args.custom_update_weight_post_write_path)
+        # Publish-only mode: an opaque rollout fleet (--rollout-endpoint-url) exposes no
+        # per-engine handles, so each sync just publishes the version and advances the
+        # `latest` pointer; the fleet pulls on its own schedule.
+        self._publish_only = bool(getattr(args, "rollout_endpoint_url", None))
         self._init_lora(
             args=args,
             model=model,
@@ -104,7 +108,10 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
 
         self.weight_version += 1
         self._publish()
-        self._reload_engines()
+        if self._publish_only:
+            self._announce_version()
+        else:
+            self._reload_engines()
         self._record_metrics()
 
     def _capture_baseline(self) -> None:
@@ -231,6 +238,22 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
             }
             _atomic_write(os.path.join(self._version_dir, "model.safetensors.index.json"), json.dumps(index).encode())
         dist.barrier(group=group)
+
+    def _announce_version(self) -> None:
+        """Publish-only counterpart of _reload_engines: commit the published files, then
+        advance the `latest` pointer. No per-engine RPCs and no success all-gather — the
+        fleet pulls on its own schedule, and per-request weight-version gating on the
+        opaque endpoint is the consumer-side guarantee."""
+        if self._post_write_hook is not None:
+            self._post_write_hook(self.args, self._version_dir, [])
+        dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            _atomic_write(os.path.join(self.delta_dir, "latest"), f"{self.weight_version:06d}".encode())
+            if self._post_write_hook is not None:
+                # the pointer must reach the shared store too, and only after the
+                # version dir it points at is fully visible
+                self._post_write_hook(self.args, self.delta_dir, [])
+        dist.barrier(group=get_gloo_group())
 
     def _reload_engines(self) -> None:
         """Commit the published files, have each engine pull the delta onto every host it spans
