@@ -232,9 +232,16 @@ def init_http_client(args):
 
     _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
     if _http_client is None:
+        # A finite read timeout is REQUIRED in publish-only/disaggregated mode: rollout
+        # /generate requests go to an external (e.g. Modal Flash) pool whose containers
+        # scale up/down independently. With httpx.Timeout(None) a request to a container
+        # that scaled down mid-flight hangs forever, and _post's retry only fires on a
+        # raised exception — so the rollout stalls at ~N% with the engines idle. A finite
+        # read timeout turns the lost request into an error so the retry reroutes it.
+        _read_timeout = float(getattr(args, "rollout_request_timeout_secs", None) or 600.0)
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),
-            timeout=httpx.Timeout(None),
+            timeout=httpx.Timeout(_read_timeout, connect=30.0),
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
@@ -253,6 +260,8 @@ def _init_ray_distributed_post(args):
     if _post_actors:
         return  # Already initialized
 
+    read_timeout = float(getattr(args, "rollout_request_timeout_secs", None) or 600.0)
+
     import ray
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -268,7 +277,9 @@ def _init_ray_distributed_post(args):
             # Lazy creation to this actor's event loop
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=max(1, concurrency)),
-                timeout=httpx.Timeout(None),
+                # Finite read timeout — see init_http_client (an infinite timeout hangs
+                # forever on a rollout request to a scaled-down pool container).
+                timeout=httpx.Timeout(read_timeout, connect=30.0),
             )
 
         async def do_post(self, url, payload, max_retries=60, action="post", headers=None):
