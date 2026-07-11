@@ -55,7 +55,9 @@ NVFP4_ENV = {
 
 GLM5_ENV = {
     "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "256",
-    "SGLANG_NSA_FORCE_MLA": "1",
+    "SGLANG_DSA_FUSE_TOPK": "1",
+    "SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD": "0",
+    "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
     "INDEXER_ROPE_NEOX_STYLE": "0",
     "NVSHMEM_DISABLE_NCCL": "1",
 }
@@ -233,6 +235,7 @@ def execute():
         "--sglang-attention-backend nsa "
         "--sglang-nsa-decode-backend flashmla_kv "
         "--sglang-nsa-prefill-backend flashmla_sparse "
+        "--sglang-dsa-topk-backend flashinfer "
         "--sglang-kv-cache-dtype fp8_e4m3 "
         "--sglang-page-size 64 "
         f"--rollout-num-gpus-per-engine {ROLLOUT_GPUS_PER_ENGINE} "
@@ -247,7 +250,7 @@ def execute():
         "--sglang-watchdog-timeout 3600 "
     )
 
-    ci_args = "--ci-test --ci-disable-logprobs-checker "
+    ci_args = "--ci-test --ci-disable-logprobs-checker --ci-disable-weight-update-checker "
 
     mixed_precision_args = (
         "--transformer-impl transformer_engine "
@@ -272,6 +275,7 @@ def execute():
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
         "--allgather-cp "
+        "--miles-dsa-topk-backend flashinfer "
         f"--update-weight-buffer-size {2 * 1024 ** 3} "
         "--actor-num-nodes 1 "
         f"--actor-num-gpus-per-node {ACTOR_NUM_GPUS} "

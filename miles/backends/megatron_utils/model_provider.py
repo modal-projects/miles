@@ -127,7 +127,16 @@ def get_model_provider_func(
             # caller's pg_collection here, those code paths hit AttributeError.
             if pg_collection is not None:
                 provider._pg_collection = pg_collection
-            return provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+            model = provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+            # Gemma-4 forward returns (logits, loss_mask); keep logits only.
+            _bridge_forward = model.forward
+
+            def _logits_only_forward(*args, **kwargs):
+                out = _bridge_forward(*args, **kwargs)
+                return out[0] if isinstance(out, tuple) else out
+
+            model.forward = _logits_only_forward
+            return model
 
         return wrapped_bridge_provider
 
