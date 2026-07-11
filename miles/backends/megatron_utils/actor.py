@@ -12,7 +12,7 @@ from ray.actor import ActorHandle
 from torch_memory_saver import torch_memory_saver
 
 from miles.ray.train_actor import TrainRayActor
-from miles.utils import tracking_utils, train_dump_utils
+from miles.utils import train_dump_utils
 from miles.utils.argparse_utils import inplace_modify_args
 from miles.utils.audit_utils.event_logger.logger import event_logger_context
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
@@ -29,7 +29,7 @@ from miles.utils.replay_base import all_replay_managers, routing_replay_manager
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils.structured_log import with_logs
-from miles.utils.tracking_utils.tracking import init_tracking
+from miles.utils.tracking_utils.tracking import init_tracking, log as tracking_log
 from miles.utils.types import RolloutBatch
 
 from ...utils.profile_utils import TrainProfiler
@@ -623,7 +623,7 @@ class MegatronTrainRayActor(TrainRayActor):
             pop_metrics = getattr(self.weight_updater, "pop_metrics", None)
             if dist.get_rank() == 0 and pop_metrics and (metrics := pop_metrics()):
                 step = compute_rollout_step(self.args, getattr(self, "_last_rollout_id", 0))
-                tracking_utils.log(self.args, {**metrics, "rollout/step": step}, step_key="rollout/step")
+                tracking_log(self.args, {**metrics, "rollout/step": step}, step_key="rollout/step")
 
             if self.args.ci_test and len(rollout_engines) > 0 and not is_lora_enabled(self.args):
                 engine = random.choice(rollout_engines)
