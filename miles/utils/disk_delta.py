@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import functools
 import glob
 import json
 import os
 import struct
 import zlib
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -58,10 +60,20 @@ def checksum(algorithm: str, buf) -> str:
     return hasher.hexdigest()
 
 
-def _tensor_locations(ckpt_dir: str) -> dict[str, tuple[str, int, int]]:
-    """Map each tensor name to (file, byte offset, nbytes) by reading every safetensors header."""
-    locations: dict[str, tuple[str, int, int]] = {}
-    for path in glob.glob(os.path.join(ckpt_dir, "*.safetensors")):
+@dataclass(frozen=True)
+class SafetensorsTensorMetadata:
+    path: str
+    offset: int
+    nbytes: int
+    dtype: str
+    shape: tuple[int, ...]
+
+
+@functools.cache
+def load_safetensors_metadata(ckpt_dir: str) -> dict[str, SafetensorsTensorMetadata]:
+    """Read tensor locations and specs from safetensors headers without loading tensor data."""
+    metadata: dict[str, SafetensorsTensorMetadata] = {}
+    for path in sorted(glob.glob(os.path.join(ckpt_dir, "*.safetensors"))):
         with open(path, "rb") as f:
             (header_len,) = struct.unpack("<Q", f.read(8))
             header = json.loads(f.read(header_len))
@@ -69,19 +81,25 @@ def _tensor_locations(ckpt_dir: str) -> dict[str, tuple[str, int, int]]:
             if name == "__metadata__":
                 continue
             begin, end = info["data_offsets"]
-            locations[name] = (path, 8 + header_len + begin, end - begin)
-    return locations
+            metadata[name] = SafetensorsTensorMetadata(
+                path=path,
+                offset=8 + header_len + begin,
+                nbytes=end - begin,
+                dtype=str(info["dtype"]),
+                shape=tuple(int(dim) for dim in info["shape"]),
+            )
+    return metadata
 
 
 def make_tensor_reader(ckpt_dir: str):
     """Index the headers once, then return ``read(name) -> uint8 bytes`` that seeks straight to the
     tensor — for reading many tensors without rescanning every header. KeyError if absent."""
-    locations = _tensor_locations(ckpt_dir)
+    metadata = load_safetensors_metadata(ckpt_dir)
 
     def read(name: str) -> np.ndarray:
-        path, offset, nbytes = locations[name]
-        with open(path, "rb") as f:
-            f.seek(offset)
-            return np.frombuffer(f.read(nbytes), dtype=np.uint8)
+        tensor = metadata[name]
+        with open(tensor.path, "rb") as f:
+            f.seek(tensor.offset)
+            return np.frombuffer(f.read(tensor.nbytes), dtype=np.uint8)
 
     return read

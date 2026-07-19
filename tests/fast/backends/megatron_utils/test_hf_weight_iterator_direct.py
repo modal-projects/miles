@@ -105,6 +105,20 @@ def _param(name: str, size: int) -> ParamInfo:
     )
 
 
+def test_fp8_disk_delta_keeps_canonical_checkpoint_scale_layout(direct_module, monkeypatch):
+    del direct_module
+    from miles.backends.megatron_utils.megatron_to_hf.processors import quantizer_fp8
+
+    monkeypatch.setattr(quantizer_fp8, "should_deepgemm_weight_requant_ue8m0", lambda **_: True)
+
+    disk_delta = SimpleNamespace(update_weight_transfer_mode="disk-delta")
+    p2p = SimpleNamespace(update_weight_transfer_mode="p2p")
+    name = "model.layers.0.self_attn.q_proj.weight"
+
+    assert quantizer_fp8._get_scale_format(disk_delta, name, [128, 128]) is None
+    assert quantizer_fp8._get_scale_format(p2p, name, [128, 128]) == "ue8m0"
+
+
 def test_atomic_group_is_single_update_unit_and_packed_together(direct_module, monkeypatch):
     from miles.backends.megatron_utils.update_weight.common import AtomicUpdateGroup
 
