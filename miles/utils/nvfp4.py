@@ -1,3 +1,4 @@
+import inspect
 import os
 
 import torch
@@ -70,7 +71,7 @@ def nvfp4_quantize_1d(
     num_rows, num_cols = weight.shape
     nvfp4_e4m3_max = nvfp4_weight_e4m3_max()
 
-    quantizer = NVFP4Quantizer(
+    quantizer_kwargs = dict(
         rowwise=True,
         columnwise=False,
         with_amax_reduction=False,
@@ -84,6 +85,11 @@ def nvfp4_quantize_1d(
         nvfp4_4over6_err_mode=os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").strip().upper(),
         with_random_sign_mask=False,
     )
+    # The 4over6 / row-scaled kwargs only exist on newer TransformerEngine (>= 2.13). They are
+    # all disabled here, so drop any the installed NVFP4Quantizer does not accept: a no-op on a
+    # TE that has them, and it lets the delta-encode run on TE 2.12.x as well.
+    supported = inspect.signature(NVFP4Quantizer.__init__).parameters
+    quantizer = NVFP4Quantizer(**{k: v for k, v in quantizer_kwargs.items() if k in supported})
 
     quantized = quantizer.quantize(_pad_rows_for_te_quantizer(weight))
     qweight = quantized._rowwise_data[:num_rows, : num_cols // 2].contiguous()
