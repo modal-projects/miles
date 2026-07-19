@@ -281,19 +281,20 @@ def register_train_actor(args) -> None:
 
 
 def register_router(args) -> None:
-    """Called by the rollout manager AFTER start_rollout_servers: only then are
-    ``args.sglang_router_ip/port`` filled in. init_tracking runs earlier in
-    __init__, so the backend cannot register the router at init time."""
+    """Register the router or opaque rollout endpoint with the dashboard."""
     from miles.dashboard import backend
 
     handle = backend.current_collector()
     if handle is None:
         return
-    # a None ip here is a wiring-order bug, not runtime flakiness: fail loud
-    assert args.sglang_router_ip is not None, "register_router must run after start_rollout_servers"
+    endpoint = getattr(args, "rollout_endpoint_url", None)
+    if endpoint is None:
+        # A missing router after start_rollout_servers is a wiring error.
+        assert args.sglang_router_ip is not None, "register_router must run after start_rollout_servers"
+        endpoint = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
     try:
         handle.set_router.remote(
-            f"http://{args.sglang_router_ip}:{args.sglang_router_port}",
+            endpoint,
             use_miles_router=args.use_miles_router,
         )
     except Exception:

@@ -189,7 +189,7 @@ def _next_actor():
     return actor
 
 
-async def _post(client, url, payload, max_retries=60, action="post", headers=None):
+async def _post(client, url, payload, max_retries=60, action="post", headers=None, retry_sleep=1.0):
     retry_count = 0
     while retry_count < max_retries:
         try:
@@ -217,7 +217,7 @@ async def _post(client, url, payload, max_retries=60, action="post", headers=Non
             if retry_count >= max_retries:
                 logger.info(f"Max retries ({max_retries}) reached, failing... (url={url})")
                 raise e
-            await asyncio.sleep(1)
+            await asyncio.sleep(retry_sleep)
             continue
         break
 
@@ -227,14 +227,26 @@ async def _post(client, url, payload, max_retries=60, action="post", headers=Non
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
-    if not args.rollout_num_gpus:
+    publish_only = bool(getattr(args, "rollout_endpoint_url", None))
+    if not args.rollout_num_gpus and not publish_only:
         return
 
-    _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+    if publish_only:
+        # Disaggregated / publish-only: no miles-launched engines, so
+        # rollout_num_gpus == 0 and the GPU-based formula below would be 0 — the
+        # client would never be created (NoneType.post). The external pool bounds
+        # concurrency instead.
+        _client_concurrency = args.sglang_server_concurrency
+    else:
+        _client_concurrency = (
+            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        )
     if _http_client is None:
+        read_timeout = getattr(args, "rollout_request_timeout_secs", None)
+        timeout = httpx.Timeout(read_timeout, connect=30.0) if read_timeout is not None else httpx.Timeout(None)
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),
-            timeout=httpx.Timeout(None),
+            timeout=timeout,
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
@@ -253,6 +265,8 @@ def _init_ray_distributed_post(args):
     if _post_actors:
         return  # Already initialized
 
+    read_timeout = getattr(args, "rollout_request_timeout_secs", None)
+
     import ray
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -268,11 +282,15 @@ def _init_ray_distributed_post(args):
             # Lazy creation to this actor's event loop
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=max(1, concurrency)),
-                timeout=httpx.Timeout(None),
+                timeout=(
+                    httpx.Timeout(read_timeout, connect=30.0) if read_timeout is not None else httpx.Timeout(None)
+                ),
             )
 
-        async def do_post(self, url, payload, max_retries=60, action="post", headers=None):
-            return await _post(self._client, url, payload, max_retries, action=action, headers=headers)
+        async def do_post(self, url, payload, max_retries=60, action="post", headers=None, retry_sleep=1.0):
+            return await _post(
+                self._client, url, payload, max_retries, action=action, headers=headers, retry_sleep=retry_sleep
+            )
 
     # Create actors per node
     created = []
@@ -297,18 +315,22 @@ def _init_ray_distributed_post(args):
 
 
 # TODO may generalize the name since it now contains http DELETE/GET etc (with retries and remote-execution)
-async def post(url, payload, max_retries=60, action="post", headers=None):
+async def post(url, payload, max_retries=60, action="post", headers=None, retry_sleep=1.0):
     # If distributed mode is enabled and actors exist, dispatch via Ray.
     if _distributed_post_enabled and _post_actors:
         try:
             actor = _next_actor()
             if actor is not None:
-                return await actor.do_post.remote(url, payload, max_retries, action=action, headers=headers)
+                return await actor.do_post.remote(
+                    url, payload, max_retries, action=action, headers=headers, retry_sleep=retry_sleep
+                )
         except Exception as e:
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
 
-    return await _post(_http_client, url, payload, max_retries, action=action, headers=headers)
+    return await _post(
+        _http_client, url, payload, max_retries, action=action, headers=headers, retry_sleep=retry_sleep
+    )
 
 
 # TODO unify w/ `post` to add retries and remote-execution

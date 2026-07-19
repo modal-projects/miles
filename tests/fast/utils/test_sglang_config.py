@@ -139,6 +139,18 @@ class TestGetModelUrl:
         )
         assert get_model_url(args, "anything") == "http://10.0.0.1:3000/generate"
 
+    def test_get_model_url_opaque_endpoint(self):
+        from argparse import Namespace
+
+        from miles.rollout.sglang_rollout import get_model_url
+
+        args = Namespace(
+            rollout_endpoint_url="https://rollout.example",
+            sglang_router_ip=None,
+            sglang_router_port=None,
+        )
+        assert get_model_url(args, "anything", "/generate") == "https://rollout.example/generate"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
