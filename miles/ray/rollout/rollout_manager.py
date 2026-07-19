@@ -52,7 +52,11 @@ class RolloutManager:
         self.pg = pg
         self.args = args
         # TODO make args immutable
-        init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+        # An opaque HTTP rollout endpoint launches no router, so use its URL as the rollout addr.
+        router_addr = getattr(args, "rollout_endpoint_url", None) or (
+            f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+        )
+        init_tracking(args, primary=False, router_addr=router_addr)
 
         data_source_cls = load_function(self.args.data_source_path)
         self.data_source = data_source_cls(args)
