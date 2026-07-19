@@ -5,6 +5,8 @@ import re
 import torch
 import torch.nn as nn
 
+from miles.backends.megatron_utils.hf_checkpoint_metadata import load_fp8_weight_specs
+
 try:
     import fake_int4_quant_cuda
 except ImportError:
@@ -263,10 +265,77 @@ def pack_layer(weight, group_size, sym=True):
     return packed_weight, scale, packed_zp
 
 
-def quantize_params_compressed_tensors(converted_named_params, quantization_config):
+def quantize_params_compressed_tensors(args, converted_named_params, quantization_config):
     w_cfg = quantization_config["config_groups"]["group_0"]["weights"]
+    if _is_float8_channel_config(w_cfg):
+        return _quantize_params_fp8_channel(args, converted_named_params, quantization_config)
+
     group_size = w_cfg["group_size"]
     is_symmetric = w_cfg["symmetric"]
+    return _quantize_params_int4(converted_named_params, quantization_config, group_size, is_symmetric)
+
+
+def _is_float8_channel_config(w_cfg):
+    return (
+        w_cfg.get("type") == "float"
+        and w_cfg.get("num_bits") == 8
+        and w_cfg.get("strategy") == "channel"
+        and w_cfg.get("symmetric") is True
+    )
+
+
+def _quantize_params_fp8_channel(args, converted_named_params, quantization_config):
+    # Native FP8 rollout checkpoints define the byte layout disk-delta applies
+    # into, so prefer their tensor set/shapes over config-only ignore rules.
+    native_fp8_specs = load_fp8_weight_specs(args.hf_checkpoint)
+    ignore_rules = quantization_config.get("ignore", [])
+    fp8_min = torch.finfo(torch.float8_e4m3fn).min
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    results = []
+
+    for name, param in converted_named_params:
+        if native_fp8_specs is not None:
+            should_quantize = name in native_fp8_specs
+        else:
+            should_quantize = (
+                name.endswith(".weight")
+                and param.dim() >= 2
+                and not _is_ignored_by_compressed_tensors(name, ignore_rules)
+            )
+        if not should_quantize:
+            results.append((name, param))
+            continue
+
+        if native_fp8_specs is not None:
+            # should_quantize guaranteed membership; transpose to the stored orientation.
+            param = _match_native_fp8_layout(name, param, native_fp8_specs[name].shape)
+        scale = param.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12).to(torch.float32) / fp8_max
+        qweight = (param / scale).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+        results.append((name, qweight))
+        results.append((name.replace(".weight", ".weight_scale"), scale))
+
+    return results
+
+
+def _match_native_fp8_layout(hf_name, param, expected):
+    actual = tuple(param.shape)
+    if actual == expected:
+        return param
+    if param.dim() == 2 and actual == (expected[1], expected[0]):
+        return param.transpose(0, 1).contiguous()
+    raise ValueError(f"Unexpected native FP8 export shape for {hf_name}: got {actual}, expected {expected}")
+
+
+def _is_ignored_by_compressed_tensors(name, ignore_rules):
+    for rule in ignore_rules:
+        if rule.startswith("re:") and re.match(rule[3:], name):
+            return True
+        if name == rule or name.startswith(rule):
+            return True
+    return False
+
+
+def _quantize_params_int4(converted_named_params, quantization_config, group_size, is_symmetric):
     ignore_rules = quantization_config.get("ignore", [])
     # Base names of params the checkpoint actually stores packed (see
     # HfWeightIteratorBridge). The published ignore list of multimodal
@@ -280,10 +349,7 @@ def quantize_params_compressed_tensors(converted_named_params, quantization_conf
         if quantized_basenames is not None:
             should_quantize = name.endswith(".weight") and name.removesuffix(".weight") in quantized_basenames
         else:
-            is_ignored = any(
-                (r.startswith("re:") and re.match(r[3:], name)) or r == name or name.startswith(r)
-                for r in ignore_rules
-            )
+            is_ignored = _is_ignored_by_compressed_tensors(name, ignore_rules)
             should_quantize = not is_ignored and name.endswith(".weight") and param.dim() >= 2
 
         if not should_quantize:

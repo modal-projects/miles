@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from .dtype_utils import to_model_dtype
+
 
 def convert_kimivl_to_hf(args, name, param):
     if name.startswith("module.module.vision_model."):
@@ -28,6 +30,13 @@ def convert_kimi_k25_to_hf(args, name, param):
 
 
 def convert_language_model_to_hf(args, name, param):
+    # This converter was written for a VLM-structured Megatron model (LM nested
+    # under a `language_model.` submodule). We build the LM as a plain DeepSeek-V3
+    # GPTModel (raw mode from MODEL_ARGS), so its params have no `language_model.`
+    # segment (e.g. module.module.embedding.* not module.module.language_model.*).
+    # Normalize so the existing VLM-form name checks below match.
+    if name.startswith("module.module.") and not name.startswith("module.module.language_model."):
+        name = "module.module.language_model." + name[len("module.module.") :]
     if name == "module.module.language_model.embedding.word_embeddings.weight":
         return [("language_model.model.embed_tokens.weight", param)]
     if name == "module.module.language_model.output_layer.weight":
@@ -132,8 +141,10 @@ def convert_language_model_to_hf(args, name, param):
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"language_model.model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
         elif rest == "mlp.router.weight":
-            return [(f"language_model.model.layers.{layer_idx}.mlp.gate.weight", param)]
+            hf_name = f"language_model.model.layers.{layer_idx}.mlp.gate.weight"
+            return [(hf_name, to_model_dtype(args, param, hf_name))]
         elif rest == "mlp.router.expert_bias":
-            return [(f"language_model.model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", param)]
+            hf_name = f"language_model.model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"
+            return [(hf_name, to_model_dtype(args, param, hf_name))]
 
     raise ValueError(f"Unknown parameter name: {name}")
