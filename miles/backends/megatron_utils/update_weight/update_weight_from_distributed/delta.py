@@ -20,7 +20,13 @@ from ray.actor import ActorHandle
 from tqdm import tqdm
 
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.disk_delta import NUM_WORKERS, checksum, make_tensor_reader, overwrite_encode
+from miles.utils.disk_delta import (
+    NUM_WORKERS,
+    checksum,
+    make_tensor_reader,
+    overwrite_encode,
+    sparse_xor_encode,
+)
 from miles.utils.distributed_utils import get_gloo_group
 
 from ..common import _check_weight_sync_results
@@ -326,6 +332,10 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
             if self.delta_encoding == "xor":
                 diff = new ^ old
                 changed = int(np.count_nonzero(diff))
+            elif self.delta_encoding == "xor_sparse":
+                dense_diff = new ^ old
+                changed = int(np.count_nonzero(dense_diff))
+                diff = sparse_xor_encode(dense_diff)
             elif self.delta_encoding == "overwrite":
                 mask = new != old
                 changed = int(np.count_nonzero(mask))

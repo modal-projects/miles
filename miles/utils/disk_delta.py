@@ -25,6 +25,24 @@ def overwrite_encode(new: np.ndarray, changed_mask: np.ndarray) -> np.ndarray:
     return np.concatenate([np.array([pos.size], "<u4").view(np.uint8), pos.view(np.uint8), new[changed_mask]])
 
 
+def sparse_xor_encode(diff: np.ndarray) -> np.ndarray:
+    """Encode sorted changed byte positions and their XOR values.
+
+    Positions and the count are u64 so the format remains valid for individual
+    tensors larger than 4 GiB. The receiver still verifies the checksum of the
+    complete reconstructed target tensor.
+    """
+
+    positions = np.flatnonzero(diff).astype("<u8")
+    return np.concatenate(
+        [
+            np.array([positions.size], "<u8").view(np.uint8),
+            positions.view(np.uint8),
+            diff[positions],
+        ]
+    )
+
+
 class _Adler32:
     """adler32 behind the incremental .update / .hexdigest interface the hash objects expose."""
 

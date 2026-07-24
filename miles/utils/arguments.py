@@ -658,12 +658,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--update-weight-delta-encoding",
-                choices=["xor", "overwrite"],
+                choices=["xor", "xor_sparse", "overwrite"],
                 default="xor",
                 help=(
                     "On-disk delta encoding for disk-delta weight sync. 'xor' (default): new ^ old — "
-                    "smallest wire and fastest, but an involution that must be applied exactly once "
-                    "against the correct base (applying it twice reverts). 'overwrite': changed positions "
+                    "smallest wire and fastest for dense changes, but an involution that must be applied exactly once "
+                    "against the correct base (applying it twice reverts). 'xor_sparse': changed byte positions "
+                    "+ XOR values, avoiding dense zero expansion for element-sparse updates while retaining XOR semantics. "
+                    "'overwrite': changed positions "
                     "+ new absolute values — larger, but idempotent. Both are byte-level and dtype-blind; "
                     "the engine reads the choice from each version's index metadata."
                 ),
