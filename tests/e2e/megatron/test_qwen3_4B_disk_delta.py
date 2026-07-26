@@ -84,7 +84,7 @@ def execute():
 
     # Single node, so the "shared" publish dir and the host-local checkpoint are
     # both plain local paths; the delta pipeline is exercised end to end
-    # (baseline pull + reload, per-sync publish -> /pull_weights apply -> reload).
+    # (baseline staging + reload, per-sync publish -> stage -> reload).
     misc_args = (
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "

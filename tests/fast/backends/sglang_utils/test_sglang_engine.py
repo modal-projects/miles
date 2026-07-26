@@ -1,7 +1,50 @@
 import time
+from types import SimpleNamespace
 
 import pytest
 import requests
+
+
+@pytest.mark.parametrize(
+    ("target_version", "expected"),
+    [
+        (
+            0,
+            {
+                "local_checkpoint_dir": "/local",
+                "base_checkpoint_dir": "/base",
+                "target_version": 0,
+                "destination": "disk",
+            },
+        ),
+        (
+            3,
+            {
+                "local_checkpoint_dir": "/local",
+                "base_checkpoint_dir": "/base",
+                "checkpoint_source_dir": "/deltas",
+                "target_version": 3,
+                "destination": "disk",
+            },
+        ),
+    ],
+)
+def test_stage_weight_update_request(target_version, expected):
+    pytest.importorskip("sglang")
+    from miles.backends.sglang_utils.sglang_engine import SGLangEngine
+
+    engine = SGLangEngine.__new__(SGLangEngine)
+    engine.args = SimpleNamespace(
+        hf_checkpoint="/base",
+        update_weight_disk_dir="/deltas",
+        update_weight_local_checkpoint_dir="/local",
+    )
+    calls = []
+    engine._make_request = lambda endpoint, payload: calls.append((endpoint, payload))
+
+    engine.stage_weight_update(target_version)
+
+    assert calls == [("stage_weight_update", expected)]
 
 
 def test_flush_cache_sleeps_between_pending_request_retries(monkeypatch):

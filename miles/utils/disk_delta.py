@@ -16,7 +16,7 @@ NUM_WORKERS = min(32, (os.cpu_count() or 8))
 
 # Trainer-side (publish) helpers for disk-level delta weight sync. The receive side —
 # materializing the host-local checkpoint and applying published deltas in place — lives in
-# the engine behind its /pull_weights endpoint (sglang.srt.weight_sync.local_checkpoint), so it
+# the engine's staged disk-checkpoint path, so it
 # runs on every host of a multi-node engine while miles only talks to one endpoint.
 
 

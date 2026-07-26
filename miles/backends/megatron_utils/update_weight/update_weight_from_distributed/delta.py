@@ -32,10 +32,9 @@ logger = logging.getLogger(__name__)
 class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
     """
     Delta weight sync over a shared filesystem. Source ranks diff each gathered HF tensor against
-    a CPU snapshot of the previous sync and publish the changes as a canonical HF checkpoint dir;
-    each engine's /pull_weights fans the apply out to every host it spans, then the engine reloads
-    the patched local checkpoint via the ordinary update_weights_from_disk path. miles only ever
-    talks to one endpoint per engine, so multi-node serving needs nothing extra.
+    a CPU snapshot of the previous sync and publish the changes as a canonical HF checkpoint
+    directory. Miles-managed engines stage the update on every host before reloading; an opaque
+    rollout fleet consumes the publication independently.
     """
 
     def __init__(
@@ -72,7 +71,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
             self._post_write_hook = load_function(args.custom_update_weight_post_write_path)
         # Publish-only mode: an opaque rollout fleet (--rollout-endpoint-url) exposes no
         # per-engine handles, so each sync just publishes the version and advances the
-        # `latest` pointer; the fleet pulls on its own schedule.
+        # `latest` pointer; the fleet consumes it on its own schedule.
         self._publish_only = bool(getattr(args, "rollout_endpoint_url", None))
         self._init_lora(
             args=args,
@@ -95,9 +94,9 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         engine_gpu_counts: Sequence[int] | None = None,
         engine_gpu_offsets: Sequence[int] | None = None,
     ) -> None:
-        # No NCCL groups: the transport is the shared filesystem. The rollout_engine_lock the
-        # NCCL path uses isn't needed either — the engine-side apply is serialized by a per-host
-        # flock behind /pull_weights.
+        # No NCCL groups: the transport is the shared filesystem. The rollout
+        # engine lock used by the NCCL path is unnecessary because SGLang
+        # serializes weight stages.
         self.rollout_engines = rollout_engines
         self._connection_stale = False
         self._group_name = "miles-disk-delta"
@@ -128,16 +127,18 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         stale stream from a prior run. Seeds from hf_checkpoint — what each host materializes its
         base from — so the invariant ``snapshot == engine base`` holds even where the megatron->HF
         round-trip trims vocab-padding rows (embed/lm_head). A tensor absent there (rare) falls back
-        to the gathered value. pull_weights(0) makes each host materialize its local base now,
-        overlapped with the snapshot gather, so the first real sync only pays the delta apply."""
+        to the gathered value. For miles-managed engines, version-0 staging is
+        overlapped with the snapshot gather. An opaque fleet initializes its own
+        update destination independently."""
         # a prior run's versions would apply against the wrong base; start the dir clean
-        pulls = []
+        assert self.rollout_engines is not None
+        stage_handles = []
         if dist.get_rank() == 0:
             shutil.rmtree(self.delta_dir, ignore_errors=True)
             os.makedirs(self.delta_dir, exist_ok=True)
             if self._post_write_hook is not None:
                 self._post_write_hook(self.args, self.delta_dir, list(self.rollout_engines))
-            pulls = [engine.pull_weights.remote(target_version=0) for engine in self.rollout_engines]
+            stage_handles = [engine.stage_weight_update.remote(target_version=0) for engine in self.rollout_engines]
         dist.barrier(group=get_gloo_group())
 
         read_hf = make_tensor_reader(self.args.hf_checkpoint)  # index the HF headers once
@@ -154,11 +155,11 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
 
         self._for_each_hf_bucket(seed_bucket)
         if dist.get_rank() == 0:
-            _check_weight_sync_results(ray.get(pulls), is_lora=False)
+            _check_weight_sync_results(ray.get(stage_handles), is_lora=False)
             if self.args.check_weight_update_equal:
                 # The weights checker resets engine tensors at startup and compares after the
                 # first sync, expecting it to rewrite every tensor. The baseline publishes
-                # nothing, so reload the just-pulled base checkpoint to restore engine state
+                # nothing, so reload the just-staged base checkpoint to restore engine state
                 # (and set the engine weight version the CI equality check expects).
                 results = ray.get(
                     [
@@ -251,7 +252,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
     def _announce_version(self) -> None:
         """Publish-only counterpart of _reload_engines: commit the published files, then
         advance the `latest` pointer. No per-engine RPCs and no success all-gather — the
-        fleet pulls on its own schedule, and per-request weight-version gating on the
+        fleet consumes updates on its own schedule, and per-request weight-version gating on the
         opaque endpoint is the consumer-side guarantee."""
         if self._post_write_hook is not None:
             self._post_write_hook(self.args, self._version_dir, [])
@@ -265,15 +266,16 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         dist.barrier(group=get_gloo_group())
 
     def _reload_engines(self) -> None:
-        """Commit the published files, have each engine pull the delta onto every host it spans
-        (checksum-verified), then reload the engines. The pull is disk-only, so it runs before
-        pause and overlaps generation."""
+        """Commit the published files, stage the checksum-verified delta on every engine host,
+        then reload the engines. Staging runs before the pause and overlaps generation."""
         if self._post_write_hook is not None:
             self._post_write_hook(self.args, self._version_dir, list(self.rollout_engines))
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
-            pulls = ray.get([engine.pull_weights.remote(self.weight_version) for engine in self.rollout_engines])
-            _check_weight_sync_results(pulls, is_lora=False)
+            stage_results = ray.get(
+                [engine.stage_weight_update.remote(self.weight_version) for engine in self.rollout_engines]
+            )
+            _check_weight_sync_results(stage_results, is_lora=False)
             mode = self.args.pause_generation_mode
             ray.get([engine.pause_generation.remote(mode=mode) for engine in self.rollout_engines])
             if mode != "in_place":

@@ -673,11 +673,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Rollout-host-local directory (e.g. NVMe) holding a full HF checkpoint kept in "
-                    "sync by each engine's /pull_weights: every host seeds it from the engine's model "
+                    "sync by engine-side staging: every host seeds it from the engine's model "
                     "path and patches published deltas in place, and the engines reload from it. "
                     "Required for --update-weight-transfer-mode=disk-delta. The read-side counterpart "
                     "of --custom-update-weight-post-write-path is the engine's "
-                    "--sglang-custom-pull-weights-pre-read-hook."
+                    "--checkpoint-source-refresh-hook."
                 ),
             )
             parser.add_argument(

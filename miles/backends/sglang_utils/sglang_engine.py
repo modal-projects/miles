@@ -528,18 +528,19 @@ class SGLangEngine(RayActor):
             payload["skip_tensor_list"] = skip_list
         return self._make_request("weights_checker", payload)
 
-    def pull_weights(self, target_version: int):
-        """Have the engine sync every host it spans to target_version: each host pulls the
-        published weights (a full checkpoint copied as-is, or deltas verified per-tensor and
-        applied onto the local checkpoint) into its local checkpoint dir. The engine reloads
-        it afterwards via update_weights_from_disk."""
+    def stage_weight_update(self, target_version: int):
+        """Stage a verified disk checkpoint on every host in the engine."""
+        payload = {
+            "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
+            "base_checkpoint_dir": self.args.hf_checkpoint,
+            "target_version": target_version,
+            "destination": "disk",
+        }
+        if target_version > 0:
+            payload["checkpoint_source_dir"] = self.args.update_weight_disk_dir
         return self._make_request(
-            "pull_weights",
-            {
-                "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
-                "source_dir": self.args.update_weight_disk_dir,
-                "target_version": target_version,
-            },
+            "stage_weight_update",
+            payload,
         )
 
     def update_weights_from_disk(
