@@ -134,6 +134,10 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         assert self.rollout_engines is not None
         stage_handles = []
         if dist.get_rank() == 0:
+            logger.info(
+                "[disk delta] capturing baseline snapshot from %s",
+                self.args.hf_checkpoint,
+            )
             shutil.rmtree(self.delta_dir, ignore_errors=True)
             os.makedirs(self.delta_dir, exist_ok=True)
             if self._post_write_hook is not None:
@@ -180,10 +184,9 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
     def _for_each_hf_bucket(self, bucket_func: Callable[[list[tuple[str, torch.Tensor]], tqdm | None], None]) -> None:
         """Feed every gathered HF bucket through ``bucket_func``: the base-class TP pass then the
         EP pass. All ranks join the gathers; ``bucket_func`` only runs on source ranks."""
-        pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
-        self._gather_and_update_non_expert_weights(bucket_func, pbar)
+        self._gather_and_update_non_expert_weights(bucket_func)
         dist.barrier(group=get_gloo_group())
-        self._gather_and_update_expert_weights(bucket_func, pbar)
+        self._gather_and_update_expert_weights(bucket_func)
         dist.barrier(group=get_gloo_group())
 
     def _publish(self) -> None:
