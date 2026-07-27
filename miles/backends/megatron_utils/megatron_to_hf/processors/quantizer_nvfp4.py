@@ -1,3 +1,4 @@
+import fnmatch
 import re
 
 import torch
@@ -28,7 +29,7 @@ def _is_ignored(name: str, ignore_rules: list[str]) -> bool:
             if re.match(rule[3:], name):
                 return True
             continue
-        if name == rule or name.startswith(f"{rule}."):
+        if fnmatch.fnmatchcase(name, rule) or name.startswith(f"{rule}."):
             return True
     return False
 

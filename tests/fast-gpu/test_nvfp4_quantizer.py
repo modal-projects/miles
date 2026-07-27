@@ -119,6 +119,33 @@ def test_nvfp4_quantize_params_respects_extra_high_precision_layers_megatron():
     assert out is converted_named_params
 
 
+def test_nvfp4_quantize_params_respects_modelopt_glob_ignore():
+    megatron_name = "decoder.layers.3.mlp.shared_experts.linear_fc1.weight"
+    hf_prefix = "model.layers.3.mlp.shared_experts"
+    weight = torch.randn((4, NVFP4_GROUP_SIZE), dtype=torch.bfloat16)
+    converted_named_params = [
+        (f"{hf_prefix}.gate_proj.weight", weight),
+        (f"{hf_prefix}.up_proj.weight", weight),
+    ]
+
+    out = quantize_params_nvfp4(
+        args=None,
+        megatron_name=megatron_name,
+        converted_named_params=converted_named_params,
+        quantization_config={
+            "quant_algo": "NVFP4",
+            "quant_method": "modelopt",
+            "ignore": ["model.layers.3.mlp.shared_experts*"],
+        },
+    )
+
+    assert [name for name, _ in out] == [
+        f"{hf_prefix}.gate_proj.weight",
+        f"{hf_prefix}.up_proj.weight",
+    ]
+    assert all(tensor is weight for _, tensor in out)
+
+
 @pytest.mark.parametrize("layer_idx", [0, 3])
 def test_nvfp4_quantize_params_respects_first_last_layers_bf16(layer_idx):
     weight = torch.randn((4, NVFP4_GROUP_SIZE), dtype=torch.bfloat16)
