@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
 from miles.utils import object_store
+from miles.utils.async_utils import run as run_async
 from miles.utils.audit_utils.event_analyzer import analyzer as event_analyzer
 from miles.utils.audit_utils.event_logger import checkpoint as event_logger_checkpoint
 from miles.utils.audit_utils.process_identity import RolloutManagerProcessIdentity
@@ -110,6 +112,10 @@ class RolloutManager:
         return self.args.sglang_router_ip, self.args.sglang_router_port
 
     def dispose(self):
+        if (close := getattr(self.generate_rollout, "close", None)) is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                run_async(result)
         if (close := getattr(self.data_source, "close", None)) is not None:
             close()
         event_analyzer.run_analysis_from_args(self.args)
@@ -322,6 +328,9 @@ class RolloutManager:
     def health_monitoring_pause(self) -> None:
         for monitor in self._health_monitors:
             monitor.pause()
+
+    def health_monitoring_resume(self) -> None:
+        self._health_monitoring_resume()
 
     def _health_monitoring_resume(self) -> None:
         for monitor in self._health_monitors:

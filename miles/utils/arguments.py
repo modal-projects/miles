@@ -556,6 +556,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--async-max-active-groups",
+                type=int,
+                default=None,
+                help=(
+                    "Maximum number of admitted prompt groups in the fully async pool, including "
+                    "both active generation and completed groups waiting for the learner. "
+                    "This independently bounds queued sibling trajectories and group age. "
+                    "None (default) derives 50% headroom above the trajectory concurrency."
+                ),
+            )
+            parser.add_argument(
                 "--custom-generate-function-path",
                 type=str,
                 default=None,
@@ -610,6 +621,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=1,
                 help="Interval for updating the weights",
+            )
+            parser.add_argument(
+                "--update-weights-with-inflight-rollouts",
+                action="store_true",
+                default=False,
+                help=(
+                    "In async training, publish weights as soon as the learner finishes instead of "
+                    "waiting for the next rollout batch. Requires --pause-generation-mode=in_place."
+                ),
             )
             parser.add_argument(
                 "--pause-generation-mode",
@@ -2778,6 +2798,11 @@ def miles_validate_args(args):
         ), "P2P weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
 
+    if args.update_weights_with_inflight_rollouts:
+        assert args.pause_generation_mode == "in_place", (
+            "--update-weights-with-inflight-rollouts requires --pause-generation-mode=in_place"
+        )
+
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (
             "Disk-delta weight transfer mode is not compatible with --colocate. Colocate transfers "
@@ -2862,7 +2887,22 @@ def miles_validate_args(args):
             f"--n-samples-per-prompt ({args.n_samples_per_prompt}): the worker submits whole groups, "
             f"so one group already puts n_samples_per_prompt trajectories in flight"
         )
-
+    if args.async_max_active_groups is not None:
+        trajectory_limit = (
+            args.async_max_concurrent_samples
+            or args.rollout_batch_size * args.n_samples_per_prompt
+        )
+        minimum_groups = (
+            trajectory_limit + args.n_samples_per_prompt - 1
+        ) // args.n_samples_per_prompt
+        assert args.async_max_active_groups >= minimum_groups, (
+            f"--async-max-active-groups ({args.async_max_active_groups}) must be at least "
+            f"ceil(trajectory_limit / n_samples_per_prompt) ({minimum_groups})"
+        )
+        assert args.async_max_active_groups >= args.rollout_batch_size, (
+            f"--async-max-active-groups ({args.async_max_active_groups}) must be at least "
+            f"--rollout-batch-size ({args.rollout_batch_size})"
+        )
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
 

@@ -1,9 +1,11 @@
 # Fully Asynchronous Rollout Example
 
-This example shows a simple way to make rollout generation **fully asynchronous**: a single global worker is created once and then keeps running in the background, continuously pulling prompts and launching generation tasks. Training only needs to fetch already finished results. This removes the per‑step wait that happens in the normal synchronous style.
+This example enables Miles' persistent, completion-ordered rollout producer. It
+keeps generating while the learner trains and returns whichever prompt groups
+finish first.
 
 ## Files
-* `fully_async_rollout.py`: global async worker + `generate_rollout_fully_async` entry.
+* `miles/rollout/fully_async_rollout.py`: the core class-based persistent rollout pool.
 * `run-qwen3-4b-fully_async.sh`: example launch script with Qwen3‑4B.
 
 ## Prerequisite
@@ -14,32 +16,39 @@ First set up model & environment following the Qwen3-4B example.
 cd miles
 bash examples/fully_async/run-qwen3-4b-fully_async.sh
 ```
-You should see log lines like:
-```
-Creating new global async worker...
-Continuous async rollout worker started
-```
+You should see `Started fully-async rollout producer` in the rollout manager log.
 
 ## How It Works (Very Short)
-* First call: create `AsyncRolloutWorker` (thread + asyncio loop).
-* Loop keeps up to `--rollout-batch-size` tasks in flight using `generate_and_rm_group`.
-* Completed groups are pushed into a queue; caller drains until it has enough samples.
-* Worker is stopped automatically at process exit.
+* The class runs on Miles' shared rollout event loop.
+* `--async-max-concurrent-samples` limits live trajectories.
+* The prompt-group pool is derived from that limit with headroom for slow siblings.
+  `--async-max-active-groups` can set an explicit active-plus-completed group bound.
+* Each learner call drains `--rollout-batch-size` completed groups; unfinished groups continue.
+* The completed queue is bounded and applies backpressure when the learner falls behind.
 
 ## Limitations
 * No evaluation mode.
-* Ordering is best effort (sorted at the end by index).
-* Minimal error handling.
+* Selection is completion ordered (then sorted by sample index for presentation).
+* Partial infrastructure failures preserve valid siblings; unusable groups follow
+  the next fresh prompt group to finish.
 
 ## Config Differences (2 Key Points)
-To enable the fully async pattern there are only two changes compared to a normal run:
+To enable the continuous producer there are two required changes compared to a
+normal run:
 
 1. Use the async training driver: `train_async.py` (not `train.py`).
 2. Set the rollout function path:
 	```bash
-	--rollout-function-path fully_async_rollout.generate_rollout_fully_async
+	--rollout-function-path miles.rollout.fully_async_rollout.FullyAsyncRolloutFn
 	```
+
+For immediate weight publication while rollouts remain in flight, also set:
+
+```bash
+--pause-generation-mode in_place \
+--update-weights-with-inflight-rollouts
+```
 
 Why is it still "fully" async although `train_async.py` itself schedules rollouts step‑by‑step?
 
-Because the real generation work is done by a **persistent background worker** created in `generate_rollout_fully_async`. Each call from `train_async.py` only drains already completed samples from the worker's output queue; the worker has been continuously generating since the first call. Thus rollout production (model inference) and training consume happen in parallel with minimal waiting.
+Because the class owns a persistent producer on Miles' shared rollout event loop. Each call from `train_async.py` drains completed samples while the same producer continuously refills the pool.

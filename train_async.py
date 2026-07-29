@@ -93,9 +93,14 @@ async def train(args):
                 os.remove(args.save_trigger_sentinel)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            # sync generate before update weights to prevent update weight in the middle of generation
-            rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
-            rollout_data_next_future = None
+            if not args.update_weights_with_inflight_rollouts:
+                # Legacy async behavior: finish the next rollout batch before
+                # publishing weights so generation never spans an update.
+                rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
+                rollout_data_next_future = None
+            # Fully-async behavior: with in_place pause, publish immediately.
+            # The next rollout future remains live and is consumed at the top
+            # of the following iteration.
             await actor_model.update_weights(rollout_id=rollout_id)
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):

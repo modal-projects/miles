@@ -61,7 +61,7 @@ def execute(args: ScriptArgs):
     )
 
     rollout_args = (
-        "--rollout-function-path fully_async_rollout.generate_rollout_fully_async "
+        "--rollout-function-path miles.rollout.fully_async_rollout.FullyAsyncRolloutFn "
         f"--prompt-data {args.data_dir}/dapo-math-17k/dapo-math-17k.jsonl "
         "--input-key prompt "
         "--label-key label "
