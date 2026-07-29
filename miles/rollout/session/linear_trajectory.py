@@ -6,7 +6,7 @@ from typing import Any
 
 from miles.rollout.session.errors import MessageValidationError, SessionNotFoundError, TokenizationError
 from miles.rollout.session.types import SessionRecord
-from miles.utils.chat_template_utils import assert_messages_append_only_with_allowed_role, message_matches
+from miles.utils.chat_template_utils import assert_messages_append_only_with_allowed_role
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer
 
 logger = logging.getLogger(__name__)
@@ -32,15 +32,32 @@ class LinearTrajectory:
     in which case the session is rolled back at most one assistant step.
 
     Concurrency contract: all mutating methods must be called under ``self.lock``.
+    ``generation_lock`` serializes chat completions for this session across the
+    slow backend proxy phase. It is intentionally separate from ``lock`` so
+    GET/DELETE can still inspect or close a session while inference is running.
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    generation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
     closing: bool = field(default=False, repr=False, compare=False)
     messages: list[dict[str, Any]] = field(default_factory=list)
     records: list[SessionRecord] = field(default_factory=list)
     trajectory_token_ids: list[list[int]] = field(default_factory=list)
     generated_checkpoint_message_ends: list[int] = field(default_factory=list)
+    tools: list[dict[str, Any]] | None = field(default=None, repr=False)
+    chat_template_kwargs: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
     num_assistant: int = 0
+    # Attempt-level inference timing deliberately does not roll back with TITO
+    # checkpoints: a retried or invalid request still consumed rollout
+    # capacity and must remain visible in performance statistics.
+    model_requests: list[dict[str, float | int]] = field(
+        default_factory=list,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def token_ids(self) -> list[int]:
@@ -49,6 +66,31 @@ class LinearTrajectory:
 
     def append_record(self, record: SessionRecord) -> None:
         self.records.append(record)
+
+    def record_model_request(
+        self,
+        *,
+        duration_seconds: float,
+        status_code: int,
+        prompt_tokens: int,
+    ) -> int:
+        """Record one session-server to inference-backend round trip."""
+        self.model_requests.append(
+            {
+                "duration_seconds": float(duration_seconds),
+                "status_code": int(status_code),
+                "prompt_tokens": int(prompt_tokens),
+                "completion_tokens": 0,
+            }
+        )
+        return len(self.model_requests) - 1
+
+    def set_model_request_completion_tokens(
+        self,
+        request_index: int,
+        completion_tokens: int,
+    ) -> None:
+        self.model_requests[request_index]["completion_tokens"] = int(completion_tokens)
 
     def prepare_pretokenized(
         self,
@@ -68,9 +110,13 @@ class LinearTrajectory:
 
         Must be called under ``self.lock``.
         """
+        tools = tools or None
         # 1. Detect agent retries and roll back (at most one assistant step). Retrying the
         #    first turn rolls back to the empty checkpoint, clearing token_ids.
-        self._try_detect_and_rollback_to_assistant_checkpoint(request_messages)
+        self._try_detect_and_rollback_to_assistant_checkpoint(
+            request_messages,
+            tito_tokenizer=tito_tokenizer,
+        )
 
         if not self.token_ids:
             return tito_tokenizer.apply_chat_template(
@@ -80,11 +126,19 @@ class LinearTrajectory:
                 tokenize=True,
             )
 
+        if self.tools != tools:
+            raise MessageValidationError(
+                "tools cannot change within a TITO session"
+            )
+
         # 2. Confirm the (possibly rolled-back) stored messages are a prefix of request,
         #    and that each appended message role is in tito_tokenizer.allowed_append_roles.
         try:
             assert_messages_append_only_with_allowed_role(
-                self.messages, request_messages, tito_tokenizer.allowed_append_roles
+                self.messages,
+                request_messages,
+                tito_tokenizer.allowed_append_roles,
+                matcher=tito_tokenizer.messages_match,
             )
         except ValueError as e:
             raise MessageValidationError(
@@ -105,6 +159,8 @@ class LinearTrajectory:
         prompt_token_ids: list[int],
         completion_token_ids: list[int],
         max_trim_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Store raw token IDs after a successful response.
 
@@ -143,10 +199,18 @@ class LinearTrajectory:
         self.trajectory_token_ids.append(all_token_ids)
         self.generated_checkpoint_message_ends.append(len(request_messages) + 1)
         self.num_assistant = len(self.generated_checkpoint_message_ends)
+        self.tools = tools or None
+        self.chat_template_kwargs = (
+            dict(chat_template_kwargs)
+            if chat_template_kwargs is not None
+            else None
+        )
 
     def _try_detect_and_rollback_to_assistant_checkpoint(
         self,
         request_messages: list[dict[str, Any]],
+        *,
+        tito_tokenizer: TITOTokenizer,
     ) -> None:
         """Detect if *request_messages* diverges from stored history and roll back.
 
@@ -211,7 +275,7 @@ class LinearTrajectory:
 
         match_len = 0
         for i in range(min(len(request_messages), len(stored))):
-            if message_matches(stored[i], request_messages[i]):
+            if tito_tokenizer.messages_match(stored[i], request_messages[i]):
                 match_len = i + 1
             else:
                 break
@@ -239,7 +303,7 @@ class LinearTrajectory:
                 f"request has {len(request_messages)} messages)"
             )
 
-        logger.info(
+        logger.debug(
             "Rolling back session: stored %d messages / %d checkpoints -> "
             "checkpoint %d (messages[:%d]), discarding %d generated checkpoint(s)",
             len(stored),
@@ -294,8 +358,17 @@ class SessionRegistry:
         if not session.token_ids:
             return None
         try:
-            tools = session.records[-1].request.get("tools") if session.records else None
-            expected_ids = self.tito_tokenizer.apply_chat_template(
+            tools = session.tools
+            if tools is None and session.records:
+                # Backward compatibility for records persisted before tools
+                # moved to linear session state.
+                tools = session.records[-1].request.get("tools")
+            tito_tokenizer = self.tito_tokenizer
+            if session.chat_template_kwargs is not None:
+                tito_tokenizer = tito_tokenizer.clone_with_chat_template_kwargs(
+                    session.chat_template_kwargs
+                )
+            expected_ids = tito_tokenizer.apply_chat_template(
                 session.messages,
                 tools=tools,
                 add_generation_prompt=False,

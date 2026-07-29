@@ -2223,6 +2223,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "Controls how token IDs are computed for messages appended after "
                 "the pretokenized prefix in multi-turn agentic sessions.",
             )
+            parser.add_argument(
+                "--tito-session-mismatch-sample-rate",
+                type=float,
+                default=1.0,
+                help="Fraction of completed TITO sessions that run the canonical chat-template mismatch audit.",
+            )
             return parser
 
         def add_user_provided_function_arguments(parser):
@@ -2472,6 +2478,10 @@ def miles_validate_args(args):
             f"--tito-model={args.tito_model} requires --use-session-server; "
             "this flag only configures the session-server TITO middleware."
         )
+    if not 0.0 <= args.tito_session_mismatch_sample_rate <= 1.0:
+        raise ValueError("--tito-session-mismatch-sample-rate must be between 0 and 1")
+    if not args.use_session_server and args.tito_session_mismatch_sample_rate != 1.0:
+        raise ValueError("--tito-session-mismatch-sample-rate requires --use-session-server")
 
     # DEFAULT uses the checkpoint's native or caller-provided template.  Its
     # maximal four-role surface is best-effort rather than a Miles-verified

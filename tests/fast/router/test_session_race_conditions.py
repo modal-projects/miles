@@ -1,13 +1,15 @@
 """E2E session stress tests.
 
-Contract under test (with split-lock / session.closing):
+Contract under test (with a generation lock, split state lock, and session.closing):
 - Phase 1 (prepare) and Phase 3 (state update) hold session.lock briefly;
-  Phase 2 (proxy to SGLang) does NOT hold the lock.
-- Concurrent same-session requests can overlap at the backend (Phase 2),
-  but state updates (Phase 3) are serialized; stale-update guard
-  (expected_num_assistant check) ensures only one concurrent writer wins.
+  Phase 2 (proxy to SGLang) holds only the per-session generation lock.
+- Concurrent same-session requests are serialized across Phase 2. This keeps
+  hidden HTTP retries from returning an unrecorded assistant response and
+  diverging the client history from TITO state.
 - Different sessions can run in parallel (no global lock).
 - Per-session clients can run turn-by-turn without idle gaps while global load stays parallel.
+- GET waits for the session's generation lock so record collection cannot race
+  the final state update.
 - Delete marks session.closing=True, acquires session.lock, then removes.
   Because the lock is not held during Phase 2, delete can proceed while a
   chat request is mid-proxy; the chat's Phase 3 will see closing=True and
@@ -93,14 +95,8 @@ def _chat(url: str, session_id: str, payload: dict, timeout: float = 20.0) -> re
 
 
 class TestSessionConcurrencyContracts:
-    def test_same_session_concurrent_requests_reach_backend(self):
-        """With the split-lock, same-session requests CAN overlap at the backend.
-
-        Phase 2 (proxy) runs without the lock, so concurrent requests are not
-        serialized at the backend level.  Phase 3 state updates are still
-        serialized; the stale-update guard ensures only one writer wins per
-        generation, so no state corruption occurs.
-        """
+    def test_same_session_concurrent_requests_are_serialized(self):
+        """Hidden client retries must not overlap for one TITO session."""
 
         def process_fn(prompt: str) -> ProcessResult:
             return ProcessResult(text="concurrent-ok", finish_reason="stop")
@@ -130,8 +126,7 @@ class TestSessionConcurrencyContracts:
             # All requests should succeed (200) — no 500s.
             assert all(resp.status_code == 200 for resp in responses)
             assert len(env.backend.request_log) == 4
-            # With split-lock, concurrent backend access is expected (not == 1).
-            assert env.backend.max_concurrent >= 1
+            assert env.backend.max_concurrent == 1
 
     def test_different_sessions_can_run_in_parallel(self):
         def process_fn(prompt: str) -> ProcessResult:
@@ -156,6 +151,32 @@ class TestSessionConcurrencyContracts:
             assert all(resp.status_code == 200 for resp in responses)
             assert len(env.backend.request_log) == 6
             assert env.backend.max_concurrent >= 3
+
+    def test_get_waits_for_inflight_generation_state_update(self):
+        def process_fn(prompt: str) -> ProcessResult:
+            return ProcessResult(text="complete-before-get", finish_reason="stop")
+
+        with _router_env(process_fn, latency=0.35) as env:
+            session_id = _create_session(env.url)
+            payload = {"messages": [{"role": "user", "content": "slow turn"}]}
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                chat = pool.submit(_chat, env.url, session_id, payload, 30.0)
+                deadline = time.time() + 5.0
+                while time.time() < deadline and not env.backend.request_log:
+                    time.sleep(0.01)
+                get = pool.submit(
+                    requests.get,
+                    f"{env.url}/sessions/{session_id}",
+                    timeout=30.0,
+                )
+                time.sleep(0.05)
+                assert not get.done()
+
+                assert chat.result(timeout=30.0).status_code == 200
+                records = get.result(timeout=30.0).json()["records"]
+
+            assert len(records) == 1
 
     def test_e2e_pressure_serial_per_session_parallel_globally(self):
         num_sessions = 8

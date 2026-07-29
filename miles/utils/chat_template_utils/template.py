@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Collection
+from collections.abc import Callable
 from typing import Any, Literal
 
 from huggingface_hub import hf_hub_download
@@ -218,6 +219,8 @@ def assert_messages_append_only_with_allowed_role(
     stored_messages: list[dict[str, Any]],
     new_messages: list[dict[str, Any]],
     allowed_append_roles: Collection[str],
+    *,
+    matcher: Callable[[dict[str, Any], dict[str, Any]], bool] = message_matches,
 ) -> None:
     """Assert *new_messages* is an append-only extension of *stored_messages*.
 
@@ -235,7 +238,7 @@ def assert_messages_append_only_with_allowed_role(
         )
 
     for i, stored_msg in enumerate(stored_messages):
-        if not message_matches(stored_msg, new_messages[i]):
+        if not matcher(stored_msg, new_messages[i]):
             diffs = {
                 key: {"stored": repr(stored_msg.get(key))[:200], "new": repr(new_messages[i].get(key))[:200]}
                 for key in _TEMPLATE_RELEVANT_KEYS

@@ -8,6 +8,7 @@ The default implementation renders the complete appended suffix and the next gen
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 try:
@@ -136,6 +137,14 @@ class TITOTokenizer:
             special_token_ids=self.special_token_ids,
             trim_trailing_ids=self.trailing_token_ids or None,
         )
+
+    def messages_match(
+        self,
+        stored: dict[str, Any],
+        new: dict[str, Any],
+    ) -> bool:
+        """Compare replayed messages using this model family's wire rules."""
+        return template.message_matches(stored, new)
 
     def apply_chat_template(
         self,
@@ -343,6 +352,7 @@ class GLM47TITOTokenizer(TITOTokenizer):
 
     max_trim_tokens: int = 1
     _default_assistant_start_str: str = "<|assistant|>"
+    _tool_call_boundary_whitespace = re.compile(r"[ \t\r\n]+(?=<tool_call>)")
 
     def __init__(
         self,
@@ -372,6 +382,28 @@ class GLM47TITOTokenizer(TITOTokenizer):
         if prefix and prefix[-1] in self._ambiguous_boundary_ids:
             prefix = prefix[:-1]
         return prefix + incremental
+
+    def messages_match(
+        self,
+        stored: dict[str, Any],
+        new: dict[str, Any],
+    ) -> bool:
+        """Ignore a known OpenAI-client newline at GLM tool boundaries."""
+
+        def normalize(message: dict[str, Any]) -> dict[str, Any]:
+            content = message.get("content")
+            if (
+                message.get("role") != "assistant"
+                or not isinstance(content, str)
+                or "<tool_call>" not in content
+            ):
+                return message
+            return {
+                **message,
+                "content": self._tool_call_boundary_whitespace.sub("", content),
+            }
+
+        return template.message_matches(normalize(stored), normalize(new))
 
 
 # ---------------------------------------------------------------------------

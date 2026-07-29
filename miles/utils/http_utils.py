@@ -285,7 +285,14 @@ def _init_ray_distributed_post(args):
             )
 
         async def do_post(self, url, payload, max_retries=60, action="post", headers=None):
-            return await _post(self._client, url, payload, max_retries, action=action, headers=headers)
+            return await _post(
+                self._client,
+                url,
+                payload,
+                max_retries,
+                action=action,
+                headers=headers,
+            )
 
     # Create actors per node
     created = []
@@ -316,12 +323,25 @@ async def post(url, payload, max_retries=60, action="post", headers=None):
         try:
             actor = _next_actor()
             if actor is not None:
-                return await actor.do_post.remote(url, payload, max_retries, action=action, headers=headers)
+                return await actor.do_post.remote(
+                    url,
+                    payload,
+                    max_retries,
+                    action=action,
+                    headers=headers,
+                )
         except Exception as e:
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
 
-    return await _post(_http_client, url, payload, max_retries, action=action, headers=headers)
+    return await _post(
+        _http_client,
+        url,
+        payload,
+        max_retries,
+        action=action,
+        headers=headers,
+    )
 
 
 # TODO unify w/ `post` to add retries and remote-execution

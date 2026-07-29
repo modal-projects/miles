@@ -50,7 +50,12 @@ from unittest.mock import MagicMock
 import pytest
 from transformers import AutoTokenizer
 
-from miles.utils.chat_template_utils import MismatchType, apply_chat_template, resolve_fixed_chat_template
+from miles.utils.chat_template_utils import (
+    MismatchType,
+    apply_chat_template,
+    message_matches,
+    resolve_fixed_chat_template,
+)
 from miles.utils.chat_template_utils.tito_tokenizer import (
     ALL_APPEND_ROLES,
     DeepSeekV4TITOTokenizer,
@@ -82,6 +87,47 @@ from miles.utils.test_utils.mock_trajectories import (
 # ---------------------------------------------------------------------------
 
 _TOK_CACHE: dict[tuple[str, str | None], AutoTokenizer] = {}
+
+
+class TestMessageMatches:
+    def test_glm_accepts_client_whitespace_before_tool_sentinel(
+        self,
+        glm47_tito: GLM47TITOTokenizer,
+    ):
+        stored = {
+            "role": "assistant",
+            "content": "</think>Inspecting now.<tool_call>{}</tool_call>",
+        }
+        round_tripped = {
+            "role": "assistant",
+            "content": "</think>Inspecting now.\n\n<tool_call>{}</tool_call>",
+        }
+
+        assert glm47_tito.messages_match(stored, round_tripped)
+
+    def test_generic_matcher_preserves_tool_boundary_whitespace(self):
+        stored = {
+            "role": "assistant",
+            "content": "Inspecting now.<tool_call>{}</tool_call>",
+        }
+        changed = {
+            "role": "assistant",
+            "content": "Inspecting now.\n<tool_call>{}</tool_call>",
+        }
+
+        assert not message_matches(stored, changed)
+
+    def test_rejects_other_assistant_text_changes(self):
+        stored = {
+            "role": "assistant",
+            "content": "</think>Inspecting now.<tool_call>{}</tool_call>",
+        }
+        changed = {
+            "role": "assistant",
+            "content": "</think>Editing now.\n\n<tool_call>{}</tool_call>",
+        }
+
+        assert not message_matches(stored, changed)
 
 
 def _get_tokenizer(model_id: str, tito_type: TITOTokenizerType | None = None) -> AutoTokenizer:

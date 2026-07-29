@@ -27,11 +27,9 @@ def compute_samples_from_openai_records(
     """Convert per-turn session records into training Samples, aligning each
     turn's output tokens against the TITO accumulated token sequence.
 
-    Each record carries its own ``prompt_token_ids`` and ``output_token_ids``
-    (with logprobs).  We want to reuse those per-turn logprobs directly
-    instead of re-decoding, but we must first trim "trailing tokens" — stop
-    tokens the model emitted that the chat template also renders as the next
-    turn's delimiter — to avoid double-counting.
+    Current compact records carry a prompt length and output token logprobs;
+    the prompt is reconstructed from the single accumulated token sequence.
+    Older records containing ``request.input_ids`` remain supported.
 
     See ``TestTITOTrailingTokenTrim`` in
     ``tests/fast/rollout/session/test_samples.py``
@@ -42,7 +40,23 @@ def compute_samples_from_openai_records(
 
     for i, record in enumerate(records):
         is_last = i == len(records) - 1
-        prompt_ids = record.request["input_ids"]
+        prompt_ids = record.request.get("input_ids")
+        if prompt_ids is None:
+            prompt_token_count = (
+                record.prompt_token_count
+                if record.prompt_token_count is not None
+                else record.request.get("prompt_token_count")
+            )
+            if prompt_token_count is None:
+                raise ValueError("session record has neither request.input_ids nor prompt_token_count")
+            if accumulated_token_ids is None:
+                raise ValueError("compact session records require accumulated_token_ids")
+            if not 0 <= prompt_token_count <= len(accumulated_token_ids):
+                raise ValueError(
+                    f"invalid prompt_token_count={prompt_token_count} for accumulated "
+                    f"sequence of {len(accumulated_token_ids)} tokens"
+                )
+            prompt_ids = accumulated_token_ids[:prompt_token_count]
         output_ids = [t[1] for t in record.response["choices"][0]["meta_info"]["output_token_logprobs"]]
 
         trim_count = 0
@@ -74,9 +88,15 @@ def compute_samples_from_openai_records(
             # Step 4: advance cursor past matched output to the next turn
             cursor += matched
 
-        sample = _compute_sample_from_openai_record(args, record, tokenizer, trim_count)
+        sample = _compute_sample_from_openai_record(
+            args,
+            record,
+            tokenizer,
+            trim_count,
+            prompt_token_ids=prompt_ids,
+        )
         attach_lifecycle_metadata(sample, record, records[i - 1] if i else None, turn=i + 1)
-        if is_last and args.save_debug_trajectory_data is not None:
+        if is_last and args.save_debug_trajectory_data is not None and record.request.get("messages"):
             sample.metadata["messages"] = record.request["messages"] + [record.response["choices"][0]["message"]]
         samples.append(sample)
 
@@ -91,13 +111,19 @@ def compute_samples_from_openai_records(
 
 
 def _compute_sample_from_openai_record(
-    args: Namespace, record: SessionRecord, tokenizer, trim_count: int = 0
+    args: Namespace,
+    record: SessionRecord,
+    tokenizer,
+    trim_count: int = 0,
+    *,
+    prompt_token_ids: list[int] | None = None,
 ) -> Sample:
     choice = record.response["choices"][0]
 
-    prompt_token_ids = record.request.get("input_ids")
     if prompt_token_ids is None:
-        raise ValueError("input_ids not found in request — the session server should populate it")
+        prompt_token_ids = record.request.get("input_ids")
+    if prompt_token_ids is None:
+        raise ValueError("prompt token IDs unavailable")
 
     output_token_ids = [item[1] for item in choice["meta_info"]["output_token_logprobs"]]
     output_log_probs = [item[0] for item in choice["meta_info"]["output_token_logprobs"]]
