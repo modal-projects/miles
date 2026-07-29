@@ -11,6 +11,7 @@ import pytest
 from tests.ci.ci_register import register_cpu_ci
 from tests.fast.fixtures.generation_fixtures import GenerateEnv, generation_env, listify, make_sample, run_generate
 
+from miles.rollout.failures import is_infrastructure_failure
 from miles.utils.chat_template_utils import TITOTokenizerType, get_tito_tokenizer
 from miles.utils.processing_utils import load_tokenizer
 from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
@@ -123,8 +124,24 @@ def verify_samples(actual: Sample | list[Sample], expected: list[ExpectedSampleI
         # Session server populates diagnostic metadata (token IDs,
         # trim config, mismatch analysis, dashboard lifecycle timing) that
         # varies with mock setup. Strip these before comparing structure.
-        for key in ("tito_session_mismatch", "accumulated_token_ids", "max_trim_tokens", "lifecycle"):
+        for key in (
+            "tito_session_mismatch",
+            "accumulated_token_ids",
+            "max_trim_tokens",
+            "lifecycle",
+        ):
             actual_partial.metadata.pop(key, None)
+        for key in list(actual_partial.metadata):
+            if (
+                key.startswith(
+                    (
+                        "session_collect/",
+                        "model_request/",
+                    )
+                )
+                or key == "tito_session_mismatch_sampled"
+            ):
+                actual_partial.metadata.pop(key)
         assert actual_partial == expected_item.partial_sample
 
 
@@ -172,9 +189,7 @@ def _strip_pretokenized(requests: list[dict]) -> list[dict]:
 
 SINGLE_TURN_PROMPT = [{"role": "user", "content": "What is 1+1?"}]
 SINGLE_TURN_RESPONSE = "The answer is 2."
-_SINGLE_TURN_PROMPT_TEXT = TOKENIZER.apply_chat_template(
-    SINGLE_TURN_PROMPT, tokenize=False, add_generation_prompt=True, tools=SAMPLE_TOOLS
-)
+_SINGLE_TURN_PROMPT_TEXT = TOKENIZER.apply_chat_template(SINGLE_TURN_PROMPT, tokenize=False, add_generation_prompt=True, tools=SAMPLE_TOOLS)
 SINGLE_TURN_PROMPT_TOKEN_IDS = TOKENIZER(_SINGLE_TURN_PROMPT_TEXT, add_special_tokens=False)["input_ids"]
 SINGLE_TURN_PROMPT_TOKEN_LEN = len(SINGLE_TURN_PROMPT_TOKEN_IDS)
 
@@ -184,9 +199,7 @@ SINGLE_TURN_PROMPT_TOKEN_LEN = len(SINGLE_TURN_PROMPT_TOKEN_IDS)
 
 class TestBasicMultiTurn:
     def test_single_turn_no_tool_call(self, variant, generation_env):
-        generation_env.mock_server.process_fn = lambda _: ProcessResult(
-            text=SINGLE_TURN_RESPONSE, finish_reason="stop"
-        )
+        generation_env.mock_server.process_fn = lambda _: ProcessResult(text=SINGLE_TURN_RESPONSE, finish_reason="stop")
 
         result = _run_generate(variant, generation_env, make_sample(prompt=SINGLE_TURN_PROMPT))
 
@@ -205,9 +218,7 @@ class TestBasicMultiTurn:
                             rollout_log_probs=[-1 / 128 * i for i in range(6)],
                         ),
                     ],
-                    partial_sample=expected_partial_sample(
-                        prompt=SINGLE_TURN_PROMPT, response=SINGLE_TURN_RESPONSE, response_length=6
-                    ),
+                    partial_sample=expected_partial_sample(prompt=SINGLE_TURN_PROMPT, response=SINGLE_TURN_RESPONSE, response_length=6),
                 ),
             ],
         )
@@ -278,9 +289,7 @@ class TestExitConditions:
     def test_abort_preserves_content(self, variant, generation_env):
         if is_agentic_variant(variant):
             pytest.skip("agentic_tool_call does not handle abort finish_reason")
-        generation_env.mock_server.process_fn = lambda _: ProcessResult(
-            text=SINGLE_TURN_RESPONSE, finish_reason="abort"
-        )
+        generation_env.mock_server.process_fn = lambda _: ProcessResult(text=SINGLE_TURN_RESPONSE, finish_reason="abort")
 
         result = _run_generate(variant, generation_env, make_sample(prompt=SINGLE_TURN_PROMPT))
 
@@ -371,9 +380,7 @@ class TestExitConditions:
 
 
 class TestRespectMaxContextLen:
-    @pytest.mark.parametrize(
-        "generation_env", [{"args_kwargs": {"rollout_max_context_len": SINGLE_TURN_PROMPT_TOKEN_LEN}}], indirect=True
-    )
+    @pytest.mark.parametrize("generation_env", [{"args_kwargs": {"rollout_max_context_len": SINGLE_TURN_PROMPT_TOKEN_LEN}}], indirect=True)
     def test_prompt_exceeds_max_context_len_returns_truncated(self, variant, generation_env):
         if is_agentic_variant(variant):
             pytest.skip("TODO: implement")
@@ -391,15 +398,7 @@ class TestRespectMaxContextLen:
 
     @pytest.mark.parametrize(
         "generation_env",
-        [
-            {
-                "args_kwargs": {
-                    "rollout_max_context_len": len(TwoTurnStub.FIRST_PROMPT_TOKEN_IDS)
-                    + token_len(TwoTurnStub.FIRST_RESPONSE)
-                    + token_len(TwoTurnStub.FIRST_TOOL_RESPONSE)
-                }
-            }
-        ],
+        [{"args_kwargs": {"rollout_max_context_len": len(TwoTurnStub.FIRST_PROMPT_TOKEN_IDS) + token_len(TwoTurnStub.FIRST_RESPONSE) + token_len(TwoTurnStub.FIRST_TOOL_RESPONSE)}}],
         indirect=True,
     )
     def test_second_turn_exceeds_max_context_len_returns_truncated(self, variant, generation_env):
@@ -542,9 +541,7 @@ class TestRoutedExpertsMultiTurn:
         def make_routed_experts(prompt_token_ids, response_text):
             total_tokens = len(prompt_token_ids) + token_len(response_text)
             routed_experts_len = total_tokens - 1
-            return np.arange(routed_experts_len * num_layers * moe_router_topk, dtype=np.int32).reshape(
-                routed_experts_len, num_layers, moe_router_topk
-            )
+            return np.arange(routed_experts_len * num_layers * moe_router_topk, dtype=np.int32).reshape(routed_experts_len, num_layers, moe_router_topk)
 
         first_routed_experts = make_routed_experts(first_prompt_token_ids, S.FIRST_RESPONSE)
         second_routed_experts = make_routed_experts(second_prompt_token_ids, S.SECOND_RESPONSE)
@@ -559,9 +556,7 @@ class TestRoutedExpertsMultiTurn:
             return ProcessResult(
                 text=text,
                 finish_reason="stop",
-                meta_info=ProcessResultMetaInfo(
-                    routed_experts=pybase64.b64encode(routed_experts.tobytes()).decode("ascii")
-                ),
+                meta_info=ProcessResultMetaInfo(routed_experts=pybase64.b64encode(routed_experts.tobytes()).decode("ascii")),
             )
 
         generation_env.mock_server.process_fn = process_fn
@@ -627,8 +622,14 @@ class TestAgentMetadata:
 
         sample = result.sample if not isinstance(result.sample, list) else result.sample[-1]
         assert "tito_session_mismatch" in sample.metadata, "tito_session_mismatch should be present in sample metadata"
+        assert "accumulated_token_ids" not in sample.metadata
+        assert "max_trim_tokens" not in sample.metadata
         mismatches = sample.metadata["tito_session_mismatch"]
         assert isinstance(mismatches, list)
+        assert sample.metadata["session_collect/assembly_seconds"] >= 0
+        assert sample.metadata["session_collect/request_seconds"] >= 0
+        assert sample.metadata["session_collect/decode_seconds"] >= 0
+        assert sample.metadata["session_collect/total_seconds"] >= 0
         for m in mismatches:
             assert {"type", "segment_index", "expected_text", "actual_text", "detail"} == set(m.keys())
 
@@ -643,6 +644,22 @@ class TestAgentMetadata:
         for s in samples:
             assert s.metadata.get("instance_id") == "test-123"
             assert "reward" not in s.metadata
+
+    @pytest.mark.parametrize(
+        "generation_env",
+        [{"args_kwargs": {"agentic_return_metadata": {"_miles_abort": True, "exit_status": "infra_error"}}}],
+        indirect=True,
+    )
+    def test_agent_can_abort_after_model_calls(self, variant, generation_env):
+        generation_env.mock_server.process_fn = TwoTurnStub.process_fn
+
+        result = _run_generate(variant, generation_env, make_sample(prompt=TwoTurnStub.PROMPT))
+
+        samples = listify(result.sample)
+        assert len(samples) == 1
+        assert samples[0].status == Sample.Status.ABORTED
+        assert samples[0].metadata["exit_status"] == "infra_error"
+        assert "_miles_abort" not in samples[0].metadata
 
     def test_session_server_identity_forwarded_to_agent_metadata(self, variant, generation_env):
         from miles.utils.test_utils import mock_tools
@@ -674,10 +691,18 @@ class TestAgentCollectionFailure:
     def variant(self, request):
         return request.param
 
-    def test_collect_timeout_aborts_sample_but_other_errors_propagate(
-        self, variant, generation_env, monkeypatch, caplog
+    @pytest.mark.parametrize(
+        "collect_error",
+        [asyncio.TimeoutError(), RuntimeError("assembly failed")],
+    )
+    def test_collect_error_aborts_infrastructure_sample(
+        self,
+        variant,
+        generation_env,
+        monkeypatch,
+        caplog,
+        collect_error,
     ):
-        collect_error = asyncio.TimeoutError()
 
         async def fail_collect(_tracer, _input_sample, *, max_seq_len):
             raise collect_error
@@ -693,11 +718,12 @@ class TestAgentCollectionFailure:
         assert isinstance(result.sample, Sample)
         assert result.sample.status == Sample.Status.ABORTED
         assert input_sample.status == Sample.Status.PENDING
-        assert "Timed out collecting samples" in caplog.text
-
-        collect_error = RuntimeError("assembly failed")
-        with pytest.raises(RuntimeError, match="assembly failed"):
-            _run_generate(variant, generation_env, make_sample(prompt=TwoTurnStub.PROMPT))
+        assert is_infrastructure_failure(result.sample)
+        assert (
+            result.sample.metadata["exit_status"]
+            == "session_sample_collection_error"
+        )
+        assert "Sample collection failed" in caplog.text
 
 
 class TestAgentNoRecords:
@@ -741,3 +767,4 @@ class TestAgentNoRecords:
 
         assert isinstance(result.sample, Sample)
         assert result.sample.status == Sample.Status.ABORTED
+        assert result.sample.metadata["exit_status"] == "no_model_calls"

@@ -260,6 +260,8 @@ class SessionCore:
                 metadata = await self._session_metadata(session_id, session)
                 records = list(session.records)
                 accumulated_token_ids = list(session.token_ids)
+                max_trim_tokens = int(metadata.pop("max_trim_tokens", 0))
+                metadata.pop("accumulated_token_ids", None)
 
         try:
             payload = await asyncio.to_thread(
@@ -267,6 +269,7 @@ class SessionCore:
                 records,
                 accumulated_token_ids,
                 metadata,
+                max_trim_tokens,
                 max_seq_len,
             )
         except (AssertionError, ValueError) as exc:
@@ -282,6 +285,7 @@ class SessionCore:
         records: list[SessionRecord],
         accumulated_token_ids: list[int],
         metadata: dict,
+        max_trim_tokens: int,
         max_seq_len: int | None,
     ) -> bytes:
         assembly_started = time.monotonic()
@@ -297,7 +301,7 @@ class SessionCore:
             records,
             tokenizer,
             accumulated_token_ids=accumulated_token_ids,
-            max_trim_tokens=metadata.get("max_trim_tokens", 0),
+            max_trim_tokens=max_trim_tokens,
         )
         if max_seq_len is not None:
             samples = truncate_samples_by_total_tokens(

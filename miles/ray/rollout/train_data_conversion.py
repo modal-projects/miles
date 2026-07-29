@@ -27,6 +27,8 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "truncated": ValueSpec(codec="ndarray", dtype="int64"),
     "round_number": ValueSpec(codec="ndarray", dtype="int64"),
     "sample_indices": ValueSpec(codec="ndarray", dtype="int64"),
+    "trainable_samples": ValueSpec(codec="ndarray", dtype="bool"),
+    "loss_global_batch_sizes": ValueSpec(codec="ndarray", dtype="int64"),
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
     "metadata": ValueSpec(codec="msgpack_ragged"),
@@ -34,6 +36,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "raw_reward": ValueSpec(codec="auto"),
     "total_lengths": ValueSpec(codec="auto"),
     "dynamic_global_batch_size": ValueSpec(codec="auto"),
+    "prompt_group_sizes": ValueSpec(codec="auto"),
 }
 
 
@@ -86,6 +89,9 @@ def convert_samples_to_train_data(
             sample.loss_mask = [0] * sample.response_length
         loss_masks.append(sample.loss_mask)
     train_data["loss_masks"] = loss_masks
+    trainable_samples = [any(loss_mask) for loss_mask in loss_masks]
+    if not all(trainable_samples):
+        train_data["trainable_samples"] = trainable_samples
 
     # overwriting the raw reward
     if samples[0].metadata and "raw_reward" in samples[0].metadata:
@@ -156,41 +162,66 @@ def _post_process_rewards(
         return f(args, samples)
 
     raw_rewards = [sample.get_reward_value(args) for sample in samples]
-    if args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"] and args.rewards_normalization:
-        # group norm
+    valid_mask = torch.tensor([not sample.remove_sample for sample in samples], dtype=torch.bool)
+
+    # Keep ordinary homogeneous rollouts on Miles' established normalization
+    # path. Explicit group boundaries below exist only for Multi-LoRA or
+    # batches carrying masked infrastructure placeholders.
+    if (
+        valid_mask.all()
+        and prompt_group_sizes is None
+        and args.advantage_estimator
+        in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
+        and args.rewards_normalization
+    ):
         rewards = torch.tensor(raw_rewards, dtype=torch.float)
-        if prompt_group_sizes is not None:
-            # Multi-LoRA: groups may have heterogeneous sizes (per-adapter
-            # n_samples_per_prompt), so normalize within explicit boundaries.
-            assert sum(prompt_group_sizes) == len(
-                raw_rewards
-            ), f"prompt group sizes sum to {sum(prompt_group_sizes)}, but got {len(raw_rewards)} rewards"
-            normalized_groups = []
-            for group_rewards in rewards.split(prompt_group_sizes):
-                centered = group_rewards - group_rewards.mean()
-                if (
-                    args.advantage_estimator in ["grpo", "gspo"]
-                    and args.grpo_std_normalization
-                    and group_rewards.numel() > 1
-                ):
-                    centered = centered / (group_rewards.std() + 1e-6)
-                normalized_groups.append(centered)
-            return raw_rewards, torch.cat(normalized_groups).tolist()
         if rewards.shape[-1] == args.n_samples_per_prompt * args.rollout_batch_size:
             rewards = rewards.reshape(-1, args.n_samples_per_prompt)
         else:
-            # when samples count are not equal in each group
             rewards = rewards.view(-1, rewards.shape[-1])
-        mean = rewards.mean(dim=-1, keepdim=True)
-        rewards = rewards - mean
-
-        if args.advantage_estimator in ["grpo", "gspo"] and args.grpo_std_normalization:
-            std = rewards.std(dim=-1, keepdim=True)
-            rewards = rewards / (std + 1e-6)
-
+        rewards = rewards - rewards.mean(dim=-1, keepdim=True)
+        if (
+            args.advantage_estimator in ["grpo", "gspo"]
+            and args.grpo_std_normalization
+        ):
+            rewards = rewards / (rewards.std(dim=-1, keepdim=True) + 1e-6)
         return raw_rewards, rewards.flatten().tolist()
 
-    return raw_rewards, raw_rewards
+    if prompt_group_sizes is None:
+        group_size = args.n_samples_per_prompt
+        if group_size > 0 and len(samples) % group_size == 0:
+            prompt_group_sizes = [group_size] * (len(samples) // group_size)
+        else:
+            prompt_group_sizes = [len(samples)]
+    assert sum(prompt_group_sizes) == len(
+        raw_rewards
+    ), f"prompt group sizes sum to {sum(prompt_group_sizes)}, but got {len(raw_rewards)} rewards"
+
+    if args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"] and args.rewards_normalization:
+        rewards = torch.tensor(raw_rewards, dtype=torch.float)
+        normalized = torch.zeros_like(rewards)
+        offset = 0
+        for size in prompt_group_sizes:
+            group_rewards = rewards[offset : offset + size]
+            group_valid = valid_mask[offset : offset + size]
+            valid_rewards = group_rewards[group_valid]
+            if valid_rewards.numel():
+                centered = valid_rewards - valid_rewards.mean()
+                if (
+                    args.advantage_estimator in ["grpo", "gspo"]
+                    and args.grpo_std_normalization
+                    and valid_rewards.numel() > 1
+                ):
+                    centered = centered / (valid_rewards.std() + 1e-6)
+                normalized[offset : offset + size][group_valid] = centered
+            offset += size
+        return raw_rewards, normalized.tolist()
+
+    processed_rewards = [
+        reward if is_valid else 0.0
+        for reward, is_valid in zip(raw_rewards, valid_mask.tolist(), strict=True)
+    ]
+    return raw_rewards, processed_rewards
 
 
 def split_train_data_by_dp(args, data, dp_size):
@@ -216,6 +247,7 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
     if adapter_slots is not None:
         partitions = [sorted(p, key=lambda i: adapter_slots[i]) for p in partitions]
 
+    loss_global_batch_sizes = _compute_loss_global_batch_sizes(args, data, partitions, dp_size)
     shards = []
 
     for i in range(dp_size):
@@ -245,6 +277,8 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
                 continue
             val = [data[key][j] for j in partition]
             rollout_data[key] = val
+        if loss_global_batch_sizes is not None:
+            rollout_data["loss_global_batch_sizes"] = loss_global_batch_sizes[i]
         # keys that need to be splited at train side
         for key in [
             "raw_reward",
@@ -262,6 +296,47 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
             rollout_data["n_adapters"] = args.multi_lora_n_adapters
         shards.append(rollout_data)
     return shards
+
+
+def _compute_loss_global_batch_sizes(
+    args,
+    data,
+    partitions,
+    dp_size: int,
+) -> list[list[int]] | None:
+    """Return the effective sample denominator for each local training row.
+
+    Infrastructure placeholders preserve the fixed tensor shape but have a
+    zero loss mask. Normalizing by the configured batch size would therefore
+    shrink every gradient in proportion to the infrastructure failure rate.
+    Compute the denominator after DP partitioning so every microbatch in a
+    training step uses the number of real trajectories in that exact step.
+    """
+    trainable = data.pop("trainable_samples", None)
+    if trainable is None:
+        return None
+
+    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
+    if global_batch_size % dp_size != 0:
+        raise ValueError(
+            f"global_batch_size={global_batch_size} must be divisible by dp_size={dp_size}"
+        )
+    local_batch_size = global_batch_size // dp_size
+    if any(len(partition) % local_batch_size != 0 for partition in partitions):
+        raise ValueError("Each DP partition must contain a whole number of local training batches")
+
+    num_steps = len(partitions[0]) // local_batch_size
+    result = [[] for _ in range(dp_size)]
+    for step in range(num_steps):
+        start = step * local_batch_size
+        end = start + local_batch_size
+        step_indices = [index for partition in partitions for index in partition[start:end]]
+        denominator = sum(bool(trainable[index]) for index in step_indices)
+        if denominator == 0:
+            raise ValueError(f"Training step {step} contains no trainable samples")
+        for rank in range(dp_size):
+            result[rank].extend([denominator] * local_batch_size)
+    return result
 
 
 def process_rollout_data_shard(args, rollout_data):

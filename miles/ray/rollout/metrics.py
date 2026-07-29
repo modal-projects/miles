@@ -70,7 +70,8 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
 
     log_dict = {**(rollout_extra_metrics or {})}
     log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), "rollout/")
-    log_dict |= dict_add_prefix(_compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
+    if "rollout_async/report_window_seconds" not in log_dict:
+        log_dict |= dict_add_prefix(_compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
     if args.log_passrate:
         log_dict |= dict_add_prefix(
             _compute_passrate_from_samples(args, samples),
@@ -83,9 +84,15 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
 
 
 def _compute_metrics_from_samples(args, samples):
+    masked_count = sum(sample.remove_sample for sample in samples)
+    samples = [sample for sample in samples if not sample.remove_sample]
+    if not samples:
+        return {"infra_masked_ratio": 1.0}
+
     response_lengths = [sample.effective_response_length for sample in samples]
 
     log_dict = {}
+    log_dict["infra_masked_ratio"] = masked_count / (len(samples) + masked_count)
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
     log_dict |= _compute_zero_std_metrics(args, samples)
     log_dict |= _compute_spec_metrics(args, samples)
@@ -102,6 +109,13 @@ def _compute_metrics_from_samples(args, samples):
 
     tito_vals = [s.metadata.get("tito_session_mismatch") for s in samples]
     tito_vals = [v for v in tito_vals if v is not None]
+    tito_sampled = [
+        s.metadata.get("tito_session_mismatch_sampled")
+        for s in samples
+        if s.metadata.get("tito_session_mismatch_sampled") is not None
+    ]
+    if tito_sampled:
+        log_dict["tito_session_mismatch_sampled_rate"] = np.mean(tito_sampled).item()
     if tito_vals:
         log_dict["tito_session_mismatch_rate"] = np.mean([len(v) > 0 for v in tito_vals]).item()
         for mtype in ("special_token_count", "special_token_type", "non_assistant_text", "assistant_text"):
@@ -123,6 +137,9 @@ def _compute_metrics_from_samples(args, samples):
 
 
 def _compute_perf_metrics_from_samples(args, samples, rollout_time):
+    samples = [sample for sample in samples if not sample.remove_sample]
+    if not samples:
+        return {"rollout_time": rollout_time}
     non_generation_time = [sample.non_generation_time for sample in samples]
 
     log_dict = {}
@@ -227,17 +244,13 @@ def _compute_passrate_from_samples(args, all_samples: list[Sample]) -> dict[str,
     Called on the rollout side (before convert_samples_to_train_data), so
     normally all samples are present and every group is complete.
     """
+    all_samples = [sample for sample in all_samples if not sample.remove_sample]
     group_size = args.n_samples_per_prompt
     if group_size <= 1:
         return {}
 
     groups = group_by(all_samples, lambda s: s.group_index)
     completed_groups = [g for g in groups.values() if len(g) == group_size]
-    if len(completed_groups) < len(groups):
-        logger.warning(
-            f"pass@k: excluding {len(groups) - len(completed_groups)}/{len(groups)} incomplete "
-            f"groups (fewer than n_samples_per_prompt={group_size} samples)."
-        )
     if not completed_groups:
         return {}
 

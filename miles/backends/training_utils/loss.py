@@ -124,8 +124,19 @@ def loss_function(
           "values" (1D tensor: [count, metric1, metric2, ...]).
     """
     parallel_state = get_parallel_state()
-    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in batch["loss_masks"]])
-    num_samples = len(batch["response_lengths"])
+    has_masked_placeholders = "loss_global_batch_size" in batch
+    if has_masked_placeholders:
+        num_tokens = sum(loss_mask.sum() for loss_mask in batch["loss_masks"])
+        num_samples = sum(
+            int(loss_mask.any().item()) for loss_mask in batch["loss_masks"]
+        )
+    else:
+        # Preserve the standard Miles accounting exactly when every configured
+        # sample participates in the loss.
+        num_tokens = sum(
+            [torch.clamp_min(loss_mask.sum(), 1) for loss_mask in batch["loss_masks"]]
+        )
+        num_samples = len(batch["response_lengths"])
 
     sum_of_sample_mean = get_sum_of_sample_mean(
         batch["total_lengths"],
@@ -155,7 +166,10 @@ def loss_function(
 
     # Here we need to divide by cp_size because to cancel the multiply in Megatron.
     assert args.use_dynamic_global_batch_size == ("dynamic_global_batch_size" in batch)
-    global_batch_size = batch.get("dynamic_global_batch_size", args.global_batch_size)
+    global_batch_size = batch.get(
+        "loss_global_batch_size",
+        batch.get("dynamic_global_batch_size", args.global_batch_size),
+    )
     # Multi-LoRA: samples enter the gradient buffers with weight 1; per-adapter
     # normalization (1/adapter_global_batch_size, a constant known in advance)
     # is applied to the accumulated slot gradient at optimizer-step time.
@@ -177,7 +191,19 @@ def loss_function(
 
     return (
         loss,
-        torch.tensor(num_tokens if args.calculate_per_token_loss else 1, device=logits.device),
+        (
+            torch.as_tensor(
+                torch.clamp_min(num_tokens, 1)
+                if args.calculate_per_token_loss
+                else 1,
+                device=logits.device,
+            )
+            if has_masked_placeholders
+            else torch.tensor(
+                num_tokens if args.calculate_per_token_loss else 1,
+                device=logits.device,
+            )
+        ),
         {
             "keys": list(log.keys()),
             "values": torch.tensor(

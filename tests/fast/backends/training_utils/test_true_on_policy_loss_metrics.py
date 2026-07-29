@@ -73,7 +73,7 @@ def _patch_single_rank_loss_helpers(monkeypatch):
             torch.tensor([0.50, 1.00], dtype=torch.float32),
             torch.tensor([0.10, 0.20], dtype=torch.float32),
             torch.tensor([0.40, 0.80], dtype=torch.float32),
-            0.0,
+            0.45,
         ),
     ],
 )
@@ -120,6 +120,52 @@ def test_train_rollout_logprob_abs_diff_uses_policy_loss_reference_logprobs(
 
     assert torch.isfinite(loss)
     torch.testing.assert_close(metrics["train_rollout_logprob_abs_diff"], torch.tensor(expected_abs_diff))
+
+
+def test_train_rollout_logprob_abs_diff_falls_back_to_loss_forward(monkeypatch):
+    args = _make_args(use_rollout_logprobs=True)
+    train_log_probs = torch.tensor([0.50, 1.00], dtype=torch.float32)
+    rollout_log_probs = torch.tensor([0.40, 0.80], dtype=torch.float32)
+    batch = _make_batch(
+        old_log_probs=torch.tensor([0.10, 0.20], dtype=torch.float32),
+        rollout_log_probs=rollout_log_probs,
+    )
+    del batch["log_probs"]
+
+    monkeypatch.setattr(
+        loss_utils,
+        "get_parallel_state",
+        lambda: SimpleNamespace(tp=SimpleNamespace(group=None)),
+    )
+    _patch_single_rank_loss_helpers(monkeypatch)
+    monkeypatch.setattr(
+        loss_utils,
+        "get_log_probs_and_entropy",
+        lambda *args, **kwargs: {
+            "log_probs": [train_log_probs.clone()],
+            "entropy": [torch.zeros_like(train_log_probs)],
+        },
+    )
+    monkeypatch.setattr(
+        loss_utils,
+        "compute_policy_loss",
+        lambda ppo_kl, advantages, eps_clip, eps_clip_high, eps_clip_c=None: (
+            torch.zeros_like(ppo_kl),
+            torch.zeros_like(ppo_kl),
+        ),
+    )
+
+    _, metrics = loss_utils.policy_loss_function(
+        args,
+        batch,
+        logits=torch.zeros((1, 3, 8), dtype=torch.float32),
+        sum_of_sample_mean=lambda tensor: tensor.float().mean(),
+    )
+
+    torch.testing.assert_close(
+        metrics["train_rollout_logprob_abs_diff"],
+        torch.tensor(0.15),
+    )
 
 
 def test_zero_weighted_entropy_nan_does_not_poison_policy_loss(monkeypatch):

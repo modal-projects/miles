@@ -153,10 +153,17 @@ def get_batch(
     # fetch it here so callers don't have to know. None for non-multi-LoRA runs.
     if "adapter_slots" not in keys:
         keys = [*keys, "adapter_slots"]
+    if "loss_global_batch_sizes" not in keys:
+        keys = [*keys, "loss_global_batch_sizes"]
     batch = data_iterator.get_next(keys)
 
     if "dynamic_global_batch_size" in data_iterator.rollout_data:
         batch["dynamic_global_batch_size"] = data_iterator.rollout_data["dynamic_global_batch_size"]
+    if (loss_global_batch_sizes := batch.pop("loss_global_batch_sizes", None)) is not None:
+        unique_batch_sizes = set(loss_global_batch_sizes)
+        if len(unique_batch_sizes) != 1:
+            raise ValueError(f"A microbatch spans multiple loss denominators: {sorted(unique_batch_sizes)}")
+        batch["loss_global_batch_size"] = unique_batch_sizes.pop()
 
     # No-op safety net if batches reach get_batch without rollout-level preprocessing.
     expand_multimodal_rollout_data_in_place(batch, qkv_format=qkv_format)
