@@ -2235,6 +2235,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "Auto-allocates a single port if not set.",
             )
             parser.add_argument(
+                "--session-server-startup-timeout-seconds",
+                type=float,
+                default=180.0,
+                help=(
+                    "Shared cold-start deadline for the complete session-server process pool. "
+                    "All servers are polled concurrently against this deadline."
+                ),
+            )
+            parser.add_argument(
                 "--tito-model",
                 type=str,
                 default="default",
@@ -2502,6 +2511,8 @@ def miles_validate_args(args):
         raise ValueError("--tito-session-mismatch-sample-rate must be between 0 and 1")
     if not args.use_session_server and args.tito_session_mismatch_sample_rate != 1.0:
         raise ValueError("--tito-session-mismatch-sample-rate requires --use-session-server")
+    if args.session_server_startup_timeout_seconds <= 0:
+        raise ValueError("--session-server-startup-timeout-seconds must be positive")
 
     # DEFAULT uses the checkpoint's native or caller-provided template.  Its
     # maximal four-role surface is best-effort rather than a Miles-verified
@@ -2605,6 +2616,22 @@ def miles_validate_args(args):
     else:
         if args.opd_teacher_load is not None:
             raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
+
+    # An explicit resume request must never silently become a fresh run. This
+    # check has to happen before the fallback below rewrites args.load to the
+    # reference checkpoint.
+    if (
+        args.load is not None
+        and args.exit_on_missing_checkpoint
+        and (
+            not os.path.exists(args.load)
+            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
+        )
+    ):
+        raise FileNotFoundError(
+            f"Resume checkpoint {args.load!r} is missing or has no "
+            "latest_checkpointed_iteration.txt"
+        )
 
     # TODO: During loading, we need to set the start_rollout_id here.
     if args.megatron_to_hf_mode == "bridge":
