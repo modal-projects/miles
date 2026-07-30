@@ -2,6 +2,8 @@ import copy
 import logging
 import multiprocessing
 import random
+import socket
+import time
 import uuid
 
 from sglang_router.launch_router import RouterArgs
@@ -13,6 +15,7 @@ from miles.utils.http_utils import run_router as run_sglang_router
 from miles.utils.http_utils import wait_for_server_ready
 
 logger = logging.getLogger(__name__)
+_SESSION_SERVER_STARTUP_PROGRESS_SECONDS = 15.0
 
 
 def start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int]:
@@ -95,6 +98,56 @@ def _resolve_session_server_ports(raw: list[int] | None) -> list[int]:
     raise ValueError(f"--session-server-port takes one port or a start/end range, got {len(raw)} values: {raw}")
 
 
+def _wait_for_session_server_pool_ready(
+    host: str,
+    processes: list[tuple[int, multiprocessing.Process]],
+    *,
+    timeout: float,
+) -> dict[int, float]:
+    """Poll all session servers against one shared startup deadline."""
+    started = time.monotonic()
+    deadline = started + timeout
+    next_progress = started + _SESSION_SERVER_STARTUP_PROGRESS_SECONDS
+    pending = {port: process for port, process in processes}
+    ready_seconds: dict[int, float] = {}
+
+    while pending:
+        now = time.monotonic()
+        for port, process in list(pending.items()):
+            if not process.is_alive():
+                raise RuntimeError(
+                    f"Session server process for port {port} died after "
+                    f"{now - started:.1f}s ({len(ready_seconds)}/{len(processes)} ready)"
+                )
+            try:
+                with socket.create_connection((host, port), timeout=0.05):
+                    ready_seconds[port] = time.monotonic() - started
+                    del pending[port]
+            except OSError:
+                pass
+
+        now = time.monotonic()
+        if not pending:
+            return ready_seconds
+        if now >= deadline:
+            raise RuntimeError(
+                f"Session-server pool only reached {len(ready_seconds)}/{len(processes)} ready "
+                f"after {timeout:.1f}s; pending ports={sorted(pending)}"
+            )
+        if now >= next_progress:
+            logger.info(
+                "Session-server startup progress: ready=%d/%d elapsed=%.1fs pending=%d",
+                len(ready_seconds),
+                len(processes),
+                now - started,
+                len(pending),
+            )
+            next_progress = now + _SESSION_SERVER_STARTUP_PROGRESS_SECONDS
+        time.sleep(0.1)
+
+    return ready_seconds
+
+
 def start_session_server(args):
     """Start the standalone session servers when ``--use-session-server`` is set.
 
@@ -145,6 +198,33 @@ def start_session_server(args):
     # The per-port map OpenAIEndpointTracer.create reads instance ids from,
     # replacing the per-session /health probe.
     args.session_server_instance_ids = instance_ids
-    for port, process in processes:
-        wait_for_server_ready(ip, port, process, timeout=30)
-    logger.info(f"Session servers launched at {ip}, ports {ports} ({len(ports)} instances)")
+    startup_timeout = float(getattr(args, "session_server_startup_timeout_seconds", 180))
+    try:
+        ready_seconds = _wait_for_session_server_pool_ready(
+            ip,
+            processes,
+            timeout=startup_timeout,
+        )
+    except Exception:
+        # A partial pool cannot preserve session affinity. Reap all children so
+        # a retry cannot collide with stale listeners.
+        for _, process in processes:
+            if process.is_alive():
+                process.terminate()
+        for _, process in processes:
+            process.join(timeout=5)
+        raise
+
+    ordered_readiness = sorted(ready_seconds.values())
+    p50 = ordered_readiness[round((len(ordered_readiness) - 1) * 0.50)]
+    p90 = ordered_readiness[round((len(ordered_readiness) - 1) * 0.90)]
+    logger.info(
+        "Session servers launched at %s, ports %s (%d instances): "
+        "startup_p50=%.1fs startup_p90=%.1fs startup_max=%.1fs",
+        ip,
+        ports,
+        len(ports),
+        p50,
+        p90,
+        max(ordered_readiness),
+    )
