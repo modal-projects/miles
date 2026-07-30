@@ -107,7 +107,7 @@ class OpenAIEndpointTracer:
                 post(
                     self.base_url,
                     {},
-                    max_retries=1,
+                    max_retries=3,
                     action="delete",
                 ),
                 timeout=_SESSION_DELETE_TIMEOUT,

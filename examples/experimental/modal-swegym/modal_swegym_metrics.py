@@ -143,12 +143,6 @@ def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         metadata_prefix="session_collect/",
         metric_prefix="rollout_session",
     )
-    _summarize_sample_metadata(
-        samples,
-        output,
-        metadata_prefix="sample_build/",
-        metric_prefix="rollout_build",
-    )
     _request_metrics(samples, output)
 
     known_statuses = {
@@ -163,6 +157,8 @@ def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         "sandbox_infra_error",
         "session_record_timeout",
         "session_record_request_error",
+        "session_sample_collection_error",
+        "session_create_error",
         "agent_function_exception",
         "no_model_calls",
         "prompt_exceeds_max_seq_len",

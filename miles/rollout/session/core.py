@@ -110,7 +110,7 @@ def _response_to_stream_chunk(response: dict) -> dict:
     One big delta is protocol-legal (streaming deltas concatenate). All
     tool_calls ride in this one chunk with their ``index`` set: some clients
     mis-assemble arguments fragmented across chunks. The chunk carries no
-    ``meta_info``; the training path reads ``GET /sessions/{id}`` instead.
+    ``meta_info``; server-side sample assembly retains the complete response.
     """
     choice = response.get("choices", [{}])[0]
     message = choice.get("message") or {}
@@ -314,10 +314,11 @@ class SessionCore:
                 time.monotonic() - assembly_started
             )
             return encode_samples([], metadata, empty_reason="all_truncated")
+        merged_sample = merge_samples(samples, tokenizer)
         metadata["session_collect/assembly_seconds"] = (
             time.monotonic() - assembly_started
         )
-        return encode_samples([merge_samples(samples, tokenizer)], metadata)
+        return encode_samples([merged_sample], metadata)
 
     async def delete_session(self, session_id: str) -> Response:
         session = self.registry.get_session(session_id)
@@ -464,7 +465,6 @@ class SessionCore:
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
             proxy_body = await asyncio.to_thread(_render_json, request_body)
-            expected_num_assistant = session.num_assistant
         # --- lock released ---
 
         # --- Phase 2: proxy to backend (generation lock held; state lock released) ---
@@ -526,21 +526,6 @@ class SessionCore:
             )
             if session.closing:
                 logger.warning(f"Session {session_id} closed during proxy, skipping state update")
-                return await asyncio.to_thread(
-                    _chat_client_response,
-                    result,
-                    response,
-                    client_stream,
-                )
-
-            if session.num_assistant != expected_num_assistant:
-                logger.warning(
-                    "Session %s state changed during proxy "
-                    "(expected num_assistant=%d, got %d), skipping state update",
-                    session_id,
-                    expected_num_assistant,
-                    session.num_assistant,
-                )
                 return await asyncio.to_thread(
                     _chat_client_response,
                     result,

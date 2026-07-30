@@ -723,6 +723,8 @@ class TestAgentCollectionFailure:
             result.sample.metadata["exit_status"]
             == "session_sample_collection_error"
         )
+        assert "session_sample_collection_error" in result.sample.metadata
+        assert "agent_function_error" not in result.sample.metadata
         assert "Sample collection failed" in caplog.text
 
 

@@ -164,7 +164,6 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
                     "client_model_request_durations_seconds": [2.0, 3.0],
                 },
                 "session_collect/total_seconds": 0.5,
-                "sample_build/total_seconds": 0.2,
                 "model_request/durations_seconds": [1.5, 2.5],
                 "model_request/completion_tokens": 40,
                 "model_request/non_200_count": 0,
@@ -181,7 +180,6 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
                     "client_model_request_durations_seconds": [4.0],
                 },
                 "session_collect/total_seconds": 1.0,
-                "sample_build/total_seconds": 0.4,
                 "model_request/durations_seconds": [3.5],
                 "model_request/completion_tokens": 20,
                 "model_request/non_200_count": 1,
@@ -194,7 +192,6 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
 
     assert metrics["rollout_agent/total_time_mean"] == 15
     assert metrics["rollout_session/total_seconds_mean"] == 0.75
-    assert metrics["rollout_build/total_seconds_mean"] == pytest.approx(0.3)
     assert metrics["rollout_model/request_count"] == 3
     assert metrics["rollout_model/completion_tokens"] == 60
     assert metrics["rollout_model/client_minus_backend_request_count"] == 0

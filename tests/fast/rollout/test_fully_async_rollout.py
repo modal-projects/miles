@@ -480,6 +480,32 @@ async def test_drain_separates_accepted_and_recycled_staleness():
     assert result.metrics["rollout_staleness/recycled_groups"] == 1
 
 
+def test_retry_collapses_per_turn_trajectory_to_original_group_shape():
+    first_turn = Sample(
+        index=4,
+        status=Sample.Status.COMPLETED,
+        response="first",
+        response_length=1,
+        tokens=[1, 2],
+    )
+    later_turn = Sample(
+        index=4,
+        status=Sample.Status.COMPLETED,
+        response="later",
+        response_length=1,
+        tokens=[1, 2, 3],
+    )
+
+    retry_group = fully_async_rollout._prepare_group_for_retry(
+        [[first_turn, later_turn]]
+    )
+
+    assert retry_group == [first_turn]
+    assert first_turn.status == Sample.Status.ABORTED
+    assert first_turn.response == ""
+    assert later_turn.status == Sample.Status.COMPLETED
+
+
 @pytest.mark.asyncio
 async def test_drain_keeps_valid_siblings_from_partial_infrastructure_failure():
     rollout = _rollout(

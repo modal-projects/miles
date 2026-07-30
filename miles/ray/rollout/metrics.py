@@ -70,7 +70,12 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
 
     log_dict = {**(rollout_extra_metrics or {})}
     log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), "rollout/")
-    if "rollout_async/report_window_seconds" not in log_dict:
+    if "rollout_async/report_window_seconds" in log_dict:
+        # In a continuous pool the legacy token-throughput calculation uses
+        # the wrong observation window, but rollout_time remains a useful
+        # compatibility alias for this learner batch's drain wait.
+        log_dict["perf/rollout_time"] = rollout_time
+    else:
         log_dict |= dict_add_prefix(_compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
     if args.log_passrate:
         log_dict |= dict_add_prefix(

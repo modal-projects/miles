@@ -51,6 +51,7 @@ def _aborted_sample(
     session_metadata: dict | None,
     exit_status: str,
     error: Exception | None = None,
+    error_key: str = "agent_function_error",
     infrastructure_failure: bool = True,
 ) -> Sample:
     sample = deepcopy(input_sample)
@@ -68,7 +69,7 @@ def _aborted_sample(
     sample.metadata.update(session_metadata or {})
     sample.metadata["exit_status"] = exit_status
     if error is not None:
-        sample.metadata["agent_function_error"] = (
+        sample.metadata[error_key] = (
             f"{type(error).__name__}: {error}"
         )[:1000]
     return sample
@@ -95,10 +96,14 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             type(error).__name__,
             error,
         )
-        sample = deepcopy(input.sample)
-        sample.status = Sample.Status.ABORTED
-        mark_infrastructure_failure(sample)
-        sample.metadata["exit_status"] = "session_create_error"
+        sample = _aborted_sample(
+            input.sample,
+            agent_metadata=None,
+            session_metadata=None,
+            exit_status="session_create_error",
+            error=error,
+            error_key="session_create_error",
+        )
         sample.metadata["session_create_error_type"] = type(error).__name__
         sample.metadata["session_create/error_seconds"] = time.monotonic() - session_create_started
         return GenerateFnOutput(samples=sample)
@@ -159,6 +164,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             session_metadata=None,
             exit_status="session_sample_collection_error",
             error=error,
+            error_key="session_sample_collection_error",
         )
         return GenerateFnOutput(samples=sample)
 

@@ -124,10 +124,9 @@ def _input_sample() -> Sample:
     )
 
 
-# Overlapping keys lock the application order: agent overrides the input's
-# shared_key; session_metadata (applied last) overrides the agent's
-# max_trim_tokens plant.
-_AGENT_METADATA = {"shared_key": "from-agent", "agent_only": 1, "max_trim_tokens": "agent-plant"}
+# The overlapping key locks the application order: agent metadata overrides
+# the input sample's value.
+_AGENT_METADATA = {"shared_key": "from-agent", "agent_only": 1}
 
 
 async def _make_session(core, records, accumulated) -> str:
@@ -191,7 +190,11 @@ async def test_assembled_sample_golden(core):
     assert m.train_metadata == {"loss": "ppo"}
     assert m.metadata["task"] == "t1"
     assert m.metadata["shared_key"] == "from-agent"
-    assert m.metadata["accumulated_token_ids"] == _ACCUMULATED
+    # Internal assembly inputs stay on the owning server instead of
+    # duplicating a long token sequence in every returned Sample.
+    assert "accumulated_token_ids" not in m.metadata
+    assert "max_trim_tokens" not in m.metadata
+    assert m.metadata["session_collect/assembly_seconds"] >= 0
     assert m.metadata["lifecycle"] == [
         {"t0": None, "t1": 0.0, "turn": 1},
         {"t0": None, "t1": 0.0, "turn": 2, "prev_t1": 0.0},
@@ -229,17 +232,24 @@ async def test_debug_messages_cross_samples_wire(core, monkeypatch):
     ]
 
 
-async def test_session_metadata_matches_get_session(core):
-    """The samples reply and the records GET must expose the same metadata dict
-    (both are built by the extracted _session_metadata helper)."""
+async def test_session_metadata_omits_server_only_assembly_state(core):
+    """Sample replies retain diagnostics but omit server-only assembly inputs."""
     sid = await _make_session(core, _two_turn_records(), _ACCUMULATED)
     _, payload = await _collect_via_op(core, sid)
     reply = decode_samples_and_merge_input_sample(payload, Sample())
 
     response = await core.get_session(sid)
     assert response.status_code == 200
-    assert reply.session_metadata == json.loads(response.body)["metadata"]
-    assert reply.session_metadata["accumulated_token_ids"] == _ACCUMULATED
+    get_metadata = json.loads(response.body)["metadata"]
+
+    assert get_metadata["accumulated_token_ids"] == _ACCUMULATED
+    assert get_metadata["max_trim_tokens"] == 0
+    assert "accumulated_token_ids" not in reply.session_metadata
+    assert "max_trim_tokens" not in reply.session_metadata
+    assert reply.session_metadata["tito_session_mismatch_sampled"] == (
+        get_metadata["tito_session_mismatch_sampled"]
+    )
+    assert reply.session_metadata["session_collect/assembly_seconds"] >= 0
 
 
 # ── empty_reason discriminator ──

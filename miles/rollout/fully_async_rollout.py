@@ -67,6 +67,22 @@ def _reset_for_retry(sample: Sample) -> None:
     clear_infrastructure_failure(sample)
 
 
+def _prepare_group_for_retry(group: Group) -> list[Sample]:
+    """Restore one input trajectory per prompt-group member.
+
+    Some generate functions return a list of per-turn Samples for one input
+    trajectory. DataSource accepts the original flat prompt group, so use that
+    trajectory's first turn as the retry carrier after clearing generated
+    state.
+    """
+    retry_group = []
+    for trajectory in group:
+        sample = trajectory[0] if isinstance(trajectory, list) else trajectory
+        _reset_for_retry(sample)
+        retry_group.append(sample)
+    return retry_group
+
+
 def mask_infrastructure_failures(group: Group) -> tuple[Group | None, int]:
     """Replace infra-aborted trajectories with zero-loss, shape-safe rows.
 
@@ -530,9 +546,8 @@ class FullyAsyncRolloutFn:
                         if newest is not None:
                             recycled_newest_staleness.append(current - newest)
                             recycled_version_spans.append(newest - oldest)
-                        for sample in _iter_samples(group):
-                            _reset_for_retry(sample)
-                        self.data_source.add_samples([group])
+                        retry_group = _prepare_group_for_retry(group)
+                        self.data_source.add_samples([retry_group])
                         stale_groups += 1
                         continue
                     accepted_staleness.append(lag)

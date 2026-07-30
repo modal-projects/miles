@@ -211,7 +211,7 @@ async def test_discard_session_deletes_without_collecting(monkeypatch):
     await tracer.discard_session()
 
     assert calls == [
-        ("delete", tracer.base_url, {"max_retries": 1}),
+        ("delete", tracer.base_url, {"max_retries": 3}),
     ]
 
 
