@@ -768,3 +768,40 @@ class TestAgentNoRecords:
         assert isinstance(result.sample, Sample)
         assert result.sample.status == Sample.Status.ABORTED
         assert result.sample.metadata["exit_status"] == "no_model_calls"
+
+
+@pytest.mark.asyncio
+async def test_agent_session_create_failure_aborts_only_trajectory(monkeypatch):
+    from types import SimpleNamespace
+
+    from miles.rollout.base_types import GenerateFnInput
+    from miles.rollout.failures import is_infrastructure_failure
+    from miles.rollout.generate_hub.agentic_tool_call import generate
+
+    async def fail_create(_args):
+        raise ConnectionError("session server disconnected")
+
+    monkeypatch.setattr(
+        "miles.rollout.generate_hub.agentic_tool_call.OpenAIEndpointTracer.create",
+        fail_create,
+    )
+    args = SimpleNamespace(
+        session_server_ip="127.0.0.1",
+        session_server_ports=[30000],
+    )
+    sample = make_sample(prompt=TwoTurnStub.PROMPT)
+    output = await generate(
+        GenerateFnInput(
+            state=SimpleNamespace(args=args),
+            sample=sample,
+            sampling_params={},
+            evaluation=False,
+        )
+    )
+
+    assert output.samples.status == Sample.Status.ABORTED
+    assert is_infrastructure_failure(output.samples)
+    assert output.samples.metadata["exit_status"] == "session_create_error"
+    assert output.samples.metadata["session_create_error_type"] == "ConnectionError"
+    assert output.samples.metadata["session_create/error_seconds"] >= 0
+    assert sample.status == Sample.Status.PENDING

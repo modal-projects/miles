@@ -83,7 +83,25 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         "agentic_tool_call.generate requires session_server_ip/session_server_ports. "
         "Pass --use-session-server to start the session server."
     )
-    tracer = await OpenAIEndpointTracer.create(input.args)
+    session_create_started = time.monotonic()
+    try:
+        tracer = await OpenAIEndpointTracer.create(input.args)
+    except Exception as error:
+        # Session servers are control-plane infrastructure. A transient
+        # connection failure must invalidate only this trajectory, not the
+        # long-lived fully-async producer (and therefore the whole run).
+        logger.warning(
+            "Failed to create agent session: %s: %s",
+            type(error).__name__,
+            error,
+        )
+        sample = deepcopy(input.sample)
+        sample.status = Sample.Status.ABORTED
+        mark_infrastructure_failure(sample)
+        sample.metadata["exit_status"] = "session_create_error"
+        sample.metadata["session_create_error_type"] = type(error).__name__
+        sample.metadata["session_create/error_seconds"] = time.monotonic() - session_create_started
+        return GenerateFnOutput(samples=sample)
 
     custom_agent_function: Callable = load_function(input.args.custom_agent_function_path)
     assert custom_agent_function is not None, f"Custom agent function {input.args.custom_agent_function_path} not found"
