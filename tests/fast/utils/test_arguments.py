@@ -613,7 +613,7 @@ def test_sglang_parallel_size_aliases_keep_last_value():
 
 def _make_async_ppo_args(**overrides) -> SimpleNamespace:
     defaults = dict(
-        use_critic=True,
+        loss_type="policy_loss",
         use_rollout_logprobs=False,
         use_tis=False,
         keep_old_actor=False,
@@ -623,13 +623,15 @@ def _make_async_ppo_args(**overrides) -> SimpleNamespace:
 
 
 class TestValidateAsyncOffPolicyCorrection:
-    def test_ppo_without_correction_is_rejected(self):
+    def test_policy_loss_without_correction_is_rejected(self):
         with pytest.raises(AssertionError, match="behavior-policy correction"):
             validate_async_off_policy_correction(_make_async_ppo_args())
 
     @pytest.mark.parametrize("flag", ["use_rollout_logprobs", "use_tis", "keep_old_actor"])
-    def test_ppo_with_any_correction_passes(self, flag):
+    def test_policy_loss_with_any_correction_passes(self, flag):
         validate_async_off_policy_correction(_make_async_ppo_args(**{flag: True}))
 
-    def test_non_ppo_estimators_are_unaffected(self):
-        validate_async_off_policy_correction(_make_async_ppo_args(use_critic=False))
+    def test_non_policy_losses_are_unaffected(self):
+        validate_async_off_policy_correction(
+            _make_async_ppo_args(loss_type="sft_loss")
+        )

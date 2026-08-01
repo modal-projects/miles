@@ -105,7 +105,7 @@ async def train(args):
                 os.remove(args.save_trigger_sentinel)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            if not args.update_weights_with_inflight_rollouts:
+            if not args.fully_async:
                 # Legacy async behavior: finish the next rollout batch before
                 # publishing weights so generation never spans an update.
                 rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None

@@ -308,7 +308,16 @@ def policy_loss_function(
     if log_probs.numel() == 0:
         loss += 0 * logits.sum()
 
-    train_scored_log_probs = old_log_probs
+    # `old_log_probs` is the policy-loss anchor and becomes rollout log-probs
+    # under --use-rollout-logprobs. It is therefore not always the score
+    # produced by the training backend. Prefer the explicit pre-update trainer
+    # recomputation when present; fall back to this loss forward for the
+    # efficient no-recompute configuration.
+    train_scored_log_probs = (
+        torch.cat(batch["log_probs"], dim=0)
+        if batch.get("log_probs")
+        else log_probs
+    )
     train_rollout_logprob_abs_diff = None
     train_rollout_kl = None
     if "rollout_log_probs" in batch and batch["rollout_log_probs"]:

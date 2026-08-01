@@ -20,6 +20,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Iterator
+from copy import deepcopy
 
 import httpx
 
@@ -30,6 +31,13 @@ from miles.rollout.base_types import (
     RolloutFnInput,
     RolloutFnOutput,
     RolloutFnTrainOutput,
+)
+from miles.rollout.failures import (
+    clear_failure_classification,
+    is_infrastructure_failure,
+    is_loss_masked_failure,
+    is_non_retryable_failure,
+    mark_loss_masked_failure,
 )
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from miles.rollout.inference_rollout.inference_rollout_common import (
@@ -67,8 +75,52 @@ def _first_sample(group: Group) -> Sample:
 
 def group_oldest_weight_version(group: Group) -> int | None:
     """Return the minimum weight version across all trajectories and turns in a group."""
-    versions = [v for s in _iter_samples(group) if (v := s.oldest_weight_version) is not None]
+    versions = [version for sample in _iter_samples(group) if not sample.remove_sample and (version := sample.oldest_weight_version) is not None]
     return min(versions) if versions else None
+
+
+def _mask_non_retryable_failures(group: Group) -> tuple[Group | None, int, int]:
+    """Make terminal failures shape-safe without adding them to the loss.
+
+    A zero-loss placeholder retains the fixed prompt-group shape while reward
+    normalization uses only real siblings. Two real siblings are required for
+    a group-relative update; otherwise the entire group is dropped.
+    """
+    if any(isinstance(item, list) for item in group):
+        return None, 0, 0
+
+    samples = list(_iter_samples(group))
+    failures = [sample for sample in samples if sample.status == Sample.Status.ABORTED and is_non_retryable_failure(sample)]
+    valid = [sample for sample in samples if sample.status != Sample.Status.ABORTED and sample.reward is not None and sample.response_length > 0 and len(sample.tokens) >= sample.response_length]
+    if not failures or len(valid) < 2:
+        return None, 0, 0
+
+    template = min(valid, key=lambda sample: (sample.response_length, len(sample.tokens)))
+    replacements: dict[int, Sample] = {}
+    infrastructure_count = 0
+    for failed in failures:
+        masked = deepcopy(template)
+        masked.index = failed.index
+        masked.group_index = failed.group_index
+        masked.prompt = failed.prompt
+        masked.label = failed.label
+        masked.metadata = {
+            **failed.metadata,
+            "_fully_async_mask_template_index": template.index,
+        }
+        mark_loss_masked_failure(masked)
+        masked.remove_sample = True
+        masked.status = Sample.Status.COMPLETED
+        masked.reward = 0.0
+        masked.routing_key = failed.routing_key
+        replacements[id(failed)] = masked
+        infrastructure_count += int(is_infrastructure_failure(failed))
+
+    return (
+        [replacements.get(id(sample), sample) for sample in samples],
+        len(failures),
+        infrastructure_count,
+    )
 
 
 class _CachedWeightVersion:
@@ -88,7 +140,13 @@ class _CachedWeightVersion:
         try:
             data = await asyncio.wait_for(get(url), timeout=WEIGHT_VERSION_QUERY_TIMEOUT_SECS)
             self._value = int(data["weight_version"])
-        except (httpx.HTTPError, asyncio.TimeoutError) as e:
+        except (
+            httpx.HTTPError,
+            asyncio.TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as e:
             # Transient router unavailability; the staleness filter is best-effort.
             logger.debug(f"Failed to query engine weight version: {e}")
         finally:
@@ -175,16 +233,34 @@ class FullyAsyncRolloutFn:
 
     async def _worker_loop(self):
         active: set[asyncio.Task] = set()
-        while True:
-            await self._producer_resumed.wait()
-            self._scheduler.arm()
-            while self._scheduler.has_capacity(pending_groups=len(active), group_budget=self._max_in_flight_groups()):
-                active.add(self._submit_one_group())
-            done, active = await self._scheduler.wait_for_progress(active)
-            for task in done:
-                # Blocks when the queue is full: training lagging behind rollout
-                # production pauses submission instead of growing the queue unboundedly.
-                await self._output.put(task.result())
+        try:
+            while True:
+                await self._producer_resumed.wait()
+                self._scheduler.arm()
+                while self._scheduler.has_capacity(
+                    pending_groups=len(active),
+                    group_budget=self._max_in_flight_groups(),
+                ):
+                    active.add(self._submit_one_group())
+                done, active = await self._scheduler.wait_for_progress(active)
+                for task in done:
+                    # Blocks when the queue is full: training lagging behind rollout
+                    # production pauses submission instead of growing the queue unboundedly.
+                    await self._output.put(task.result())
+        finally:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+
+    async def close(self) -> None:
+        """Stop the persistent producer and every in-flight prompt group."""
+        worker = self._worker
+        if worker is None:
+            return
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        self._worker = None
 
     # -------------------------- consumer --------------------------
 
@@ -204,20 +280,22 @@ class FullyAsyncRolloutFn:
                     raise RuntimeError("fully-async rollout worker exited without an exception")
                 if queue_get in done:
                     return queue_get.result()
-                logger.warning(
-                    f"No completed rollout groups for {NO_PROGRESS_WARN_SECS}s (queued: {self._output.qsize()})"
-                )
+                logger.warning(f"No completed rollout groups for {NO_PROGRESS_WARN_SECS}s (queued: {self._output.qsize()})")
         finally:
             if not queue_get.done():
                 queue_get.cancel()
 
     async def _drain(self, rollout_id: int) -> RolloutFnTrainOutput:
         args = self.args
-        assert args.rollout_global_dataset
+        if not args.rollout_global_dataset:
+            raise ValueError("FullyAsyncRolloutFn requires --rollout-global-dataset")
 
         target_data_size = args.rollout_batch_size
         data: list[Group] = []
         aborted_groups_recycled = 0
+        non_retryable_groups_dropped = 0
+        non_retryable_trajectories_masked = 0
+        infrastructure_trajectories_masked = 0
         stale_groups_recycled = 0
         staleness_values: list[int] = []
         metric_gatherer = MetricGatherer()
@@ -227,11 +305,21 @@ class FullyAsyncRolloutFn:
             prompt_group, group = await self._next_group()
             assert len(group) == args.n_samples_per_prompt
 
-            # A weight update paused generation mid-group: return it for re-sampling.
-            if any(s.status == Sample.Status.ABORTED for s in _iter_samples(group)):
-                self._recycle(prompt_group)
-                aborted_groups_recycled += 1
-                continue
+            aborted = [sample for sample in _iter_samples(group) if sample.status == Sample.Status.ABORTED]
+            if aborted:
+                if any(not is_non_retryable_failure(sample) for sample in aborted):
+                    # SGLang marks in-flight requests ABORTED while publishing
+                    # weights. Repeating those attempts is expected and safe.
+                    self._recycle(prompt_group)
+                    aborted_groups_recycled += 1
+                    continue
+
+                group, masked_count, infrastructure_count = _mask_non_retryable_failures(group)
+                if group is None:
+                    non_retryable_groups_dropped += 1
+                    continue
+                non_retryable_trajectories_masked += masked_count
+                infrastructure_trajectories_masked += infrastructure_count
 
             if args.max_weight_staleness is not None:
                 oldest = group_oldest_weight_version(group)
@@ -242,13 +330,15 @@ class FullyAsyncRolloutFn:
                     if staleness > args.max_weight_staleness:
                         self._recycle(prompt_group)
                         stale_groups_recycled += 1
-                        logger.info(
-                            f"Recycled stale group (oldest_version={oldest}, current={current}, "
-                            f"staleness={staleness} > max={args.max_weight_staleness})"
-                        )
+                        logger.info(f"Recycled stale group (oldest_version={oldest}, current={current}, staleness={staleness} > max={args.max_weight_staleness})")
                         continue
 
-            filter_output = call_dynamic_filter(self._dynamic_filter, args, group)
+            # A placeholder exists only to preserve the fixed tensor shape. It
+            # must not make an otherwise uniform valid group appear dynamic.
+            filter_group = [
+                sample for sample in _iter_samples(group) if not is_loss_masked_failure(sample)
+            ]
+            filter_output = call_dynamic_filter(self._dynamic_filter, args, filter_group)
             if not filter_output.keep:
                 # Dropped, not recycled: no usable gradient signal.
                 metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
@@ -256,19 +346,13 @@ class FullyAsyncRolloutFn:
 
             if do_print:
                 sample = _first_sample(group)
-                logger.info(
-                    f"First rollout sample: {[str(sample.prompt) + sample.response]}, "
-                    f"label: {sample.label}, reward: {sample.reward}"
-                )
+                logger.info(f"First rollout sample: {[str(sample.prompt) + sample.response]}, label: {sample.label}, reward: {sample.reward}")
                 do_print = False
 
             data.append(group)
 
         sample = _first_sample(data[-1])
-        logger.info(
-            f"Finish rollout: {[str(sample.prompt) + sample.response]}, "
-            f"label: {sample.label}, reward: {sample.reward}"
-        )
+        logger.info(f"Finish rollout: {[str(sample.prompt) + sample.response]}, label: {sample.label}, reward: {sample.reward}")
 
         data.sort(key=lambda group: _first_sample(group).index)
 
@@ -278,6 +362,9 @@ class FullyAsyncRolloutFn:
         metrics = {
             "rollout/fully_async/queue_size": self._output.qsize(),
             "rollout/fully_async/aborted_groups_recycled": aborted_groups_recycled,
+            "rollout/fully_async/non_retryable_groups_dropped": non_retryable_groups_dropped,
+            "rollout/fully_async/non_retryable_trajectories_masked": non_retryable_trajectories_masked,
+            "rollout/fully_async/infrastructure_trajectories_masked": infrastructure_trajectories_masked,
             "rollout/fully_async/stale_groups_recycled": stale_groups_recycled,
             **metric_gatherer.collect(),
         }
@@ -289,5 +376,6 @@ class FullyAsyncRolloutFn:
 
     def _recycle(self, prompt_group: list[Sample]) -> None:
         for sample in prompt_group:
+            clear_failure_classification(sample)
             sample.reset_for_retry()
         self.data_source.add_samples([prompt_group])
