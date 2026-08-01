@@ -2,12 +2,19 @@
 
 HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each request into primitives and calls these methods. Owns one ``SessionRegistry`` (per-session TITO/trajectory state) and one proxy ``backend``.
 
-- ``chat_completions`` strips the R3 replay payloads (``routed_experts`` / ``indexer_topk``) from the client reply copy-on-write; the ``SessionRecord`` keeps the full response for the training path (``GET /sessions/{id}``).
-- ``chat_completions`` holds the per-session lock for prep and state update but not across the proxy call; ``closing`` re-checks and the ``num_assistant`` check gate concurrent DELETE/chat.
-- ``stream: true`` is served as fake streaming: the backend call stays non-streaming (TITO needs the complete message + meta_info) and the full response is re-rendered as a single SSE chunk plus ``data: [DONE]``. Errors all happen before the SSE body is built, so they keep their real status codes as JSON.
-- ``collect_samples`` assembles training Samples from the session's records on the server (compute -> truncate -> merge, synchronously on the loop like the lock-free ``get_session``); deterministic assembly failures return 422 with the assertion text.
+- ``chat_completions`` strips the R3 replay payloads (``routed_experts`` /
+  ``indexer_topk``) from the client reply copy-on-write; the ``SessionRecord``
+  keeps only the token/logprob metadata needed for server-side sample assembly.
+- ``chat_completions`` serializes backend calls per session with a dedicated
+  generation lock. The shorter state lock still gates prep/update and lets
+  DELETE mark an in-flight session as closing without waiting for inference.
+- ``stream: true`` is served as fake streaming: the backend call stays
+  non-streaming so TITO can retain the complete response and token metadata.
+- ``collect_samples`` computes, truncates, and merges the training sample on
+  the owning server; raw session records never cross the wire.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -59,6 +66,11 @@ def _samples_response(payload: bytes) -> Response:
 
 
 _CLIENT_STRIPPED_META_KEYS = ("routed_experts", "indexer_topk")
+_RECORD_STRIPPED_META_KEYS = (
+    # The growing prompt is represented once by accumulated_token_ids.
+    "input_token_logprobs",
+    "input_top_logprobs",
+)
 
 
 def _strip_replay_payloads(response: dict) -> dict:
@@ -72,6 +84,24 @@ def _strip_replay_payloads(response: dict) -> dict:
     return {**response, "choices": stripped_choices}
 
 
+def _compact_record_response(response: dict, *, include_message: bool = False) -> dict:
+    """Keep only the response fields required to reconstruct a training sample."""
+    choices = response.get("choices") or []
+    if not choices:
+        return {"choices": []}
+    choice = choices[0]
+    meta_info = choice.get("meta_info")
+    if not isinstance(meta_info, dict):
+        meta_info = {}
+    compact_choice = {
+        "finish_reason": choice.get("finish_reason"),
+        "meta_info": {key: value for key, value in meta_info.items() if key not in _RECORD_STRIPPED_META_KEYS},
+    }
+    if include_message:
+        compact_choice["message"] = choice.get("message")
+    return {"choices": [compact_choice]}
+
+
 def _response_to_stream_chunk(response: dict) -> dict:
     """Synthesize the single ``chat.completion.chunk`` for a fake stream.
 
@@ -81,7 +111,7 @@ def _response_to_stream_chunk(response: dict) -> dict:
     One big delta is protocol-legal (streaming deltas concatenate). All
     tool_calls ride in this one chunk with their ``index`` set: some clients
     mis-assemble arguments fragmented across chunks. The chunk carries no
-    ``meta_info``; the training path reads ``GET /sessions/{id}`` instead.
+    ``meta_info``; server-side sample assembly retains the complete response.
     """
     choice = response.get("choices", [{}])[0]
     message = choice.get("message") or {}
@@ -161,63 +191,145 @@ class SessionCore:
         session_id = self.registry.create_session()
         return Response(content=_render_json({"session_id": session_id}), status_code=200, media_type=JSON_MEDIA_TYPE)
 
-    def _session_metadata(self, session_id: str, session) -> dict:
-        """The per-session assembly/inspection metadata dict, shared by
-        `get_session` (records debug dump) and `collect_samples` (samples op)
-        so the two can never drift."""
+    async def get_session(self, session_id: str) -> Response:
+        session = self.registry.get_session(session_id)
+        async with session.generation_lock:
+            if session.closing:
+                raise SessionNotFoundError(f"session not found: session_id={session_id}")
+            async with session.lock:
+                metadata = await self._session_metadata(session_id, session)
+                payload = GetSessionResponse(
+                    session_id=session_id,
+                    records=session.records,
+                    metadata=metadata,
+                )
+                content = await asyncio.to_thread(
+                    _render_json,
+                    payload.model_dump(mode="json"),
+                )
+                return Response(
+                    content=content,
+                    status_code=200,
+                    media_type=JSON_MEDIA_TYPE,
+                )
+
+    async def _session_metadata(self, session_id: str, session) -> dict:
+        """Build metadata shared by debug inspection and sample collection."""
         metadata: dict = {}
-        try:
-            mismatch = self.registry.compute_session_mismatch(session)
-        except TokenizationError:
-            logger.exception("Failed to compute tito_session_mismatch for session %s", session_id)
-            mismatch = None
+        mismatch = None
+        sample_rate = float(getattr(self.args, "tito_session_mismatch_sample_rate", 1.0))
+        mismatch_sampled = sample_rate >= 1.0 or (
+            sample_rate > 0.0
+            and int(session_id, 16) / float(16 ** len(session_id)) < sample_rate
+        )
+        metadata["tito_session_mismatch_sampled"] = mismatch_sampled
+        mismatch_started = time.monotonic()
+        if mismatch_sampled:
+            try:
+                # Canonical rendering can be expensive for a 64k-token
+                # trajectory. Keep it out of the event loop; production
+                # configs may sample it while CI retains the default 100%.
+                mismatch = await asyncio.to_thread(self.registry.compute_session_mismatch, session)
+            except TokenizationError:
+                metadata["tito_session_mismatch_error"] = True
+                logger.warning("Failed to compute TITO mismatch audit for session %s", session_id)
         if mismatch is not None:
             metadata["tito_session_mismatch"] = mismatch
+        metadata["session_collect/mismatch_seconds"] = time.monotonic() - mismatch_started
+        model_requests = list(session.model_requests)
+        model_request_durations = [float(item["duration_seconds"]) for item in model_requests]
+        if model_request_durations:
+            completion_tokens = sum(int(item["completion_tokens"]) for item in model_requests)
+            non_200_count = sum(int(item["status_code"]) != 200 for item in model_requests)
+            # Exact vectors let the rollout log hook compute batch-wide
+            # distributions without redundant per-session summaries.
+            metadata["model_request/durations_seconds"] = model_request_durations
+            metadata["model_request/prompt_tokens"] = sum(int(item["prompt_tokens"]) for item in model_requests)
+            metadata["model_request/completion_tokens"] = completion_tokens
+            metadata["model_request/non_200_count"] = non_200_count
         metadata["accumulated_token_ids"] = session.token_ids
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         return metadata
 
-    async def get_session(self, session_id: str) -> Response:
-        session = self.registry.get_session(session_id)
-        metadata = self._session_metadata(session_id, session)
-        payload = GetSessionResponse(session_id=session_id, records=session.records, metadata=metadata)
-        return Response(
-            content=_render_json(payload.model_dump(mode="json")), status_code=200, media_type=JSON_MEDIA_TYPE
-        )
-
     async def collect_samples(self, session_id: str, *, max_seq_len: int | None) -> Response:
-        """Assemble training Samples from this session's records.
-
-        Validation failures return 422; unexpected errors propagate.
-        """
+        """Assemble a consistent training sample after all generation updates."""
         session = self.registry.get_session(session_id)
-        metadata = self._session_metadata(session_id, session)
-        tokenizer = self.registry.tokenizer
-        if not session.records:
-            return _samples_response(encode_samples([], metadata, empty_reason="no_records"))
+        async with session.generation_lock:
+            if session.closing:
+                raise SessionNotFoundError(f"session not found: session_id={session_id}")
+            async with session.lock:
+                metadata = await self._session_metadata(session_id, session)
+                records = list(session.records)
+                accumulated_token_ids = list(session.token_ids)
+                max_trim_tokens = int(metadata.pop("max_trim_tokens", 0))
+                metadata.pop("accumulated_token_ids", None)
+
         try:
-            samples = compute_samples_from_openai_records(
-                self.args,
-                session.records,
-                tokenizer,
-                accumulated_token_ids=metadata.get("accumulated_token_ids"),
-                max_trim_tokens=metadata.get("max_trim_tokens", 0),
+            payload = await asyncio.to_thread(
+                self._assemble_samples,
+                records,
+                accumulated_token_ids,
+                metadata,
+                max_trim_tokens,
+                max_seq_len,
             )
-            if max_seq_len is not None:
-                samples = truncate_samples_by_total_tokens(samples, max_seq_len, tokenizer)
-            if not samples:
-                return _samples_response(encode_samples([], metadata, empty_reason="all_truncated"))
-            samples = [merge_samples(samples, tokenizer)]
         except (AssertionError, ValueError) as exc:
-            return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
-        return _samples_response(encode_samples(samples, metadata))
+            return Response(
+                content=str(exc).encode(),
+                status_code=422,
+                media_type="text/plain",
+            )
+        return _samples_response(payload)
+
+    def _assemble_samples(
+        self,
+        records: list[SessionRecord],
+        accumulated_token_ids: list[int],
+        metadata: dict,
+        max_trim_tokens: int,
+        max_seq_len: int | None,
+    ) -> bytes:
+        assembly_started = time.monotonic()
+        if not records:
+            metadata["session_collect/assembly_seconds"] = (
+                time.monotonic() - assembly_started
+            )
+            return encode_samples([], metadata, empty_reason="no_records")
+
+        tokenizer = self.registry.tokenizer
+        samples = compute_samples_from_openai_records(
+            self.args,
+            records,
+            tokenizer,
+            accumulated_token_ids=accumulated_token_ids,
+            max_trim_tokens=max_trim_tokens,
+        )
+        if max_seq_len is not None:
+            samples = truncate_samples_by_total_tokens(
+                samples,
+                max_seq_len,
+                tokenizer,
+            )
+        if not samples:
+            metadata["session_collect/assembly_seconds"] = (
+                time.monotonic() - assembly_started
+            )
+            return encode_samples([], metadata, empty_reason="all_truncated")
+        merged_sample = merge_samples(samples, tokenizer)
+        metadata["session_collect/assembly_seconds"] = (
+            time.monotonic() - assembly_started
+        )
+        return encode_samples([merged_sample], metadata)
 
     async def delete_session(self, session_id: str) -> Response:
         session = self.registry.get_session(session_id)
         if session.closing:
             raise SessionNotFoundError(f"session not found: session_id={session_id}")
         session.closing = True
-        # Acquire the lock so an in-flight chat finishes before we drop the session.
+        # Do not wait for the generation lock: cancellation should retire the
+        # session immediately. The short state lock prevents removal during a
+        # prepare/update section; an in-flight proxy sees ``closing`` and skips
+        # its eventual state update.
         await session.lock.acquire()
         try:
             self.registry.remove_session(session_id)
@@ -225,15 +337,27 @@ class SessionCore:
             session.lock.release()
         return Response(status_code=204)
 
-    async def chat_completions(
-        self, session_id: str, *, method: str, query: str, headers: dict, body: bytes
-    ) -> Response:
+    async def chat_completions(self, session_id: str, *, method: str, query: str, headers: dict, body: bytes) -> Response:
+        """Serialize one session's generations without limiting other sessions."""
+        session = self.registry.get_session(session_id)
+        if session.closing:
+            raise SessionNotFoundError(f"session not found: session_id={session_id}")
+        async with session.generation_lock:
+            return await self._chat_completions_serialized(
+                session_id,
+                method=method,
+                query=query,
+                headers=headers,
+                body=body,
+            )
+
+    async def _chat_completions_serialized(self, session_id: str, *, method: str, query: str, headers: dict, body: bytes) -> Response:
         """Proxy a chat completion through the backend with TITO token tracking.
 
         Flow: prepare pretokenized input_ids (lock held briefly) → proxy to
-        backend (NO lock) → validate response → update trajectory checkpoint and
-        append record (lock held briefly). The lock is NOT held during the slow
-        proxy call so DELETE/other ops are not blocked if the agent disconnects.
+        backend (generation lock only) → validate response → update trajectory
+        checkpoint and append record (state lock held briefly). DELETE can mark
+        a session closing during inference; GET waits for the complete update.
         """
         request_timestamp = time.time()
         session = self.registry.get_session(session_id)
@@ -289,44 +413,98 @@ class SessionCore:
                 request_body["chat_template_kwargs"] = dict(tito_tokenizer.chat_template_kwargs)
             else:
                 request_body.pop("chat_template_kwargs", None)
+            effective_chat_template_kwargs = dict(
+                tito_tokenizer.chat_template_kwargs
+            )
+            if (
+                session.token_ids
+                and session.chat_template_kwargs is not None
+                and session.chat_template_kwargs
+                != effective_chat_template_kwargs
+            ):
+                raise MessageValidationError(
+                    "chat_template_kwargs cannot change within a session"
+                )
 
             request_messages = request_body.get("messages", [])
-            prompt_token_ids = session.prepare_pretokenized(
+            # Tokenizer/chat-template work grows with the full trajectory.
+            # Running it directly here can monopolize this server's event loop
+            # for every other session sharing the process, including the final
+            # GET/DELETE control requests.  Keep the per-session state lock
+            # while moving the synchronous CPU work to the thread pool.
+            prompt_token_ids = await asyncio.to_thread(
+                session.prepare_pretokenized,
                 request_messages,
                 tools=request_body.get("tools"),
                 tito_tokenizer=tito_tokenizer,
             )
+            # `message_matches` intentionally ignores wire-only differences
+            # such as tool-call indices and a known client-added GLM tool
+            # boundary newline. Keep the already-tokenized stored prefix as
+            # canonical session state instead of replacing it with that
+            # round-tripped representation, which would make the state and
+            # retained token prefix disagree during the final TITO audit.
+            canonical_request_messages = [
+                *session.messages,
+                *request_messages[len(session.messages) :],
+            ]
+            max_seq_len = getattr(self.args, "max_seq_len", None)
+            if max_seq_len is not None:
+                max_seq_len = int(max_seq_len)
+                # SGLang rejects equality at its physical context boundary:
+                # prompt + completion must remain strictly below max_seq_len.
+                remaining_tokens = max_seq_len - len(prompt_token_ids) - 1
+                if remaining_tokens <= 0:
+                    raise MessageValidationError(
+                        "TITO context limit reached: prompt has "
+                        f"{len(prompt_token_ids)} tokens, configured max_seq_len "
+                        f"is {max_seq_len}, and one boundary token is reserved"
+                    )
+                requested_max_tokens = request_body.get("max_tokens")
+                if requested_max_tokens is not None:
+                    request_body["max_tokens"] = min(
+                        int(requested_max_tokens),
+                        remaining_tokens,
+                    )
             request_body["input_ids"] = prompt_token_ids
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
-            proxy_body = json.dumps(request_body).encode()
-            expected_num_assistant = session.num_assistant
+            proxy_body = await asyncio.to_thread(_render_json, request_body)
         # --- lock released ---
 
-        # --- Phase 2: proxy to backend (NO lock held) ---
+        # --- Phase 2: proxy to backend (generation lock held; state lock released) ---
         headers = {**headers, "X-SMG-Routing-Key": session_id}
-        result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers
-        )
+        proxy_round_trip_started = time.monotonic()
+        result = await self.backend.do_proxy(ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers)
+        proxy_round_trip_seconds = time.monotonic() - proxy_round_trip_started
+        model_request_seconds = float(result.get("backend_request_seconds", proxy_round_trip_seconds))
+        async with session.lock:
+            model_request_index = session.record_model_request(
+                duration_seconds=model_request_seconds,
+                status_code=result["status_code"],
+                prompt_tokens=len(prompt_token_ids),
+            )
 
-        # Non-200 (e.g. 400 context too long) passes through unrecorded so the
-        # agent can retry or handle the error.
+        # Non-200 (e.g. an upstream 400) contributes to request timing/error
+        # metrics but does not become a training SessionRecord.
         if result["status_code"] != 200:
             return proxy_result_to_response(result)
 
-        response = json.loads(result["response_body"])
+        # Long generations carry thousands of token/logprob entries.  Parsing
+        # and rendering those payloads is CPU work and must not block unrelated
+        # sessions or their collection requests on this event loop.
+        response = await asyncio.to_thread(json.loads, result["response_body"])
         choice = response.get("choices", [{}])[0]
 
         meta_info = choice.get("meta_info")
         if not isinstance(meta_info, dict) or "output_token_logprobs" not in meta_info:
-            raise UpstreamResponseError(
-                "meta_info and output_token_logprobs must be in choice (requires logprobs=True)"
-            )
+            raise UpstreamResponseError("meta_info and output_token_logprobs must be in choice (requires logprobs=True)")
         assistant_message = choice.get("message") or {}
         if assistant_message.get("content") is None:
             raise UpstreamResponseError(
-                "assistant message content is None, when tool call parser failed SGLang should still return "
-                "an empty content rather than None. Please check your modified SGLang version."
+                "assistant message content is None, when tool call parser failed "
+                "SGLang should still return an empty content rather than None. "
+                "Please check your modified SGLang version."
             )
 
         output_token_logprobs = meta_info["output_token_logprobs"]
@@ -336,54 +514,66 @@ class SessionCore:
         if actual_output_logprobs_len != completion_tokens:
             raise UpstreamResponseError(
                 "invalid chat completion response: "
-                f"len(output_token_logprobs)={actual_output_logprobs_len} "
-                f"!= completion_tokens={completion_tokens}. "
-                f"Please check whether you use the correct SGLang branch which has fix the tokenizer batch decode issue."
+                "len(output_token_logprobs)="
+                f"{actual_output_logprobs_len} != "
+                f"completion_tokens={completion_tokens}. Please check whether "
+                "you use the correct SGLang branch which has the tokenizer "
+                "batch decode fix."
             )
 
         completion_token_ids = [t[1] for t in output_token_logprobs]
 
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:
+            session.set_model_request_completion_tokens(
+                model_request_index,
+                completion_tokens,
+            )
             if session.closing:
                 logger.warning(f"Session {session_id} closed during proxy, skipping state update")
-                return _chat_client_response(result, response, client_stream)
-
-            if session.num_assistant != expected_num_assistant:
-                logger.warning(
-                    f"Session {session_id} state changed during proxy "
-                    f"(expected num_assistant={expected_num_assistant}, "
-                    f"got {session.num_assistant}), skipping state update"
+                return await asyncio.to_thread(
+                    _chat_client_response,
+                    result,
+                    response,
+                    client_stream,
                 )
-                return _chat_client_response(result, response, client_stream)
 
-            session.update_pretokenized_state(
-                request_messages,
+            await asyncio.to_thread(
+                session.update_pretokenized_state,
+                canonical_request_messages,
                 assistant_message,
                 prompt_token_ids=prompt_token_ids,
                 completion_token_ids=completion_token_ids,
                 max_trim_tokens=self.registry.tito_tokenizer.max_trim_tokens,
+                tools=request_body.get("tools"),
+                chat_template_kwargs=effective_chat_template_kwargs,
             )
 
+            record_debug_trajectory = getattr(self.args, "save_debug_trajectory_data", None) is not None
             record = SessionRecord(
                 timestamp=time.time(),
                 request_timestamp=request_timestamp,
                 method=method,
                 path="/v1/chat/completions",
                 status_code=result["status_code"],
-                request=request_body,
-                response=response,
+                prompt_token_count=len(prompt_token_ids),
+                request=(
+                    {"messages": canonical_request_messages}
+                    if record_debug_trajectory
+                    else {}
+                ),
+                response=await asyncio.to_thread(
+                    _compact_record_response,
+                    response,
+                    include_message=record_debug_trajectory,
+                ),
             )
             session.append_record(record)
         # --- lock released ---
 
-        return _chat_client_response(result, response, client_stream)
+        return await asyncio.to_thread(_chat_client_response, result, response, client_stream)
 
-    async def proxy(
-        self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes
-    ) -> Response:
+    async def proxy(self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes) -> Response:
         headers = {**headers, "X-SMG-Routing-Key": session_id}
-        result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), path, body=body, headers=headers
-        )
+        result = await self.backend.do_proxy(ProxyRequest(method=method, query=query), path, body=body, headers=headers)
         return proxy_result_to_response(result)
