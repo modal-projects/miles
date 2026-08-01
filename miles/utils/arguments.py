@@ -2604,8 +2604,7 @@ def _resolve_checkpoint_load(args) -> None:
     )
     if args.load is not None and args.exit_on_missing_checkpoint and not has_checkpoint:
         raise FileNotFoundError(
-            f"Resume checkpoint {args.load!r} is missing or has no "
-            "latest_checkpointed_iteration.txt"
+            f"Resume checkpoint {args.load!r} is missing or has no " "latest_checkpointed_iteration.txt"
         )
 
     if args.megatron_to_hf_mode == "bridge":

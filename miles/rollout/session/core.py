@@ -241,8 +241,7 @@ class SessionCore:
         mismatch = None
         sample_rate = float(getattr(self.args, "tito_session_mismatch_sample_rate", 1.0))
         mismatch_sampled = sample_rate >= 1.0 or (
-            sample_rate > 0.0
-            and int(session_id, 16) / float(16 ** len(session_id)) < sample_rate
+            sample_rate > 0.0 and int(session_id, 16) / float(16 ** len(session_id)) < sample_rate
         )
         metadata["tito_session_mismatch_sampled"] = mismatch_sampled
         mismatch_started = time.monotonic()
@@ -317,9 +316,7 @@ class SessionCore:
     ) -> bytes:
         assembly_started = time.monotonic()
         if not records:
-            metadata["session_collect/assembly_seconds"] = (
-                time.monotonic() - assembly_started
-            )
+            metadata["session_collect/assembly_seconds"] = time.monotonic() - assembly_started
             return encode_samples([], metadata, empty_reason="no_records")
 
         tokenizer = self.registry.tokenizer
@@ -337,9 +334,7 @@ class SessionCore:
                 tokenizer,
             )
         if not samples:
-            metadata["session_collect/assembly_seconds"] = (
-                time.monotonic() - assembly_started
-            )
+            metadata["session_collect/assembly_seconds"] = time.monotonic() - assembly_started
             return encode_samples([], metadata, empty_reason="all_truncated")
         merged_sample = merge_samples(samples, tokenizer)
         merged_sample.rollout_routed_experts = reconstruct_routed_experts(
@@ -348,9 +343,7 @@ class SessionCore:
             final_num_tokens=len(merged_sample.tokens) - 1,
         )
         merged_sample.validate()
-        metadata["session_collect/assembly_seconds"] = (
-            time.monotonic() - assembly_started
-        )
+        metadata["session_collect/assembly_seconds"] = time.monotonic() - assembly_started
         return encode_samples([merged_sample], metadata)
 
     async def delete_session(self, session_id: str) -> Response:
@@ -369,7 +362,9 @@ class SessionCore:
             session.lock.release()
         return Response(status_code=204)
 
-    async def chat_completions(self, session_id: str, *, method: str, query: str, headers: dict, body: bytes) -> Response:
+    async def chat_completions(
+        self, session_id: str, *, method: str, query: str, headers: dict, body: bytes
+    ) -> Response:
         """Serialize one session's generations without limiting other sessions."""
         session = self.registry.get_session(session_id)
         if session.closing:
@@ -383,7 +378,9 @@ class SessionCore:
                 body=body,
             )
 
-    async def _chat_completions_serialized(self, session_id: str, *, method: str, query: str, headers: dict, body: bytes) -> Response:
+    async def _chat_completions_serialized(
+        self, session_id: str, *, method: str, query: str, headers: dict, body: bytes
+    ) -> Response:
         """Proxy a chat completion through the backend with TITO token tracking.
 
         Flow: prepare pretokenized input_ids (lock held briefly) → proxy to
@@ -445,18 +442,13 @@ class SessionCore:
                 request_body["chat_template_kwargs"] = dict(tito_tokenizer.chat_template_kwargs)
             else:
                 request_body.pop("chat_template_kwargs", None)
-            effective_chat_template_kwargs = dict(
-                tito_tokenizer.chat_template_kwargs
-            )
+            effective_chat_template_kwargs = dict(tito_tokenizer.chat_template_kwargs)
             if (
                 session.token_ids
                 and session.chat_template_kwargs is not None
-                and session.chat_template_kwargs
-                != effective_chat_template_kwargs
+                and session.chat_template_kwargs != effective_chat_template_kwargs
             ):
-                raise MessageValidationError(
-                    "chat_template_kwargs cannot change within a session"
-                )
+                raise MessageValidationError("chat_template_kwargs cannot change within a session")
 
             request_messages = request_body.get("messages", [])
             # Tokenizer/chat-template work grows with the full trajectory.
@@ -537,7 +529,9 @@ class SessionCore:
 
         meta_info = choice.get("meta_info")
         if not isinstance(meta_info, dict) or "output_token_logprobs" not in meta_info:
-            raise UpstreamResponseError("meta_info and output_token_logprobs must be in choice (requires logprobs=True)")
+            raise UpstreamResponseError(
+                "meta_info and output_token_logprobs must be in choice (requires logprobs=True)"
+            )
         assistant_message = choice.get("message") or {}
         if assistant_message.get("content") is None:
             raise UpstreamResponseError(
@@ -598,11 +592,7 @@ class SessionCore:
                 path="/v1/chat/completions",
                 status_code=result["status_code"],
                 prompt_token_count=len(prompt_token_ids),
-                request=(
-                    {"messages": canonical_request_messages}
-                    if record_debug_trajectory
-                    else {}
-                ),
+                request=({"messages": canonical_request_messages} if record_debug_trajectory else {}),
                 response=await asyncio.to_thread(
                     _compact_record_response,
                     response,
@@ -614,7 +604,11 @@ class SessionCore:
 
         return await asyncio.to_thread(_chat_client_response, result, response, client_stream)
 
-    async def proxy(self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes) -> Response:
+    async def proxy(
+        self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes
+    ) -> Response:
         headers = {**headers, "X-SMG-Routing-Key": session_id}
-        result = await self.backend.do_proxy(ProxyRequest(method=method, query=query), path, body=body, headers=headers)
+        result = await self.backend.do_proxy(
+            ProxyRequest(method=method, query=query), path, body=body, headers=headers
+        )
         return proxy_result_to_response(result)

@@ -75,13 +75,23 @@ def _first_sample(group: Group) -> Sample:
 
 def group_oldest_weight_version(group: Group) -> int | None:
     """Return the minimum weight version across all trajectories and turns in a group."""
-    versions = [version for sample in _iter_samples(group) if not sample.remove_sample and (version := sample.oldest_weight_version) is not None]
+    versions = [
+        version
+        for sample in _iter_samples(group)
+        if not sample.remove_sample and (version := sample.oldest_weight_version) is not None
+    ]
     return min(versions) if versions else None
 
 
 def group_newest_weight_version(group: Group) -> int | None:
     """Return the maximum numeric version observed by trainable trajectories."""
-    versions = [int(version) for sample in _iter_samples(group) if not sample.remove_sample for version in sample.weight_versions if str(version).isdigit()]
+    versions = [
+        int(version)
+        for sample in _iter_samples(group)
+        if not sample.remove_sample
+        for version in sample.weight_versions
+        if str(version).isdigit()
+    ]
     return max(versions) if versions else None
 
 
@@ -110,8 +120,17 @@ def _mask_non_retryable_failures(group: Group) -> tuple[Group | None, int, int]:
         return None, 0, 0
 
     samples = list(_iter_samples(group))
-    failures = [sample for sample in samples if sample.status == Sample.Status.ABORTED and is_non_retryable_failure(sample)]
-    valid = [sample for sample in samples if sample.status != Sample.Status.ABORTED and sample.reward is not None and sample.response_length > 0 and len(sample.tokens) >= sample.response_length]
+    failures = [
+        sample for sample in samples if sample.status == Sample.Status.ABORTED and is_non_retryable_failure(sample)
+    ]
+    valid = [
+        sample
+        for sample in samples
+        if sample.status != Sample.Status.ABORTED
+        and sample.reward is not None
+        and sample.response_length > 0
+        and len(sample.tokens) >= sample.response_length
+    ]
     if not failures or len(valid) < 2:
         return None, 0, 0
 
@@ -213,7 +232,9 @@ class FullyAsyncRolloutFn:
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
-            raise ValueError("FullyAsyncRolloutFn does not serve eval; set --eval-function-path to miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn")
+            raise ValueError(
+                "FullyAsyncRolloutFn does not serve eval; set --eval-function-path to miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
+            )
         if self._worker is None:
             self._output = asyncio.Queue(maxsize=OUTPUT_QUEUE_MAX_GROUPS)
             self._last_report_at = time.monotonic()
@@ -322,7 +343,9 @@ class FullyAsyncRolloutFn:
                 if queue_get in done:
                     self._groups_dequeued += 1
                     return queue_get.result()
-                logger.warning(f"No completed rollout groups for {NO_PROGRESS_WARN_SECS}s (queued: {self._output.qsize()})")
+                logger.warning(
+                    f"No completed rollout groups for {NO_PROGRESS_WARN_SECS}s (queued: {self._output.qsize()})"
+                )
         finally:
             if not queue_get.done():
                 queue_get.cancel()
@@ -378,7 +401,9 @@ class FullyAsyncRolloutFn:
             oldest = group_oldest_weight_version(group)
             newest = group_newest_weight_version(group)
             finish_version = completed.finish_weight_version
-            current = await self._weight_version.get(args) if oldest is not None or finish_version is not None else None
+            current = (
+                await self._weight_version.get(args) if oldest is not None or finish_version is not None else None
+            )
             if newest is not None:
                 finish_version = max(finish_version or newest, newest)
             if finish_version is not None:
@@ -405,14 +430,14 @@ class FullyAsyncRolloutFn:
                 if args.max_weight_staleness is not None and staleness > args.max_weight_staleness:
                     self._recycle(prompt_group)
                     stale_groups_recycled += 1
-                    logger.info(f"Recycled stale group (oldest_version={oldest}, current={current}, staleness={staleness} > max={args.max_weight_staleness})")
+                    logger.info(
+                        f"Recycled stale group (oldest_version={oldest}, current={current}, staleness={staleness} > max={args.max_weight_staleness})"
+                    )
                     continue
 
             # A placeholder exists only to preserve the fixed tensor shape. It
             # must not make an otherwise uniform valid group appear dynamic.
-            filter_group = [
-                sample for sample in _iter_samples(group) if not is_loss_masked_failure(sample)
-            ]
+            filter_group = [sample for sample in _iter_samples(group) if not is_loss_masked_failure(sample)]
             filter_output = call_dynamic_filter(self._dynamic_filter, args, filter_group)
             if not filter_output.keep:
                 # Dropped, not recycled: no usable gradient signal.
@@ -421,7 +446,9 @@ class FullyAsyncRolloutFn:
 
             if do_print:
                 sample = _first_sample(group)
-                logger.info(f"First rollout sample: {[str(sample.prompt) + sample.response]}, label: {sample.label}, reward: {sample.reward}")
+                logger.info(
+                    f"First rollout sample: {[str(sample.prompt) + sample.response]}, label: {sample.label}, reward: {sample.reward}"
+                )
                 do_print = False
 
             data.append(group)
@@ -434,7 +461,9 @@ class FullyAsyncRolloutFn:
                 accepted_version_span.append(version_span)
 
         sample = _first_sample(data[-1])
-        logger.info(f"Finish rollout: {[str(sample.prompt) + sample.response]}, label: {sample.label}, reward: {sample.reward}")
+        logger.info(
+            f"Finish rollout: {[str(sample.prompt) + sample.response]}, label: {sample.label}, reward: {sample.reward}"
+        )
 
         data.sort(key=lambda group: _first_sample(group).index)
 
@@ -456,8 +485,7 @@ class FullyAsyncRolloutFn:
             "rollout_async/active_trajectories": (
                 self._scheduler.samples_in_flight
                 if self._scheduler.backfill_on_sample_completion
-                else (self._groups_submitted - self._groups_finished)
-                * args.n_samples_per_prompt
+                else (self._groups_submitted - self._groups_finished) * args.n_samples_per_prompt
             ),
             "rollout_async/concurrent_trajectory_limit": self._max_in_flight_groups() * args.n_samples_per_prompt,
             "rollout_async/backlog_growth_groups": finished_delta - dequeued_delta,
@@ -471,7 +499,9 @@ class FullyAsyncRolloutFn:
         }
         if report_seconds > 0:
             metrics["rollout_async/group_completions_per_sec"] = finished_delta / report_seconds
-            metrics["rollout_async/trajectory_completions_per_sec"] = finished_delta * args.n_samples_per_prompt / report_seconds
+            metrics["rollout_async/trajectory_completions_per_sec"] = (
+                finished_delta * args.n_samples_per_prompt / report_seconds
+            )
             metrics["rollout_async/candidate_dequeues_per_sec"] = dequeued_delta / report_seconds
             metrics["rollout_async/trainer_consumption_groups_per_sec"] = target_data_size / report_seconds
         if staleness_values:
