@@ -2,6 +2,7 @@ import asyncio
 import logging
 import uuid
 from argparse import Namespace
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
 
@@ -29,14 +30,10 @@ class GenerateState:
     def __init__(self, args: Namespace) -> None:
         # persistent state for the generation process
         self.args = args
-        self.tokenizer = load_tokenizer(
-            args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
-        )
+        self.tokenizer = load_tokenizer(args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.generate_fn_semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-        )
+        self.generate_fn_semaphore = asyncio.Semaphore(args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine)
         self.sampling_params: dict[str, Any] = compute_sampling_params(
             args,
             temperature=args.rollout_temperature,
@@ -119,8 +116,85 @@ async def generate_and_rm(
     return sample
 
 
+class SubmissionScheduler:
+    """Paces prompt-group submission for a rollout driver: when may another group go
+    out, and what counts as progress worth re-checking that on.
+
+    Both rollout drivers (the sync one below and the fully-async worker) use it, under
+    one of two policies:
+
+    - **group level** (default): a group occupies its slot until the whole group task
+      returns, so submission is paced by completed groups.
+    - **sample-completion backfill** (``--rollout-sample-completion-backfill``): every
+      finished sample frees its own slot, so a replacement group goes out once
+      ``n_samples_per_prompt`` samples finish, whichever groups they came from. With
+      long-horizon agentic trials, waiting for the slowest sibling of each group is a
+      primary rollout-throughput limiter.
+    """
+
+    def __init__(self, args: Namespace):
+        self.backfill_on_sample_completion = args.rollout_sample_completion_backfill
+        self.group_size = args.n_samples_per_prompt
+        self.samples_in_flight = 0
+        self._sample_done = asyncio.Event()
+
+    @property
+    def sample_done_callback(self) -> Callable[[], None] | None:
+        """Passed to ``generate_and_rm_group``; ``None`` under the group-level policy."""
+        return self._on_sample_done if self.backfill_on_sample_completion else None
+
+    def has_capacity(self, *, pending_groups: int, group_budget: int) -> bool:
+        """Whether one more prompt group fits in a budget of ``group_budget`` groups."""
+        return self.available_group_slots(
+            pending_groups=pending_groups,
+            group_budget=group_budget,
+        ) > 0
+
+    def available_group_slots(self, *, pending_groups: int, group_budget: int) -> int:
+        """Return how many complete prompt groups fit without exceeding the budget."""
+        if not self.backfill_on_sample_completion:
+            return max(0, group_budget - pending_groups)
+        available_samples = group_budget * self.group_size - self.samples_in_flight
+        return max(0, available_samples // self.group_size)
+
+    def on_submit(self, groups: list[list[Sample]]) -> None:
+        if not self.backfill_on_sample_completion:
+            # Nothing decrements the counter without the callback; keep it meaningful.
+            return
+        self.samples_in_flight += sum(len(group) for group in groups)
+
+    def arm(self) -> None:
+        """Drop sample completions already reflected in ``samples_in_flight``.
+
+        Callers must not await between ``arm`` and ``wait_for_progress``, so that no
+        completion can be missed in between.
+        """
+        self._sample_done.clear()
+
+    async def wait_for_progress(self, pendings: set[asyncio.Task]) -> tuple[set, set]:
+        """``asyncio.wait(FIRST_COMPLETED)`` over the group tasks, also returning on a
+        single sample completion under the backfill policy."""
+        if not self.backfill_on_sample_completion:
+            return await asyncio.wait(pendings, return_when=asyncio.FIRST_COMPLETED)
+
+        waiter = asyncio.create_task(self._sample_done.wait())
+        try:
+            done, pending = await asyncio.wait(pendings | {waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        return done - {waiter}, pending - {waiter}
+
+    def _on_sample_done(self) -> None:
+        self.samples_in_flight -= 1
+        self._sample_done.set()
+
+
 async def generate_and_rm_group(
-    state: GenerateState, group: list[Sample], sampling_params: dict[str, Any], evaluation: bool = False
+    state: GenerateState,
+    group: list[Sample],
+    sampling_params: dict[str, Any],
+    evaluation: bool = False,
+    sample_done_callback: Callable[[], None] | None = None,
 ) -> list[Sample]:
     args = state.args
 
@@ -139,9 +213,13 @@ async def generate_and_rm_group(
         current_sampling_params = sampling_params.copy()
         if getattr(args, "sglang_enable_deterministic_inference", False):
             current_sampling_params["sampling_seed"] = args.rollout_seed + idx
-        tasks.append(
-            asyncio.create_task(generate_and_rm(state, sample, current_sampling_params, evaluation=evaluation))
-        )
+        task = asyncio.create_task(generate_and_rm(state, sample, current_sampling_params, evaluation=evaluation))
+        if sample_done_callback is not None:
+            # Fires for every submitted sample whatever its outcome (success, exception
+            # or cancellation): each sample frees exactly the slot it took, so in-flight
+            # accounting is conserved and concurrency cannot decay over time.
+            task.add_done_callback(lambda _task: sample_done_callback())
+        tasks.append(task)
 
     group = await asyncio.gather(*tasks)
     logger.debug(f"{log_prefix} [group] All {len(group)} samples completed")
@@ -190,9 +268,7 @@ class InferenceRolloutFn:
     async def _call_train(self, input: RolloutFnTrainInput) -> RolloutFnTrainOutput:
         from miles.rollout.inference_rollout.inference_rollout_train import generate_rollout_async
 
-        output, aborted_samples = await generate_rollout_async(
-            self.state, input.rollout_id, self.data_source.get_samples
-        )
+        output, aborted_samples = await generate_rollout_async(self.state, input.rollout_id, self.data_source.get_samples)
         self.data_source.add_samples(aborted_samples)
         return output
 
