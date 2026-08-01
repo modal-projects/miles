@@ -30,7 +30,9 @@ class GenerateState:
     def __init__(self, args: Namespace) -> None:
         # persistent state for the generation process
         self.args = args
-        self.tokenizer = load_tokenizer(args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True)
+        self.tokenizer = load_tokenizer(
+            args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
+        )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
         self.generate_fn_semaphore = asyncio.Semaphore(args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine)
@@ -145,10 +147,13 @@ class SubmissionScheduler:
 
     def has_capacity(self, *, pending_groups: int, group_budget: int) -> bool:
         """Whether one more prompt group fits in a budget of ``group_budget`` groups."""
-        return self.available_group_slots(
-            pending_groups=pending_groups,
-            group_budget=group_budget,
-        ) > 0
+        return (
+            self.available_group_slots(
+                pending_groups=pending_groups,
+                group_budget=group_budget,
+            )
+            > 0
+        )
 
     def available_group_slots(self, *, pending_groups: int, group_budget: int) -> int:
         """Return how many complete prompt groups fit without exceeding the budget."""
@@ -268,7 +273,9 @@ class InferenceRolloutFn:
     async def _call_train(self, input: RolloutFnTrainInput) -> RolloutFnTrainOutput:
         from miles.rollout.inference_rollout.inference_rollout_train import generate_rollout_async
 
-        output, aborted_samples = await generate_rollout_async(self.state, input.rollout_id, self.data_source.get_samples)
+        output, aborted_samples = await generate_rollout_async(
+            self.state, input.rollout_id, self.data_source.get_samples
+        )
         self.data_source.add_samples(aborted_samples)
         return output
 

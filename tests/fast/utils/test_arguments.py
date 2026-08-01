@@ -685,6 +685,4 @@ class TestValidateAsyncOffPolicyCorrection:
         validate_async_off_policy_correction(_make_async_ppo_args(**{flag: True}))
 
     def test_non_policy_losses_are_unaffected(self):
-        validate_async_off_policy_correction(
-            _make_async_ppo_args(loss_type="sft_loss")
-        )
+        validate_async_off_policy_correction(_make_async_ppo_args(loss_type="sft_loss"))
