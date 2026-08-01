@@ -137,6 +137,38 @@ class TestSessionCRUD:
         assert len(session.records) == 1
         assert session.records[0].path == record.path
 
+    def test_replay_payload_stats(self, registry: SessionRegistry):
+        session_id = registry.create_session()
+        session = registry.get_session(session_id)
+
+        for turn in range(4):
+            record = SessionRecord(
+                timestamp=float(turn),
+                method="POST",
+                path="/v1/chat/completions",
+                status_code=200,
+                request={},
+                response={
+                    "choices": [
+                        {
+                            "meta_info": {
+                                "output_token_logprobs": [],
+                                "routed_experts": f"routes-{turn}",
+                                "indexer_topk": f"indexer-{turn}",
+                                "weight_version": turn,
+                            }
+                        }
+                    ]
+                },
+            )
+            session.append_record(record)
+
+        assert session.replay_payload_stats() == (
+            sum(len(f"routes-{turn}") + len(f"indexer-{turn}") for turn in range(4)),
+            8,
+            4,
+        )
+
     def test_append_record_missing_session(self, registry: SessionRegistry):
         with pytest.raises(SessionNotFoundError):
             registry.get_session("missing")

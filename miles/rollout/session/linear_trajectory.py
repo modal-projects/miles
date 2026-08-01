@@ -15,6 +15,27 @@ logger = logging.getLogger(__name__)
 # TODO: hardcoded to 1 for now; if multi-step rollback is actually needed,
 #  raise this limit or make it configurable and remove the restriction.
 MAX_ASSISTANT_ROLLBACK_STEPS = 1
+_REPLAY_PAYLOAD_KEYS = ("routed_experts", "indexer_topk")
+
+
+def _replay_payload_stats(records: list[SessionRecord]) -> tuple[int, int, int]:
+    payload_bytes = 0
+    payload_count = 0
+    record_count = 0
+    for record in records:
+        record_has_payload = False
+        for choice in record.response.get("choices", []):
+            meta_info = choice.get("meta_info")
+            if not isinstance(meta_info, dict):
+                continue
+            for key in _REPLAY_PAYLOAD_KEYS:
+                payload = meta_info.get(key)
+                if isinstance(payload, str):
+                    payload_bytes += len(payload)
+                    payload_count += 1
+                    record_has_payload = True
+        record_count += int(record_has_payload)
+    return payload_bytes, payload_count, record_count
 
 
 @dataclass
@@ -66,6 +87,10 @@ class LinearTrajectory:
 
     def append_record(self, record: SessionRecord) -> None:
         self.records.append(record)
+
+    def replay_payload_stats(self) -> tuple[int, int, int]:
+        """Return retained base64 bytes, payload count, and record count."""
+        return _replay_payload_stats(self.records)
 
     def record_model_request(
         self,

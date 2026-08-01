@@ -45,8 +45,8 @@ _ARGS = SimpleNamespace(
     session_server_instance_id=uuid.uuid4().hex,
     num_layers=NUM_LAYERS,
     moe_router_topk=TOPK,
-    save_debug_trajectory_data=None,
     sglang_speculative_algorithm=None,
+    save_debug_trajectory_data=None,
 )
 
 
@@ -104,6 +104,26 @@ def _two_turn_records():
             prompt_tokens=7,
             weight_version="w2",
             routed_experts=_r3_b64(8, seed=100),
+        ),
+    ]
+
+
+def _two_turn_incremental_records(*, second_start: int = 4):
+    # Turn 1 returns [0, 4); turn 2 returns [second_start, 8).
+    return [
+        _make_record(
+            prompt_token_ids=[1, 2, 3],
+            output_token_ids=[10, 11],
+            output_log_probs=[-0.125, -0.25],
+            routed_experts=_r3_b64(4, seed=0),
+            routed_experts_start_len=0,
+        ),
+        _make_record(
+            prompt_token_ids=[1, 2, 3, 10, 11, 20, 21],
+            output_token_ids=[30, 31],
+            output_log_probs=[-0.5, -1.0],
+            routed_experts=_r3_b64(8 - second_start, seed=100),
+            routed_experts_start_len=second_start,
         ),
     ]
 
@@ -196,11 +216,35 @@ async def test_assembled_sample_golden(core):
     assert "accumulated_token_ids" not in m.metadata
     assert "max_trim_tokens" not in m.metadata
     assert m.metadata["session_collect/assembly_seconds"] >= 0
+    assert m.metadata["session_collect/replay_retained_bytes"] > 0
+    assert m.metadata["session_collect/replay_retained_payloads"] == 2
+    assert m.metadata["session_collect/replay_retained_records"] == 2
     assert m.metadata["lifecycle"] == [
         {"t0": None, "t1": 0.0, "turn": 1},
         {"t0": None, "t1": 0.0, "turn": 2, "prev_t1": 0.0},
     ]
     assert reply.empty_reason is None
+
+
+async def test_incremental_routed_experts_are_stitched_once(core):
+    sid = await _make_session(core, _two_turn_incremental_records(), _ACCUMULATED)
+    status, payload = await _collect_via_op(core, sid)
+    assert status == 200
+    (sample,) = decode_samples_and_merge_input_sample(payload, _input_sample()).samples
+
+    expected = np.concatenate([_expected_r3(0, 4), _expected_r3(100, 4)], axis=0)
+    np.testing.assert_array_equal(sample.rollout_routed_experts, expected)
+    assert len(sample.rollout_routed_experts) == len(sample.tokens) - 1
+
+
+async def test_incremental_routed_experts_overlap_replaces_suffix(core):
+    sid = await _make_session(core, _two_turn_incremental_records(second_start=3), _ACCUMULATED)
+    status, payload = await _collect_via_op(core, sid)
+    assert status == 200
+    (sample,) = decode_samples_and_merge_input_sample(payload, _input_sample()).samples
+
+    expected = np.concatenate([_expected_r3(0, 4)[:3], _expected_r3(100, 5)], axis=0)
+    np.testing.assert_array_equal(sample.rollout_routed_experts, expected)
 
 
 async def test_truncation_golden(core):

@@ -16,6 +16,7 @@ import requests
 from fastapi.responses import JSONResponse
 
 import miles.rollout.session.server as session_server_module
+from miles.rollout.session.core import _routed_experts_start_len
 from miles.rollout.session.linear_trajectory import LinearTrajectory
 from miles.rollout.session.server import SessionServer
 from miles.utils.http_utils import find_available_port
@@ -35,6 +36,18 @@ def _post_chat(url: str, session_id: str, payload: dict) -> requests.Response:
 def _parse_sse(body: str) -> list[str]:
     """Return the data payload of each SSE event, in order."""
     return [block[len("data: ") :] for block in body.split("\n\n") if block.startswith("data: ")]
+
+
+@pytest.mark.parametrize(
+    ("previous", "prompt", "expected"),
+    [
+        ([], [1, 2], 0),
+        ([1, 2, 3], [1, 2, 3, 4], 2),
+        ([1, 2, 99], [1, 2, 3, 4], 1),
+    ],
+)
+def test_routed_experts_start_len(previous, prompt, expected):
+    assert _routed_experts_start_len(previous, prompt) == expected
 
 
 @pytest.fixture(scope="class")

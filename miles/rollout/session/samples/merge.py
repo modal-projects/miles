@@ -8,9 +8,11 @@ Owned by the session package so the assembly runs on the owning instance (record
 
 from argparse import Namespace
 
+import numpy as np
+
 from miles.rollout.generate_utils.generate_endpoint_utils import (
+    decode_routed_experts,
     get_indexer_topk_from_response,
-    get_routed_experts_from_response,
 )
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
@@ -134,7 +136,10 @@ def _compute_sample_from_openai_record(
     sample.response = tokenizer.decode(output_token_ids)
     sample.response_length = len(output_token_ids)
     sample.loss_mask = [1] * len(output_token_ids)
-    sample.rollout_routed_experts = get_routed_experts_from_response(args, choice, sample)
+    # Session routed-expert payloads may be incremental. They are reconstructed
+    # once, after turn-level truncation, instead of materializing a cumulative
+    # tensor for every intermediate Sample.
+    sample.rollout_routed_experts = None
     sample.rollout_indexer_topk = get_indexer_topk_from_response(args, choice, sample)
 
     if trim_count > 0:
@@ -156,6 +161,81 @@ def _compute_sample_from_openai_record(
         sample.weight_versions.append(choice["meta_info"]["weight_version"])
 
     return sample
+
+
+def reconstruct_routed_experts(
+    args: Namespace,
+    records: list[SessionRecord],
+    *,
+    final_num_tokens: int,
+) -> np.ndarray | None:
+    """Stitch incremental per-turn routed-expert suffixes into one tensor."""
+    if not any(record.response.get("choices", [{}])[0].get("meta_info", {}).get("routed_experts") is not None for record in records):
+        return None
+
+    segments: list[np.ndarray] = []
+    accumulated_rows = 0
+    for turn, record in enumerate(records, start=1):
+        choice = record.response["choices"][0]
+        meta_info = choice["meta_info"]
+        payload = meta_info.get("routed_experts")
+        if payload is None:
+            raise ValueError(f"turn {turn} is missing routed_experts")
+
+        output_rows = len(meta_info["output_token_logprobs"])
+        prompt_rows = record.prompt_token_count
+        if prompt_rows is None:
+            prompt_ids = record.request.get("input_ids")
+            if prompt_ids is None:
+                raise ValueError(f"turn {turn} has no prompt length for routed_experts")
+            prompt_rows = len(prompt_ids)
+        end_row = prompt_rows + output_rows - 1
+        start_row = int(meta_info.get("routed_experts_start_len", 0))
+        if not 0 <= start_row <= end_row:
+            raise ValueError(f"turn {turn} has invalid routed_experts interval [{start_row}, {end_row})")
+        if start_row > accumulated_rows:
+            raise ValueError(
+                f"turn {turn} routed_experts starts at {start_row}, "
+                f"after the {accumulated_rows} reconstructed rows"
+            )
+
+        accumulated_rows = _truncate_segments(segments, accumulated_rows, start_row)
+        segment = decode_routed_experts(args, payload, end_row - start_row)
+        segments.append(segment)
+        accumulated_rows += len(segment)
+        if accumulated_rows != end_row:
+            raise ValueError(
+                f"turn {turn} reconstructed {accumulated_rows} routed_experts rows, "
+                f"expected {end_row}"
+            )
+
+    if final_num_tokens > accumulated_rows:
+        raise ValueError(
+            f"training sample needs {final_num_tokens} routed_experts rows, "
+            f"but only {accumulated_rows} were reconstructed"
+        )
+    _truncate_segments(segments, accumulated_rows, final_num_tokens)
+    if not segments:
+        return np.empty(
+            (0, args.num_layers, args.moe_router_topk),
+            dtype=np.int32,
+        )
+    return np.concatenate(segments, axis=0)
+
+
+def _truncate_segments(
+    segments: list[np.ndarray],
+    current_rows: int,
+    target_rows: int,
+) -> int:
+    """Truncate replay suffixes in place without copying their retained prefix."""
+    while current_rows > target_rows:
+        segment = segments.pop()
+        segment_start = current_rows - len(segment)
+        if segment_start < target_rows:
+            segments.append(segment[: target_rows - segment_start])
+        current_rows = max(segment_start, target_rows)
+    return current_rows
 
 
 def truncate_samples_by_total_tokens(

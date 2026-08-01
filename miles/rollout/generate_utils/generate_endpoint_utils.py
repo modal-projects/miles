@@ -125,7 +125,12 @@ def get_routed_experts_from_response(args, output, sample):
     info = output["meta_info"].get("routed_experts")
     if info is None:
         return None
-    return _decode_topk_buffer(info, len(sample.tokens) - 1, args.num_layers, -1)
+    return decode_routed_experts(args, info, len(sample.tokens) - 1)
+
+
+def decode_routed_experts(args, info: str, num_tokens: int) -> np.ndarray:
+    """Decode a routed-expert buffer with an explicit row count."""
+    return _decode_topk_buffer(info, num_tokens, args.num_layers, -1)
 
 
 def get_indexer_topk_from_response(args, output, sample):
