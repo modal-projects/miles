@@ -37,6 +37,7 @@ def _make_record(
     prompt_tokens: int | None = None,
     weight_version: str | None = None,
     routed_experts: str | None = None,
+    routed_experts_start_len: int | None = None,
 ) -> SessionRecord:
     """Build a minimal session record mimicking SGLang's response format.
 
@@ -63,6 +64,8 @@ def _make_record(
         meta_info["weight_version"] = weight_version
     if routed_experts is not None:
         meta_info["routed_experts"] = routed_experts
+    if routed_experts_start_len is not None:
+        meta_info["routed_experts_start_len"] = routed_experts_start_len
     return SessionRecord(
         timestamp=0.0,
         method="POST",

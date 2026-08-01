@@ -382,9 +382,7 @@ class TestRespectMaxContextLen:
         expected = [
             ExpectedSampleInfo(
                 chunks=[],
-                partial_sample=expected_partial_sample(
-                    prompt=SINGLE_TURN_PROMPT, response="", response_length=0, status=Sample.Status.TRUNCATED
-                ),
+                partial_sample=expected_partial_sample(prompt=SINGLE_TURN_PROMPT, response="", response_length=0, status=Sample.Status.TRUNCATED),
             )
         ]
         verify_samples(result.sample, expected)
@@ -476,9 +474,7 @@ class TestThreeTurn:
                 expected_request(S.SECOND_PROMPT_TOKEN_IDS),
                 expected_request(S.THIRD_PROMPT_TOKEN_IDS),
             ]
-        full_response = (
-            S.FIRST_RESPONSE + S.FIRST_TOOL_RESPONSE + S.SECOND_RESPONSE + S.SECOND_TOOL_RESPONSE + S.THIRD_RESPONSE
-        )
+        full_response = S.FIRST_RESPONSE + S.FIRST_TOOL_RESPONSE + S.SECOND_RESPONSE + S.SECOND_TOOL_RESPONSE + S.THIRD_RESPONSE
         expected = [
             ExpectedSampleInfo(
                 chunks=[
@@ -548,12 +544,30 @@ class TestRoutedExpertsMultiTurn:
 
         first_routed_experts = make_routed_experts(first_prompt_token_ids, S.FIRST_RESPONSE)
         second_routed_experts = make_routed_experts(second_prompt_token_ids, S.SECOND_RESPONSE)
+        first_trajectory_token_ids = first_prompt_token_ids + TOKENIZER.encode(
+            S.FIRST_RESPONSE,
+            add_special_tokens=False,
+        )
+        second_start = max(
+            0,
+            next(
+                (index for index, (previous, current) in enumerate(zip(first_trajectory_token_ids, second_prompt_token_ids, strict=False)) if previous != current),
+                min(len(first_trajectory_token_ids), len(second_prompt_token_ids)),
+            )
+            - 1,
+        )
 
         def process_fn(prompt: str) -> ProcessResult:
             if prompt == S.FIRST_PROMPT:
                 text, routed_experts = S.FIRST_RESPONSE, first_routed_experts
             elif prompt == S.SECOND_PROMPT:
                 text, routed_experts = S.SECOND_RESPONSE, second_routed_experts
+                if is_agentic_variant(variant):
+                    # The session server asks SGLang for only the suffix not
+                    # already represented by its TITO checkpoint. Mirror that
+                    # wire contract here; sample assembly reconstructs the
+                    # cumulative tensor from both responses.
+                    routed_experts = routed_experts[second_start:]
             else:
                 raise ValueError(f"Unexpected prompt: {prompt}")
             return ProcessResult(
@@ -577,6 +591,8 @@ class TestRoutedExpertsMultiTurn:
                 assert req["no_stop_trim"] is False
                 assert req["return_routed_experts"] is True
                 assert "input_ids" in req
+            assert result.requests[0]["routed_experts_start_len"] == 0
+            assert result.requests[1]["routed_experts_start_len"] == second_start
         else:
             assert result.requests == [
                 expected_request(S.FIRST_PROMPT_TOKEN_IDS, return_routed_experts=True),
@@ -678,7 +694,6 @@ class TestAgentCollectionFailure:
         self, variant, generation_env, monkeypatch, caplog
     ):
         collect_error = asyncio.TimeoutError()
-
         async def fail_collect(_tracer, _input_sample, *, max_seq_len):
             raise collect_error
 

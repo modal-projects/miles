@@ -3,8 +3,9 @@
 HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each request into primitives and calls these methods. Owns one ``SessionRegistry`` (per-session TITO/trajectory state) and one proxy ``backend``.
 
 - ``chat_completions`` strips the R3 replay payloads (``routed_experts`` /
-  ``indexer_topk``) from the client reply copy-on-write; the ``SessionRecord``
-  keeps only the token/logprob metadata needed for server-side sample assembly.
+  ``indexer_topk``) from the client reply copy-on-write. Routed-expert records
+  are incremental: each request starts after the stable TITO prefix, and sample
+  assembly stitches those suffixes into one replay tensor.
 - ``chat_completions`` serializes backend calls per session with a dedicated
   generation lock. The shorter state lock still gates prep/update and lets
   DELETE mark an in-flight session as closing without waiting for inference.
@@ -31,7 +32,11 @@ from miles.rollout.session.errors import (
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.samples.codec import encode_samples
-from miles.rollout.session.samples.merge import compute_samples_from_openai_records, truncate_samples_by_total_tokens
+from miles.rollout.session.samples.merge import (
+    compute_samples_from_openai_records,
+    reconstruct_routed_experts,
+    truncate_samples_by_total_tokens,
+)
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.lora import LORA_ADAPTER_NAME, is_lora_enabled
 
@@ -65,7 +70,11 @@ def _samples_response(payload: bytes) -> Response:
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
 
 
-_CLIENT_STRIPPED_META_KEYS = ("routed_experts", "indexer_topk")
+_CLIENT_STRIPPED_META_KEYS = (
+    "routed_experts",
+    "routed_experts_start_len",
+    "indexer_topk",
+)
 _RECORD_STRIPPED_META_KEYS = (
     # The growing prompt is represented once by accumulated_token_ids.
     "input_token_logprobs",
@@ -100,6 +109,19 @@ def _compact_record_response(response: dict, *, include_message: bool = False) -
     if include_message:
         compact_choice["message"] = choice.get("message")
     return {"choices": [compact_choice]}
+
+
+def _routed_experts_start_len(previous_token_ids: list[int], prompt_token_ids: list[int]) -> int:
+    """Return the first routing row not already represented by TITO state."""
+    common_tokens = 0
+    for previous, current in zip(previous_token_ids, prompt_token_ids, strict=False):
+        if previous != current:
+            break
+        common_tokens += 1
+    # A sequence with N stable tokens already has N-1 routing rows. If the
+    # template consumed a trailing stop token, the common prefix naturally
+    # shortens and the replacement row is requested again.
+    return max(0, common_tokens - 1)
 
 
 def _response_to_stream_chunk(response: dict) -> dict:
@@ -236,6 +258,10 @@ class SessionCore:
         if mismatch is not None:
             metadata["tito_session_mismatch"] = mismatch
         metadata["session_collect/mismatch_seconds"] = time.monotonic() - mismatch_started
+        replay_bytes, replay_payloads, replay_records = session.replay_payload_stats()
+        metadata["session_collect/replay_retained_bytes"] = replay_bytes
+        metadata["session_collect/replay_retained_payloads"] = replay_payloads
+        metadata["session_collect/replay_retained_records"] = replay_records
         model_requests = list(session.model_requests)
         model_request_durations = [float(item["duration_seconds"]) for item in model_requests]
         if model_request_durations:
@@ -316,6 +342,12 @@ class SessionCore:
             )
             return encode_samples([], metadata, empty_reason="all_truncated")
         merged_sample = merge_samples(samples, tokenizer)
+        merged_sample.rollout_routed_experts = reconstruct_routed_experts(
+            self.args,
+            records[: len(samples)],
+            final_num_tokens=len(merged_sample.tokens) - 1,
+        )
+        merged_sample.validate()
         metadata["session_collect/assembly_seconds"] = (
             time.monotonic() - assembly_started
         )
@@ -438,6 +470,13 @@ class SessionCore:
                 tools=request_body.get("tools"),
                 tito_tokenizer=tito_tokenizer,
             )
+            routed_experts_start_len = 0
+            if getattr(self.args, "use_rollout_routing_replay", False):
+                routed_experts_start_len = _routed_experts_start_len(
+                    session.token_ids,
+                    prompt_token_ids,
+                )
+                request_body["routed_experts_start_len"] = routed_experts_start_len
             # `message_matches` intentionally ignores wire-only differences
             # such as tool-call indices and a known client-added GLM tool
             # boundary newline. Keep the already-tokenized stored prefix as
@@ -509,6 +548,8 @@ class SessionCore:
 
         output_token_logprobs = meta_info["output_token_logprobs"]
         completion_tokens = meta_info["completion_tokens"]
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            meta_info["routed_experts_start_len"] = routed_experts_start_len
 
         actual_output_logprobs_len = len(output_token_logprobs)
         if actual_output_logprobs_len != completion_tokens:
