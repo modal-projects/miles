@@ -2595,6 +2595,39 @@ def _resolve_ft_components(args: argparse.Namespace) -> list[str]:
     return list(args.ft_components)
 
 
+def _resolve_checkpoint_load(args) -> None:
+    """Resolve fresh-start versus resume semantics before backend initialization."""
+    has_checkpoint = (
+        args.load is not None
+        and os.path.exists(args.load)
+        and os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
+    )
+    if args.load is not None and args.exit_on_missing_checkpoint and not has_checkpoint:
+        raise FileNotFoundError(
+            f"Resume checkpoint {args.load!r} is missing or has no "
+            "latest_checkpointed_iteration.txt"
+        )
+
+    if args.megatron_to_hf_mode == "bridge":
+        if not has_checkpoint:
+            # The bridge loads fresh weights from HF/reference state. A valid
+            # Megatron checkpoint must leave start_rollout_id unset so actor
+            # initialization can publish loaded_iteration + 1.
+            args.load = args.ref_load or args.hf_checkpoint
+            args.start_rollout_id = 0
+        return
+
+    if has_checkpoint:
+        return
+    args.no_load_optim = True
+    args.no_load_rng = True
+    args.finetune = True
+    args.load = args.ref_load
+    if args.ref_ckpt_step is not None:
+        args.ckpt_step = args.ref_ckpt_step
+    args.start_rollout_id = 0
+
+
 def miles_validate_args(args):
     validate_dashboard_args(args)
 
@@ -2756,31 +2789,7 @@ def miles_validate_args(args):
         if args.opd_teacher_urls:
             raise ValueError("--opd-teacher-urls is set but --use-opd is not enabled. Please add --use-opd flag.")
 
-    # TODO: During loading, we need to set the start_rollout_id here.
-    if args.megatron_to_hf_mode == "bridge":
-        # Fresh runs pass a not-yet-created `--load` dir; fall back to the reference
-        # weights (loaded via the HF bridge) instead of asserting in load_checkpoint.
-        # Mirrors the non-bridge branch below.
-        if (
-            args.load is None
-            or not os.path.exists(args.load)
-            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            args.load = args.ref_load or args.hf_checkpoint
-        args.start_rollout_id = 0
-    else:
-        if (
-            args.load is None
-            or not os.path.exists(args.load)
-            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            args.no_load_optim = True
-            args.no_load_rng = True
-            args.finetune = True
-            args.load = args.ref_load
-            if args.ref_ckpt_step is not None:
-                args.ckpt_step = args.ref_ckpt_step
-            args.start_rollout_id = 0
+    _resolve_checkpoint_load(args)
 
     if args.eval_interval is not None:
         assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
