@@ -60,3 +60,50 @@ def test_true_on_policy_log_checker_passes_when_values_and_dtype_match(monkeypat
     )
 
     assert captured["log_dict"]["log_probs"] == captured["log_dict"]["rollout_log_probs"]
+
+
+def test_failure_placeholders_do_not_bias_trainer_rollout_metrics(monkeypatch):
+    captured = {}
+    parallel_state = SimpleNamespace(
+        tp=SimpleNamespace(rank=0),
+        cp=SimpleNamespace(size=1),
+        is_pp_last_stage=True,
+    )
+    monkeypatch.setattr(log_utils, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(cp_utils, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(
+        log_utils,
+        "gather_log_data",
+        lambda _metric_name, _args, _rollout_id, log_dict: captured.setdefault("log_dict", log_dict),
+    )
+    rollout_data = {
+        "tokens": [torch.tensor([1, 2]), torch.tensor([3, 4])],
+        "total_lengths": [2, 2],
+        "response_lengths": [1, 1],
+        "loss_masks": [
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+        ],
+        "raw_reward": [0.0, 1.0],
+        "rewards": [0.0, 1.0],
+        "log_probs": [torch.tensor([-1.0]), torch.tensor([-2.0])],
+        "loss_denominator_mask": [False, True],
+    }
+
+    log_utils.log_rollout_data(
+        1,
+        Namespace(
+            ci_test=False,
+            ci_disable_logprobs_checker=True,
+            true_on_policy_mode=False,
+            qkv_format="thd",
+            log_multi_turn=False,
+            log_passrate=False,
+            log_correct_samples=False,
+        ),
+        rollout_data,
+    )
+
+    assert captured["log_dict"]["raw_reward"] == 1.0
+    assert captured["log_dict"]["rewards"] == 1.0
+    assert captured["log_dict"]["response_lengths"] == 1.0

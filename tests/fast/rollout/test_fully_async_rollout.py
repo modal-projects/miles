@@ -12,6 +12,12 @@ import pytest
 
 import miles.rollout.fully_async_rollout as fully_async
 from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnEvalInput, RolloutFnTrainInput
+from miles.rollout.failures import (
+    is_infrastructure_failure,
+    is_loss_masked_failure,
+    mark_infrastructure_failure,
+    mark_non_retryable_failure,
+)
 from miles.rollout.filter_hub.base_types import DynamicFilterOutput
 from miles.utils.types import Sample
 
@@ -56,6 +62,7 @@ def make_group(
             group_index=group_index,
             index=group_index * 10 + i,
             prompt=f"prompt {group_index}",
+            tokens=[100 + i],
             response="ok",
             response_length=1,
             label="ok",
@@ -133,6 +140,71 @@ async def test_aborted_group_recycled(monkeypatch):
     assert output.metrics["rollout/fully_async/aborted_groups_recycled"] == 1
 
 
+async def test_non_retryable_infrastructure_failure_is_masked(monkeypatch):
+    group = make_group(1)
+    group.append(replace(group[-1], index=12))
+    failed = group[-1]
+    failed.status = Sample.Status.ABORTED
+    mark_infrastructure_failure(failed)
+    data_source = FakeDataSource(scripted=[group])
+    fn = make_fn(
+        monkeypatch,
+        make_args(rollout_batch_size=1, n_samples_per_prompt=3),
+        data_source,
+    )
+
+    output = await fn(RolloutFnTrainInput(rollout_id=0))
+
+    masked = output.samples[0][-1]
+    assert masked.remove_sample
+    assert is_loss_masked_failure(masked)
+    assert masked.status == Sample.Status.COMPLETED
+    assert masked.index == failed.index
+    assert is_infrastructure_failure(masked)
+    assert data_source.recycled == []
+    assert output.metrics["rollout/fully_async/non_retryable_trajectories_masked"] == 1
+    assert output.metrics["rollout/fully_async/infrastructure_trajectories_masked"] == 1
+
+
+async def test_failure_placeholder_does_not_affect_dynamic_filter(monkeypatch):
+    group = make_group(1)
+    group.append(replace(group[-1], index=12))
+    failed = group[-1]
+    failed.status = Sample.Status.ABORTED
+    mark_infrastructure_failure(failed)
+    fn = make_fn(
+        monkeypatch,
+        make_args(rollout_batch_size=1, n_samples_per_prompt=3),
+        FakeDataSource(scripted=[group]),
+    )
+    filtered_groups = []
+
+    def keep_valid_siblings(_args, filter_group):
+        filtered_groups.append(filter_group)
+        return DynamicFilterOutput(keep=True, reason=None)
+
+    fn._dynamic_filter = keep_valid_siblings
+
+    await fn(RolloutFnTrainInput(rollout_id=0))
+
+    assert len(filtered_groups) == 1
+    assert [sample.index for sample in filtered_groups[0]] == [10, 11]
+
+
+async def test_non_retryable_group_without_two_valid_siblings_is_dropped(monkeypatch):
+    group = make_group(1)
+    group[0].status = Sample.Status.ABORTED
+    mark_non_retryable_failure(group[0])
+    data_source = FakeDataSource(scripted=[group])
+    fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), data_source)
+
+    output = await fn(RolloutFnTrainInput(rollout_id=0))
+
+    assert output.samples[0][0].group_index != 1
+    assert data_source.recycled == []
+    assert output.metrics["rollout/fully_async/non_retryable_groups_dropped"] == 1
+
+
 async def test_stale_group_recycled(monkeypatch):
     stale = make_group(1, weight_versions=["5"])
     data_source = FakeDataSource(scripted=[stale])
@@ -173,6 +245,39 @@ async def test_worker_error_propagates(monkeypatch):
 
     with pytest.raises(RuntimeError, match="generation exploded"):
         await fn(RolloutFnTrainInput(rollout_id=0))
+
+
+async def test_close_cancels_in_flight_groups(monkeypatch):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_generate(
+        state,
+        group,
+        sampling_params,
+        evaluation=False,
+        sample_done_callback=None,
+    ):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    fn = make_fn(
+        monkeypatch,
+        make_args(rollout_batch_size=1),
+        FakeDataSource(),
+        generate=blocking_generate,
+    )
+    drain = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+    await started.wait()
+
+    await fn.close()
+    await cancelled.wait()
+    await asyncio.gather(drain, return_exceptions=True)
+
+    assert fn._worker is None
 
 
 async def test_worker_bounds_in_flight_groups(monkeypatch):

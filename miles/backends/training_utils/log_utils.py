@@ -123,6 +123,12 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
         loss_masks = rollout_data["loss_masks"]
         total_lengths = rollout_data["total_lengths"]
         max_seq_lens = rollout_data.get("max_seq_lens", None)
+        loss_denominator_mask = rollout_data.get("loss_denominator_mask")
+        metric_sample_count = (
+            sum(bool(value) for value in loss_denominator_mask)
+            if loss_denominator_mask is not None
+            else len(loss_masks)
+        )
 
         for key, val in rollout_data.items():
             if key in [
@@ -134,6 +140,8 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 "rollout_indexer_topk",
                 "max_seq_lens",
                 "dynamic_global_batch_size",
+                "loss_global_batch_sizes",
+                "loss_denominator_mask",
                 "witness_ids",
                 "weight_versions",
                 "metadata",
@@ -173,10 +181,18 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                             qkv_format=args.qkv_format,
                             max_seq_lens=max_seq_lens,
                         )
-                        val = cp_size * sum_of_sample_mean(val) / len(loss_masks)
+                        val = cp_size * sum_of_sample_mean(val) / metric_sample_count
                     else:
                         val = val.mean() * cp_size
                 else:
+                    if loss_denominator_mask is not None and len(val) == len(loss_denominator_mask):
+                        val = [
+                            item
+                            for item, keep in zip(val, loss_denominator_mask, strict=True)
+                            if keep
+                        ]
+                        if not val:
+                            continue
                     # Flatten nested lists (e.g. list of lists from async rollout)
                     flat = val
                     if isinstance(val[0], (list, tuple)):
@@ -268,7 +284,10 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
             correct_total_lengths = []
             correct_loss_masks = []
             correct_entropy = []
-            for i, raw_reward in enumerate(raw_rewards):
+            valid_rows = loss_denominator_mask or [True] * len(raw_rewards)
+            for i, (raw_reward, valid) in enumerate(zip(raw_rewards, valid_rows, strict=True)):
+                if not valid:
+                    continue
                 if raw_reward == 1:
                     correct_response_lengths.append(response_lengths[i])
                     correct_total_lengths.append(total_lengths[i])

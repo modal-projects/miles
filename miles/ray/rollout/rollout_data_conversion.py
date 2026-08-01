@@ -1,6 +1,7 @@
 import itertools
 import logging
 
+from miles.rollout.failures import is_loss_masked_failure
 from miles.utils.multi_lora import is_multi_lora_enabled
 
 logger = logging.getLogger(__name__)
@@ -9,11 +10,22 @@ logger = logging.getLogger(__name__)
 def postprocess_rollout_data(args, data, train_parallel_config):
     metadata = {}
 
-    # Multi-LoRA: record group boundaries (heterogeneous per-adapter group sizes)
-    # and lift the collection loop's batch-level step decision out of sample metadata,
-    # both before flattening.
-    if is_multi_lora_enabled(args) and isinstance(data[0], list):
+    # Preserve prompt-group boundaries only when downstream reward processing
+    # needs them: heterogeneous Multi-LoRA groups or zero-loss infrastructure
+    # placeholders. Ordinary rollouts retain the existing Miles path.
+    has_masked_samples = any(
+        is_loss_masked_failure(sample)
+        for group in data
+        for sample in _iter_nested_samples(group)
+    )
+    if isinstance(data[0], list) and (
+        is_multi_lora_enabled(args) or has_masked_samples
+    ):
         metadata["prompt_group_sizes"] = [_nested_sample_count(group) for group in data]
+
+    # Multi-LoRA additionally lifts the collection loop's batch-level step
+    # decision out of sample metadata.
+    if is_multi_lora_enabled(args) and isinstance(data[0], list):
         head = _first_sample(data[0])
         metadata["step_slots"] = list(head.metadata.pop("step_slots", []))
         metadata["step_adapter_names"] = list(head.metadata.pop("step_adapter_names", []))
@@ -38,6 +50,8 @@ def postprocess_rollout_data(args, data, train_parallel_config):
                 raise ValueError(f"Not enough samples {len(data)} for global_batch_size {global_batch_size}")
             origin_data_length = len(data)
             data = data[:trim_len]
+            if "prompt_group_sizes" in metadata:
+                metadata["prompt_group_sizes"] = _trim_group_sizes(metadata["prompt_group_sizes"], trim_len)
             logger.info(f"trim number of samples from {origin_data_length} to {trim_len}")
         logger.info(f"Final collected {len(data)} samples from rollout to train")
 
@@ -52,6 +66,27 @@ def _nested_sample_count(group) -> int:
     if not isinstance(group, list):
         return 1
     return sum(_nested_sample_count(item) for item in group)
+
+
+def _iter_nested_samples(group):
+    if isinstance(group, list):
+        for item in group:
+            yield from _iter_nested_samples(item)
+    else:
+        yield group
+
+
+def _trim_group_sizes(group_sizes: list[int], sample_count: int) -> list[int]:
+    trimmed = []
+    remaining = sample_count
+    for size in group_sizes:
+        if remaining <= 0:
+            break
+        kept = min(size, remaining)
+        trimmed.append(kept)
+        remaining -= kept
+    assert remaining == 0, f"group sizes contain fewer than {sample_count} samples"
+    return trimmed
 
 
 def _compute_dynamic_global_batch_size(args, train_parallel_config, num_samples: int) -> int:

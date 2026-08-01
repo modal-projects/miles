@@ -15,6 +15,7 @@ from miles.ray.rollout.train_data_conversion import (
     split_train_data_by_dp,
     split_train_data_by_dp_raw,
 )
+from miles.rollout.failures import mark_loss_masked_failure
 from miles.utils import object_store
 from miles.utils.types import Sample
 
@@ -53,6 +54,46 @@ class TestConvertSamplesToTrainData:
             assert key in out, f"missing required key {key}"
         assert len(out["tokens"]) == len(samples)
 
+    def test_requested_rollout_log_probs_must_be_complete(self):
+        args = make_args(
+            rewards_normalization=False,
+            use_rollout_logprobs=True,
+            use_tis=False,
+        )
+        samples = [
+            make_sample(
+                index=0,
+                response_length=2,
+                rollout_log_probs=[-0.1, -0.2],
+            ),
+            make_sample(index=1, response_length=2),
+        ]
+
+        with pytest.raises(ValueError, match="must be present for every sample"):
+            convert_samples_to_train_data(
+                args,
+                samples,
+                metadata={},
+                custom_convert_samples_to_train_data_func=None,
+                custom_reward_post_process_func=None,
+            )
+
+    def test_requested_rollout_log_probs_cannot_all_be_missing(self):
+        args = make_args(
+            rewards_normalization=False,
+            use_rollout_logprobs=True,
+            use_tis=False,
+        )
+
+        with pytest.raises(ValueError, match="requires rollout_log_probs"):
+            convert_samples_to_train_data(
+                args,
+                [make_sample(response_length=2)],
+                metadata={},
+                custom_convert_samples_to_train_data_func=None,
+                custom_reward_post_process_func=None,
+            )
+
     def test_loss_mask_none_filled_with_ones(self):
         args = make_args(rewards_normalization=False)
         s = make_sample(response_length=5)
@@ -67,18 +108,58 @@ class TestConvertSamplesToTrainData:
         assert out["loss_masks"][0] == [1] * 5
 
     def test_remove_sample_zeroes_loss_mask(self):
-        args = make_args(rewards_normalization=False)
-        s = make_sample(response_length=4)
-        s.loss_mask = [1, 1, 1, 1]
+        args = make_args(rewards_normalization=False, global_batch_size=2)
+        s = make_sample(response_length=4, reward=99.0)
+        sibling = make_sample(index=1, response_length=4, reward=1.0)
         s.remove_sample = True
         out = convert_samples_to_train_data(
             args,
-            [s],
+            [s, sibling],
             metadata={},
             custom_convert_samples_to_train_data_func=None,
             custom_reward_post_process_func=None,
         )
         assert out["loss_masks"][0] == [0, 0, 0, 0]
+        # Generic sample filters retain Miles' established reward-normalization
+        # and global-loss-denominator semantics.
+        assert out["rewards"][0] == 99.0
+        assert "loss_denominator_mask" not in out
+
+    def test_failure_placeholder_adjusts_rewards_and_loss_denominator(self):
+        args = make_args(rewards_normalization=False, global_batch_size=2)
+        failed = make_sample(response_length=4, reward=99.0)
+        sibling = make_sample(index=1, response_length=4, reward=1.0)
+        failed.remove_sample = True
+        mark_loss_masked_failure(failed)
+
+        out = convert_samples_to_train_data(
+            args,
+            [failed, sibling],
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        assert out["loss_masks"][0] == [0, 0, 0, 0]
+        assert out["rewards"][0] == 0.0
+        assert out["loss_denominator_mask"] == [False, True]
+
+    def test_fully_trainable_batch_uses_standard_denominator_path(self):
+        args = make_args(rewards_normalization=False, global_batch_size=2)
+        samples = [
+            make_sample(index=0, response_length=4, reward=0.0),
+            make_sample(index=1, response_length=4, reward=1.0),
+        ]
+
+        out = convert_samples_to_train_data(
+            args,
+            samples,
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        assert "loss_denominator_mask" not in out
 
     def test_loss_mask_length_mismatch_asserts(self):
         args = make_args(rewards_normalization=False)
@@ -220,6 +301,48 @@ class TestPostProcessRewards:
         import numpy as np
 
         assert abs(np.std(processed, ddof=1) - 1.0) < 1e-4
+
+    def test_grpo_excludes_infrastructure_mask_from_group_statistics(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=False,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[0.0, 1.0, 1.0, 99.0])
+        samples[-1].remove_sample = True
+        mark_loss_masked_failure(samples[-1])
+
+        raw, processed = _post_process_rewards(
+            args,
+            samples,
+            custom_reward_post_process_func=None,
+            prompt_group_sizes=[4],
+        )
+
+        assert raw == pytest.approx([0.0, 1.0, 1.0, 99.0])
+        assert processed == pytest.approx([-2 / 3, 1 / 3, 1 / 3, 0.0])
+
+    def test_grpo_generic_sample_filter_keeps_standard_group_statistics(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=False,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[0.0, 1.0, 1.0, 2.0])
+        samples[-1].remove_sample = True
+
+        _, processed = _post_process_rewards(
+            args,
+            samples,
+            custom_reward_post_process_func=None,
+            prompt_group_sizes=[4],
+        )
+
+        assert processed == pytest.approx([-1.0, 0.0, 0.0, 1.0])
 
     def test_gspo_uses_grpo_normalization_path(self):
         args = make_args(
@@ -465,6 +588,24 @@ class TestSplitTrainDataByDp:
         for p in parts:
             assert p["raw_reward"] == [9.0, 8.0, 7.0, 6.0]
             assert p["dynamic_global_batch_size"] == 4
+
+    def test_masked_rows_use_effective_loss_denominator(self):
+        args = make_args(balance_data=False, global_batch_size=4)
+        data = {
+            "tokens": [[1], [2], [3], [4]],
+            "response_lengths": [1, 1, 1, 1],
+            "rewards": [0, 0, 0, 0],
+            "truncated": [0, 0, 0, 0],
+            "loss_masks": [[1], [0], [1], [1]],
+            "sample_indices": [0, 1, 2, 3],
+            "loss_denominator_mask": [True, False, True, True],
+        }
+
+        parts = split_train_data_by_dp_raw(args, data, dp_size=2)
+
+        assert parts[0]["loss_global_batch_sizes"] == [3, 3]
+        assert parts[1]["loss_global_batch_sizes"] == [3, 3]
+        assert data["loss_denominator_mask"] == [True, False, True, True]
 
     def test_partition_indices_form_a_partition(self):
         """All partition indices together cover [0, N) exactly once."""

@@ -3194,7 +3194,7 @@ def miles_validate_args(args):
 
 
 def validate_async_off_policy_correction(args) -> None:
-    """Require an explicit behavior-policy choice for async PPO training.
+    """Require an explicit behavior-policy choice for async policy training.
 
     In the async train loop the next rollout is generated before the current
     weight update is published, so samples can come from a stale policy. With
@@ -3203,10 +3203,10 @@ def validate_async_off_policy_correction(args) -> None:
     advantages) to a policy that never generated the trajectory; the recorded
     ``weight_versions`` are a metric, not an enforcement mechanism.
     """
-    if not args.use_critic:
+    if getattr(args, "loss_type", "policy_loss") != "policy_loss":
         return
     assert args.use_rollout_logprobs or args.use_tis or args.keep_old_actor, (
-        "Async PPO training requires an explicit behavior-policy correction, because rollouts are "
+        "Async policy training requires an explicit behavior-policy correction, because rollouts are "
         "generated before the current weight update while log probs are recomputed by the current "
         "actor by default. Pass one of: --use-rollout-logprobs (use the rollout engine's log probs "
         "as the ratio denominator), --use-tis (truncated importance sampling correction), or "
