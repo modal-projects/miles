@@ -23,7 +23,11 @@ import httpx
 
 from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnInput, RolloutFnOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
-from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
+from miles.rollout.inference_rollout.inference_rollout_common import (
+    GenerateState,
+    SubmissionScheduler,
+    generate_and_rm_group,
+)
 from miles.utils.http_utils import get
 from miles.utils.misc import load_function
 from miles.utils.types import Sample
@@ -98,6 +102,7 @@ class FullyAsyncRolloutFn:
         self.state = GenerateState(input.args)
         self._dynamic_filter = load_function(input.args.dynamic_sampling_filter_path)
         self._sample_filter = load_function(input.args.rollout_sample_filter_path)
+        self._scheduler = SubmissionScheduler(input.args)
         self._weight_version = _CachedWeightVersion()
         self._worker: asyncio.Task | None = None
         self._output: asyncio.Queue[tuple[list[Sample], Group]] | None = None
@@ -123,7 +128,9 @@ class FullyAsyncRolloutFn:
         return self.args.rollout_batch_size
 
     def _submit_one_group(self) -> asyncio.Task:
-        [prompt_group] = self.data_source.get_samples(1)
+        samples = self.data_source.get_samples(1)
+        self._scheduler.on_submit(samples)
+        [prompt_group] = samples
         return asyncio.create_task(self._generate_group(prompt_group))
 
     async def _generate_group(self, prompt_group: list[Sample]) -> tuple[list[Sample], Group]:
@@ -138,15 +145,17 @@ class FullyAsyncRolloutFn:
             prompt_group,
             sampling_params=self.state.sampling_params.copy(),
             evaluation=False,
+            sample_done_callback=self._scheduler.sample_done_callback,
         )
         return prompt_group, result
 
     async def _worker_loop(self):
         active: set[asyncio.Task] = set()
         while True:
-            while len(active) < self._max_in_flight_groups():
+            self._scheduler.arm()
+            while self._scheduler.has_capacity(pending_groups=len(active), group_budget=self._max_in_flight_groups()):
                 active.add(self._submit_one_group())
-            done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+            done, active = await self._scheduler.wait_for_progress(active)
             for task in done:
                 # Blocks when the queue is full: training lagging behind rollout
                 # production pauses submission instead of growing the queue unboundedly.
