@@ -5,7 +5,12 @@ from unittest.mock import patch
 import pytest
 from tests.fast.ray.rollout.conftest import make_args
 
-from miles.ray.rollout.router_manager import _resolve_session_server_ports, start_router, start_session_server
+from miles.ray.rollout.router_manager import (
+    _resolve_session_server_ports,
+    _wait_for_session_server_pool_ready,
+    start_router,
+    start_session_server,
+)
 
 
 class TestStartRouter:
@@ -85,3 +90,59 @@ class TestResolveSessionServerPorts:
     def test_more_than_two_values_raises(self):
         with pytest.raises(ValueError, match="one port or a start/end range"):
             _resolve_session_server_ports([30000, 30001, 30002])
+
+
+class TestWaitForSessionServerPoolReady:
+    def test_polls_all_ports_against_one_deadline(self):
+        class Process:
+            def is_alive(self):
+                return True
+
+        attempts = {30000: 0, 30001: 0}
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+        def create_connection(address, timeout):
+            del timeout
+            assert address[0] == "::1"
+            port = address[1]
+            attempts[port] += 1
+            if attempts[port] < (3 if port == 30000 else 2):
+                raise ConnectionRefusedError
+            return Connection()
+
+        with (
+            patch(
+                "miles.ray.rollout.router_manager.socket.create_connection",
+                side_effect=create_connection,
+            ),
+            patch("miles.ray.rollout.router_manager.time.sleep"),
+        ):
+            ready = _wait_for_session_server_pool_ready(
+                "[::1]",
+                [(30000, Process()), (30001, Process())],
+                timeout=10,
+            )
+
+        assert set(ready) == {30000, 30001}
+        assert attempts == {30000: 3, 30001: 2}
+
+    def test_reports_dead_shard_with_pool_progress(self):
+        class Process:
+            def __init__(self, alive):
+                self.alive = alive
+
+            def is_alive(self):
+                return self.alive
+
+        with pytest.raises(RuntimeError, match=r"port 30001 died.*0/2 ready"):
+            _wait_for_session_server_pool_ready(
+                "127.0.0.1",
+                [(30000, Process(True)), (30001, Process(False))],
+                timeout=1,
+            )
