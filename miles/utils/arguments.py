@@ -2361,6 +2361,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "Auto-allocates a single port if not set.",
             )
             parser.add_argument(
+                "--session-server-startup-timeout-seconds",
+                type=float,
+                default=180.0,
+                help=(
+                    "Shared cold-start deadline for the complete session-server process pool. "
+                    "All servers are polled concurrently against this deadline."
+                ),
+            )
+            parser.add_argument(
                 "--tito-model",
                 type=str,
                 default="default",
@@ -2632,6 +2641,8 @@ def miles_validate_args(args):
         raise ValueError("--tito-session-mismatch-sample-rate must be between 0 and 1")
     if not args.use_session_server and args.tito_session_mismatch_sample_rate != 1.0:
         raise ValueError("--tito-session-mismatch-sample-rate requires --use-session-server")
+    if args.session_server_startup_timeout_seconds <= 0:
+        raise ValueError("--session-server-startup-timeout-seconds must be positive")
 
     # DEFAULT uses the checkpoint's native or caller-provided template.  Its
     # maximal four-role surface is best-effort rather than a Miles-verified
