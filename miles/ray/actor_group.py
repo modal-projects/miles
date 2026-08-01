@@ -122,8 +122,10 @@ class RayTrainGroup:
 
         info = await self.rollout_manager.get_updatable_engines_and_lock.remote()
         await self.rollout_manager.health_monitoring_pause.remote()
-
-        await self._broadcast("update_weights", info=info)
+        try:
+            await self._broadcast("update_weights", info=info)
+        finally:
+            await self.rollout_manager.health_monitoring_resume.remote()
 
     async def reconcile_adapters(self) -> None:
         """Multi-LoRA: reconcile loaded adapters with the controller's active set
@@ -138,6 +140,9 @@ class RayTrainGroup:
 
     async def clear_memory(self):
         await self._broadcast("clear_memory")
+
+    async def finish_tracking(self):
+        await self._broadcast("finish_tracking")
 
     async def set_rollout_manager(self):
         self.rollout_manager = self._rollout_manager

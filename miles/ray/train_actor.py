@@ -20,6 +20,7 @@ from miles.utils.logging_utils import configure_logger
 from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.test_utils.det_process_group import DET_NCCL_BACKEND_NAME, register_det_nccl_backend
 from miles.utils.test_utils.fault_injector import inject_fault as _inject_fault
+from miles.utils.tracking_utils.tracking import finish_tracking as _finish_tracking
 
 if TYPE_CHECKING:
     from miles.ray.rollout.rollout_manager import EnginesAndLock
@@ -149,6 +150,10 @@ class TrainRayActor(RayActor):
         print_memory("before TrainRayActor.clear_memory")
         clear_memory()
         print_memory("after TrainRayActor.clear_memory")
+
+    def finish_tracking(self):
+        """Flush process-local tracking backends before the Ray actor exits."""
+        _finish_tracking()
 
     @abc.abstractmethod
     def sleep(self, tags):
