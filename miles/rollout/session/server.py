@@ -8,6 +8,7 @@
 
 import json
 import logging
+import time
 
 import httpx
 import setproctitle
@@ -37,7 +38,6 @@ class SessionServer:
             limits=httpx.Limits(max_connections=1024),
             timeout=httpx.Timeout(timeout),
         )
-
         # Close the httpx connection pool when uvicorn shuts down to avoid FD leaks.
         self.app.router.on_shutdown.append(self.client.aclose)
 
@@ -50,9 +50,11 @@ class SessionServer:
 
         headers = {k: v for k, v in headers.items() if k.lower() not in _DROP_REQUEST_HEADERS}
 
+        backend_request_started = time.monotonic()
         try:
             response = await self.client.request(request.method, url, content=body, headers=headers)
         except httpx.TransportError as exc:
+            backend_request_seconds = time.monotonic() - backend_request_started
             logger.warning("Proxy transport error for %s %s: %s", request.method, path, exc)
             error_body = json.dumps({"error": f"backend transport error: {type(exc).__name__}: {exc}"}).encode()
             return {
@@ -60,6 +62,7 @@ class SessionServer:
                 "response_body": error_body,
                 "status_code": 502,
                 "headers": {"content-type": "application/json"},
+                "backend_request_seconds": backend_request_seconds,
             }
         content = await response.aread()
         return {
@@ -67,6 +70,7 @@ class SessionServer:
             "response_body": content,
             "status_code": response.status_code,
             "headers": dict(response.headers),
+            "backend_request_seconds": time.monotonic() - backend_request_started,
         }
 
 
@@ -74,6 +78,11 @@ def run_session_server(args, backend_url: str):
     """Entry point to start the standalone session server as a subprocess."""
     # Spawned as a fresh interpreter, so it inherits no logging config.
     configure_logger_raw("session_server")
+    # At agentic rollout rates, httpx's INFO record for every successful
+    # upstream request overwhelms useful session/TITO diagnostics. Transport
+    # failures are logged explicitly by ``do_proxy`` and remain visible.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     # Visible to `pkill -9 miles`; without this the daemon inherits "python".
     setproctitle.setproctitle("miles-session-server")
 
@@ -84,4 +93,10 @@ def run_session_server(args, backend_url: str):
         args.session_server_port,
         backend_url,
     )
-    uvicorn.run(server.app, host=args.session_server_ip, port=args.session_server_port, log_level="info")
+    uvicorn.run(
+        server.app,
+        host=args.session_server_ip,
+        port=args.session_server_port,
+        log_level="info",
+        access_log=False,
+    )

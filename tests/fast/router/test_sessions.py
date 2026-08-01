@@ -4,7 +4,9 @@ import asyncio
 import json
 import re
 import socket
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,8 +15,9 @@ import pytest
 import requests
 from fastapi.responses import JSONResponse
 
+import miles.rollout.session.server as session_server_module
+from miles.rollout.session.linear_trajectory import LinearTrajectory
 from miles.rollout.session.server import SessionServer
-from miles.utils.chat_template_utils import message_matches
 from miles.utils.http_utils import find_available_port
 from miles.utils.test_utils.mock_sglang_server import MockSGLangServer, ProcessResult, with_mock_server
 from miles.utils.test_utils.openai_stream_client import stream_chat_completions
@@ -47,9 +50,7 @@ def router_env():
         response = original_chat_response(self, payload)
         choice = response["choices"][0]
         logprobs_content = choice["logprobs"]["content"]
-        output_token_logprobs = [
-            (item["logprob"], self.tokenizer.convert_tokens_to_ids(item["token"])) for item in logprobs_content
-        ]
+        output_token_logprobs = [(item["logprob"], self.tokenizer.convert_tokens_to_ids(item["token"])) for item in logprobs_content]
         choice["meta_info"] = {
             "output_token_logprobs": output_token_logprobs,
             "completion_tokens": len(output_token_logprobs),
@@ -64,6 +65,7 @@ def router_env():
         with with_mock_server(process_fn=process_fn) as backend:
             args = SimpleNamespace(
                 miles_router_timeout=30,
+                max_seq_len=None,
                 hf_checkpoint="Qwen/Qwen3-0.6B",
                 chat_template_path=None,
                 apply_chat_template_kwargs={"enable_thinking": False},
@@ -80,7 +82,7 @@ def router_env():
             url = f"http://127.0.0.1:{port}"
 
             try:
-                yield SimpleNamespace(url=url, backend=backend)
+                yield SimpleNamespace(url=url, backend=backend, args=args)
             finally:
                 server.stop()
 
@@ -114,6 +116,31 @@ class TestSessionRoutes:
         data = get_resp.json()
         assert data["session_id"] == session_id
         assert data["records"] == []
+
+    def test_cpu_heavy_tito_prepare_does_not_block_health(self, router_env):
+        session_id = _create_session(router_env.url)
+        entered = threading.Event()
+        release = threading.Event()
+        original = LinearTrajectory.prepare_pretokenized
+
+        def blocking_prepare(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(timeout=5.0)
+            return original(self, *args, **kwargs)
+
+        payload = {"messages": [{"role": "user", "content": "keep the event loop responsive"}]}
+        with patch.object(LinearTrajectory, "prepare_pretokenized", new=blocking_prepare):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                chat = pool.submit(_post_chat, router_env.url, session_id, payload)
+                assert entered.wait(timeout=2.0)
+                health = pool.submit(requests.get, f"{router_env.url}/health", timeout=2.0)
+                try:
+                    health_response = health.result(timeout=1.0)
+                finally:
+                    release.set()
+
+                assert health_response.status_code == 200
+                assert chat.result(timeout=10.0).status_code == 200
 
     def test_get_session_not_found(self, router_env):
         response = requests.get(f"{router_env.url}/sessions/nonexistent", timeout=5.0)
@@ -161,6 +188,10 @@ class TestSessionProxy:
         record = records[0]
         assert record["path"] == "/v1/chat/completions"
         assert record["status_code"] == 200
+        metadata = get_resp.json()["metadata"]
+        assert metadata["model_request/non_200_count"] == 0
+        assert metadata["model_request/completion_tokens"] > 0
+        assert len(metadata["model_request/durations_seconds"]) == 1
 
     def test_proxy_chat_response_has_no_duplicate_server_or_date_header(self, router_env):
         # Both the backend and this server run under uvicorn, so each emits its own
@@ -230,6 +261,64 @@ class TestSessionProxy:
         override_payload = router_env.backend.request_log[-1]
         assert override_payload["chat_template_kwargs"] == {"enable_thinking": True}
         assert override_payload["input_ids"] != default_payload["input_ids"]
+
+        assistant = resp.json()["choices"][0]["message"]
+        changed = requests.post(
+            f"{router_env.url}/sessions/{override_session}/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    assistant,
+                    {"role": "user", "content": "continue"},
+                ],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            timeout=10.0,
+        )
+        assert changed.status_code == 400
+        assert changed.json()["error"] == (
+            "chat_template_kwargs cannot change within a session"
+        )
+
+    def test_chat_clamps_completion_to_remaining_context_budget(self, router_env):
+        session_id = requests.post(f"{router_env.url}/sessions", timeout=5.0).json()["session_id"]
+        router_env.args.max_seq_len = 256
+        try:
+            resp = requests.post(
+                f"{router_env.url}/sessions/{session_id}/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "short prompt"}],
+                    "max_tokens": 1000,
+                },
+                timeout=10.0,
+            )
+        finally:
+            router_env.args.max_seq_len = None
+
+        assert resp.status_code == 200
+        request = router_env.backend.request_log[-1]
+        assert request["max_tokens"] == 256 - len(request["input_ids"]) - 1
+        assert 0 < request["max_tokens"] < 256
+
+    def test_chat_rejects_prompt_at_context_budget_before_backend(self, router_env):
+        session_id = requests.post(f"{router_env.url}/sessions", timeout=5.0).json()["session_id"]
+        request_count = len(router_env.backend.request_log)
+        router_env.args.max_seq_len = 1
+        try:
+            resp = requests.post(
+                f"{router_env.url}/sessions/{session_id}/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "too long"}],
+                    "max_tokens": 16,
+                },
+                timeout=10.0,
+            )
+        finally:
+            router_env.args.max_seq_len = None
+
+        assert resp.status_code == 400
+        assert "TITO context limit reached" in resp.json()["error"]
+        assert len(router_env.backend.request_log) == request_count
 
     def test_chat_upstream_null_message_returns_502(self, router_env):
         session_id = requests.post(f"{router_env.url}/sessions", timeout=5.0).json()["session_id"]
@@ -317,28 +406,17 @@ class TestChatFakeStreaming:
         assert "stream_options" not in backend_payload
 
         stream_record = requests.get(f"{router_env.url}/sessions/{stream_sid}", timeout=5.0).json()["records"][0]
-        non_stream_record = requests.get(f"{router_env.url}/sessions/{non_stream_sid}", timeout=5.0).json()["records"][
-            0
-        ]
+        non_stream_record = requests.get(f"{router_env.url}/sessions/{non_stream_sid}", timeout=5.0).json()["records"][0]
         assert stream_record["request"] == non_stream_record["request"]
-        assert (
-            stream_record["response"]["choices"][0]["message"]
-            == non_stream_record["response"]["choices"][0]["message"]
-        )
-        assert (
-            stream_record["response"]["choices"][0]["meta_info"]
-            == non_stream_record["response"]["choices"][0]["meta_info"]
-        )
+        assert "message" not in stream_record["response"]["choices"][0]
+        assert "message" not in non_stream_record["response"]["choices"][0]
+        assert stream_record["response"]["choices"][0]["meta_info"] == non_stream_record["response"]["choices"][0]["meta_info"]
 
     def test_stream_tool_calls_single_chunk_with_index(self, router_env):
         session_id = _create_session(router_env.url)
 
         def tool_call_process_fn(prompt: str) -> ProcessResult:
-            return ProcessResult(
-                text=(
-                    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Beijing"}}\n</tool_call>\n<tool_call>\n{"name": "get_time", "arguments": {"timezone": "UTC"}}\n</tool_call>'
-                )
-            )
+            return ProcessResult(text=('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Beijing"}}\n</tool_call>\n<tool_call>\n{"name": "get_time", "arguments": {"timezone": "UTC"}}\n</tool_call>'))
 
         tools = [
             {
@@ -433,24 +511,12 @@ class TestChatFakeStreaming:
         records = requests.get(f"{router_env.url}/sessions/{session_id}", timeout=5.0).json()["records"]
         assert len(records) == 2
 
-    def test_streaming_client_rebuilt_tool_calls_match_stored(self, router_env):
-        """Rebuilt tool_calls must match the stored assistant under message_matches.
-
-        The stored message keeps SGLang's wire shape (tool_calls carry
-        ``index``); a protocol-faithful streaming client drops that
-        streaming-only key when rebuilding.  The server's own comparison
-        (``message_matches``) must treat the two as equal — dict equality is
-        deliberately NOT the contract."""
+    def test_streaming_client_rebuilds_tool_calls_without_record_duplication(self, router_env):
         session_id = _create_session(router_env.url)
         url = f"{router_env.url}/sessions/{session_id}/v1/chat/completions"
 
         def tool_call_process_fn(prompt: str) -> ProcessResult:
-            return ProcessResult(
-                text=(
-                    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Beijing"}}\n</tool_call>\n'
-                    '<tool_call>\n{"name": "get_time", "arguments": {"timezone": "UTC"}}\n</tool_call>'
-                )
-            )
+            return ProcessResult(text=('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Beijing"}}\n</tool_call>\n<tool_call>\n{"name": "get_time", "arguments": {"timezone": "UTC"}}\n</tool_call>'))
 
         tools = [
             {
@@ -471,26 +537,18 @@ class TestChatFakeStreaming:
 
         async def run():
             async with httpx.AsyncClient(timeout=10) as client:
-                return await stream_chat_completions(
-                    client, url, {"messages": self.MESSAGES, "tools": tools}, label="tool turn"
-                )
+                return await stream_chat_completions(client, url, {"messages": self.MESSAGES, "tools": tools}, label="tool turn")
 
         with patch.object(router_env.backend, "process_fn", new=tool_call_process_fn):
             response = asyncio.run(run())
 
         rebuilt_message = response["choices"][0]["message"]
         record = requests.get(f"{router_env.url}/sessions/{session_id}", timeout=5.0).json()["records"][0]
-        stored_message = record["response"]["choices"][0]["message"]
-        # Mock fidelity guard: the stored wire shape carries index, the rebuilt drops it.
-        assert all("index" in tool_call for tool_call in stored_message["tool_calls"])
+        assert "message" not in record["response"]["choices"][0]
         assert all("index" not in tool_call for tool_call in rebuilt_message["tool_calls"])
-        assert message_matches(stored_message, rebuilt_message)
-        # Template-relevant substance survives the round-trip exactly.
-        assert [tool_call["function"] for tool_call in rebuilt_message["tool_calls"]] == [
-            tool_call["function"] for tool_call in stored_message["tool_calls"]
-        ]
-        assert [tool_call["id"] for tool_call in rebuilt_message["tool_calls"]] == [
-            tool_call["id"] for tool_call in stored_message["tool_calls"]
+        assert [tool_call["function"]["name"] for tool_call in rebuilt_message["tool_calls"]] == [
+            "get_weather",
+            "get_time",
         ]
 
     def test_streaming_client_tool_call_turn_then_tool_result_continues(self, router_env):
@@ -507,9 +565,7 @@ class TestChatFakeStreaming:
         def tool_then_text_process_fn(prompt: str) -> ProcessResult:
             if "TOOL_SENTINEL_42" in prompt:
                 return ProcessResult(text="Final answer after tool.")
-            return ProcessResult(
-                text='<tool_call>\n{"name": "get_weather", "arguments": {"city": "Beijing"}}\n</tool_call>'
-            )
+            return ProcessResult(text='<tool_call>\n{"name": "get_weather", "arguments": {"city": "Beijing"}}\n</tool_call>')
 
         tools = [
             {
@@ -523,9 +579,7 @@ class TestChatFakeStreaming:
 
         async def run():
             async with httpx.AsyncClient(timeout=10) as client:
-                first = await stream_chat_completions(
-                    client, url, {"messages": self.MESSAGES, "tools": tools}, label="tool turn"
-                )
+                first = await stream_chat_completions(client, url, {"messages": self.MESSAGES, "tools": tools}, label="tool turn")
                 assistant = first["choices"][0]["message"]
                 messages = [
                     *self.MESSAGES,
@@ -536,9 +590,7 @@ class TestChatFakeStreaming:
                         "tool_call_id": assistant["tool_calls"][0]["id"],
                     },
                 ]
-                second = await stream_chat_completions(
-                    client, url, {"messages": messages, "tools": tools}, label="tool_result turn"
-                )
+                second = await stream_chat_completions(client, url, {"messages": messages, "tools": tools}, label="tool_result turn")
                 return first, second
 
         with patch.object(router_env.backend, "process_fn", new=tool_then_text_process_fn):
@@ -559,9 +611,7 @@ class TestChatFakeStreaming:
         expected = _post_chat(router_env.url, non_stream_sid, {"messages": self.MESSAGES}).json()
         expected_content = expected["choices"][0]["message"]["content"]
 
-        client = openai.OpenAI(
-            base_url=f"{router_env.url}/sessions/{stream_sid}/v1", api_key="not-used", max_retries=0
-        )
+        client = openai.OpenAI(base_url=f"{router_env.url}/sessions/{stream_sid}/v1", api_key="not-used", max_retries=0)
         stream = client.chat.completions.create(model="mock-model", messages=self.MESSAGES, stream=True)
         content = ""
         finish_reason = None
@@ -573,3 +623,31 @@ class TestChatFakeStreaming:
                 finish_reason = choice.finish_reason
         assert content == expected_content
         assert finish_reason == "stop"
+
+
+def test_run_session_server_disables_access_log(monkeypatch):
+    app = object()
+    call = {}
+
+    monkeypatch.setattr(session_server_module, "configure_logger_raw", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(session_server_module.setproctitle, "setproctitle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        session_server_module,
+        "SessionServer",
+        lambda *_args, **_kwargs: SimpleNamespace(app=app),
+    )
+
+    def fake_uvicorn_run(passed_app, **kwargs):
+        call["app"] = passed_app
+        call.update(kwargs)
+
+    monkeypatch.setattr(session_server_module.uvicorn, "run", fake_uvicorn_run)
+    args = SimpleNamespace(
+        session_server_ip="127.0.0.1",
+        session_server_port=31000,
+    )
+
+    session_server_module.run_session_server(args, "http://127.0.0.1:30000")
+
+    assert call["app"] is app
+    assert not call["access_log"]

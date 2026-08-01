@@ -274,6 +274,32 @@ class TestSingleUserTurnPretokenized:
         result = session.prepare_pretokenized(t2_msgs, tito_tokenizer=registry.tito_tokenizer)
         assert result == [1, 2, 10]
 
+    def test_tools_cannot_change_after_first_checkpoint(
+        self,
+        registry: SessionRegistry,
+    ):
+        session = registry.get_session(registry.create_session())
+        first_tools = [{"type": "function", "function": {"name": "first"}}]
+        second_tools = [{"type": "function", "function": {"name": "second"}}]
+        session.update_pretokenized_state(
+            [USER_MSG],
+            ASSISTANT_MSG_1,
+            [1, 2],
+            [10],
+            max_trim_tokens=0,
+            tools=first_tools,
+        )
+
+        with pytest.raises(
+            MessageValidationError,
+            match="tools cannot change",
+        ):
+            session.prepare_pretokenized(
+                [USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_1],
+                tools=second_tools,
+                tito_tokenizer=registry.tito_tokenizer,
+            )
+
     def test_multiple_system_messages_at_start(self, registry: SessionRegistry):
         """Multiple system messages before the user message are allowed (part of stored prefix)."""
         sid = registry.create_session()
@@ -718,6 +744,78 @@ class TestRollback:
 
         assert session.num_assistant == 2
         assert session.token_ids == [1, 2, 10, 20, 30]
+
+    def test_retry_first_request_rolls_back_to_root(self, registry: SessionRegistry):
+        """An exact retry of the first request replaces its assistant response."""
+        sid = registry.create_session()
+        session = registry.get_session(sid)
+        session.update_pretokenized_state(
+            [SYS_MSG, USER_MSG],
+            ASSISTANT_MSG_1,
+            [1, 2],
+            [10],
+            max_trim_tokens=0,
+        )
+        session.append_record(
+            SessionRecord(
+                timestamp=1.0,
+                method="POST",
+                path="/v1/chat/completions",
+                status_code=200,
+                request={},
+                response={},
+            )
+        )
+        registry.tito_tokenizer.apply_chat_template = MagicMock(return_value=[7, 8])
+
+        result = session.prepare_pretokenized(
+            [SYS_MSG, USER_MSG],
+            tito_tokenizer=registry.tito_tokenizer,
+        )
+
+        assert result == [7, 8]
+        assert session.messages == []
+        assert session.trajectory_token_ids == []
+        assert session.records == []
+        assert session.num_assistant == 0
+
+    def test_first_format_error_feedback_rolls_back_to_root(self, registry_with_user: SessionRegistry):
+        """First-turn format feedback can replace the invalid assistant response."""
+        sid = registry_with_user.create_session()
+        session = registry_with_user.get_session(sid)
+        session.update_pretokenized_state(
+            [SYS_MSG, USER_MSG],
+            ASSISTANT_MSG_1,
+            [1, 2],
+            [10],
+            max_trim_tokens=0,
+        )
+        session.append_record(
+            SessionRecord(
+                timestamp=1.0,
+                method="POST",
+                path="/v1/chat/completions",
+                status_code=200,
+                request={},
+                response={},
+            )
+        )
+        registry_with_user.tito_tokenizer.apply_chat_template = MagicMock(return_value=[7, 8, 9])
+        format_feedback = {
+            "role": "user",
+            "content": "You must submit exactly one tool call.",
+        }
+
+        result = session.prepare_pretokenized(
+            [SYS_MSG, USER_MSG, format_feedback],
+            tito_tokenizer=registry_with_user.tito_tokenizer,
+        )
+
+        assert result == [7, 8, 9]
+        assert session.messages == []
+        assert session.trajectory_token_ids == []
+        assert session.records == []
+        assert session.num_assistant == 0
 
     def test_rollback_records_truncated(self, registry: SessionRegistry):
         """Records are truncated in sync with trajectory_token_ids on rollback."""
