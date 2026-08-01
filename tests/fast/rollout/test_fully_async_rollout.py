@@ -3,6 +3,7 @@ from tests.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=60, suite="stage-a-cpu", labels=[])
 
 import asyncio
+import time
 from argparse import Namespace
 from collections import deque
 from dataclasses import replace
@@ -99,7 +100,15 @@ def make_fn(monkeypatch, args, data_source, generate=None):
 
     monkeypatch.setattr(fully_async, "GenerateState", FakeGenerateState)
     monkeypatch.setattr(fully_async, "generate_and_rm_group", generate or default_generate)
-    return fully_async.FullyAsyncRolloutFn(RolloutFnConstructorInput(args=args, data_source=data_source))
+    fn = fully_async.FullyAsyncRolloutFn(RolloutFnConstructorInput(args=args, data_source=data_source))
+
+    class NoWeightVersion:
+        async def get(self, args):
+            return None
+
+    fn._finish_weight_version = NoWeightVersion()
+    fn._weight_version = NoWeightVersion()
+    return fn
 
 
 async def test_drain_collects_batch_sorted_with_metrics(monkeypatch):
@@ -311,6 +320,46 @@ async def test_stale_group_recycled(monkeypatch):
     assert output.metrics["rollout/fully_async/max_staleness"] == 5
 
 
+async def test_metrics_split_generation_and_post_finish_staleness(monkeypatch):
+    first = make_group(1, weight_versions=["5", "7"])
+    never = asyncio.Event()
+
+    async def generate_first_only(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        if group[0].group_index != 1:
+            await never.wait()
+        return group
+
+    fn = make_fn(
+        monkeypatch,
+        make_args(rollout_batch_size=1, max_weight_staleness=6),
+        FakeDataSource(scripted=[first]),
+        generate=generate_first_only,
+    )
+
+    class FixedWeightVersion:
+        def __init__(self, value):
+            self.value = value
+
+        async def get(self, args):
+            return self.value
+
+    fn._finish_weight_version = FixedWeightVersion(8)
+    fn._weight_version = FixedWeightVersion(10)
+
+    output = await fn(RolloutFnTrainInput(rollout_id=0))
+    await fn.close()
+
+    metrics = output.metrics
+    assert metrics["rollout_staleness/accepted/generation_lag_versions_mean"] == 3
+    assert metrics["rollout_staleness/accepted/post_finish_lag_versions_mean"] == 2
+    assert metrics["rollout_staleness/accepted/within_group_version_span_mean"] == 2
+    assert metrics["rollout/fully_async/avg_staleness"] == 5
+    assert metrics["rollout_async/accepted_queue_wait_seconds_mean"] >= 0
+    assert metrics["rollout_async/group_completions_per_sec"] > 0
+    assert metrics["rollout_async/trainer_consumption_groups_per_sec"] > 0
+    assert metrics["rollout_async/active_trajectories"] == 2
+
+
 async def test_worker_error_propagates(monkeypatch):
     async def failing_generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
         raise RuntimeError("generation exploded")
@@ -403,7 +452,14 @@ async def test_worker_failure_beats_queued_groups(monkeypatch):
 
     fn._output = asyncio.Queue(maxsize=fully_async.OUTPUT_QUEUE_MAX_GROUPS)
     group = make_group(1)
-    await fn._output.put((group, group))
+    await fn._output.put(
+        fully_async._CompletedGroup(
+            prompt_group=group,
+            group=group,
+            finished_at=time.monotonic(),
+            finish_weight_version=None,
+        )
+    )
     fn._worker = asyncio.create_task(boom())
     await asyncio.sleep(0)
 
@@ -500,6 +556,24 @@ async def test_weight_version_throttles_failed_queries(monkeypatch):
     assert await expired.get(args) is None
     assert await expired.get(args) is None
     assert len(calls) == 2
+
+
+async def test_weight_version_coalesces_concurrent_queries(monkeypatch):
+    calls = 0
+
+    async def router_version(url):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return {"weight_version": 9}
+
+    monkeypatch.setattr(fully_async, "get", router_version)
+    version = fully_async._CachedWeightVersion(ttl=60.0)
+
+    values = await asyncio.gather(*(version.get(make_args()) for _ in range(10)))
+
+    assert values == [9] * 10
+    assert calls == 1
 
 
 async def test_backfill_submits_replacement_before_the_group_returns(monkeypatch):
