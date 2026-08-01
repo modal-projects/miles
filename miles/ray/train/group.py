@@ -260,11 +260,15 @@ class RayTrainGroup:
         # ranks observe a consistent engine set; the actor releases the lock itself.
         info = await self._rollout_manager.get_updatable_engines_and_lock.remote()
         await self._rollout_manager.health_monitoring_pause.remote()
-        # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
-        await retry(
-            lambda _: self._execute_first_alive("update_weights", info=info),
-            max_attempts=_RETRY_MAX_ATTEMPTS,
-        )
+        try:
+            # Catch with vanilla retry: cells w/ exceptions are auto marked
+            # errored, thus retry will find the next one.
+            await retry(
+                lambda _: self._execute_first_alive("update_weights", info=info),
+                max_attempts=_RETRY_MAX_ATTEMPTS,
+            )
+        finally:
+            await self._rollout_manager.health_monitoring_resume.remote()
 
         await self._maybe_log_inference_engine_weight_checksums(rollout_id=rollout_id)
 
@@ -296,6 +300,11 @@ class RayTrainGroup:
     async def clear_memory(self):
         # Catch *without* retry: cells w/ exceptions are auto marked errored, and will not be used
         await self._execute_all_alive_and_catch("clear_memory")
+
+    async def finish_tracking(self):
+        # Shared-mode tracking writers are process-local. Ranks that did not
+        # initialize a backend simply no-op.
+        await self._execute_all_alive_and_catch("finish_tracking")
 
     async def set_rollout_manager(self):
         await asyncio.gather(*[cell.set_rollout_manager() for cell in self._cells])
