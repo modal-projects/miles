@@ -144,7 +144,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
                 try:
                     self._snapshot[name] = read_hf(name)
                 except KeyError:
-                    self._snapshot[name] = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().reshape(-1)
+                    self._snapshot[name] = tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
                     logger.warning("seed: %s absent from hf_checkpoint; seeding from current weights", name)
 
         self._for_each_hf_bucket(seed_bucket)
@@ -339,7 +339,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
 
         def encode_bucket(converted_named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None) -> None:
             for name, tensor in converted_named_tensors:
-                flat = tensor.detach().contiguous().view(torch.uint8).reshape(-1)
+                flat = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
                 nbytes = int(flat.numel())
                 if use_pinned and nbytes <= max_bytes:
                     buf = free_q.get()  # blocks when all buffers are in flight -> backpressures the gather
