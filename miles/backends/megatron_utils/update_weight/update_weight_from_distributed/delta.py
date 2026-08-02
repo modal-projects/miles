@@ -53,10 +53,9 @@ _SAFETENSORS_DTYPE_BY_TORCH_NAME = {
 class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
     """
     Delta weight sync over a shared filesystem. Source ranks diff each gathered HF tensor against
-    a CPU snapshot of the previous sync and publish the changes as a canonical HF checkpoint dir;
-    each engine's /pull_weights fans the apply out to every host it spans, then the engine reloads
-    the patched local checkpoint via the ordinary update_weights_from_disk path. miles only ever
-    talks to one endpoint per engine, so multi-node serving needs nothing extra.
+    a CPU snapshot of the previous sync and publish the changes as a canonical HF checkpoint dir.
+    Miles-managed engines pull and reload that artifact directly. An opaque rollout fleet consumes
+    the published artifact through the post-write hook instead.
     """
 
     def __init__(
@@ -67,6 +66,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         *,
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
+        initial_weight_version: int = 0,
         is_lora: bool = False,
     ) -> None:
         assert not is_lora, "LoRA weight sync is not supported for disk-delta weight transfer."
@@ -74,7 +74,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         self.model = model
         self.model_name = model_name
         self.quantization_config = quantization_config
-        self.weight_version = 0
+        self.weight_version = initial_weight_version
         self.rollout_engines: Sequence[ActorHandle] | None = None
         self._connection_stale: bool = False
         self.delta_dir = args.update_weight_disk_dir
@@ -83,6 +83,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         self.checksum_algorithm = args.update_weight_delta_checksum
         self._snapshot: dict[str, np.ndarray] = {}
         self._baseline_captured = False
+        self._publish_only = bool(getattr(args, "rollout_endpoint_url", None))
         # Post-write hook: object-store-backed shared filesystems lack cross-host
         # read-after-write consistency, so written files need an explicit step
         # (e.g. uploading them to the backing object store) before the engines can see them.
@@ -134,27 +135,33 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
 
         self.weight_version += 1
         self._publish()
-        self._reload_engines()
+        if self._publish_only:
+            self._announce_version()
+        else:
+            self._reload_engines()
         self._record_metrics()
 
     def _capture_baseline(self) -> None:
-        """Capture the baseline snapshot the first delta diffs against (no publish), and clear any
-        stale stream from a prior run. Seeds from hf_checkpoint — what each host materializes its
-        base from — so the invariant ``snapshot == engine base`` holds even where the megatron->HF
-        round-trip trims vocab-padding rows (embed/lm_head). Every emitted tensor must have the same
-        name, dtype, and shape as that checkpoint. pull_weights(0) materializes each host's local
-        base while the trainer gathers its snapshot."""
-        # a prior run's versions would apply against the wrong base; start the dir clean
+        """Capture the exact bytes served as this publication stream's base.
+
+        Miles-managed engines start from ``hf_checkpoint`` at version zero. An
+        opaque fleet may instead boot a resumed actor checkpoint under a
+        nonzero service-owned version; in that case the converted actor is the
+        shared baseline for the trainer and fleet.
+        """
+        resumed_external = self._publish_only and self.weight_version > 0
         pulls = []
         if dist.get_rank() == 0:
-            shutil.rmtree(self.delta_dir, ignore_errors=True)
+            if not resumed_external:
+                shutil.rmtree(self.delta_dir, ignore_errors=True)
             os.makedirs(self.delta_dir, exist_ok=True)
             if self._post_write_hook is not None:
                 self._post_write_hook(self.args, self.delta_dir, list(self.rollout_engines))
-            pulls = [engine.pull_weights.remote(target_version=0) for engine in self.rollout_engines]
+            if not self._publish_only:
+                pulls = [engine.pull_weights.remote(target_version=0) for engine in self.rollout_engines]
         dist.barrier(group=get_gloo_group())
 
-        read_hf = make_tensor_reader(self.args.hf_checkpoint)  # index the HF headers once
+        read_hf = None if resumed_external else make_tensor_reader(self.args.hf_checkpoint)
 
         def seed_bucket(converted_named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None) -> None:
             for name, tensor in converted_named_tensors:
@@ -162,16 +169,19 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
                     expected_dtype = _SAFETENSORS_DTYPE_BY_TORCH_NAME[str(tensor.dtype)]
                 except KeyError as exc:
                     raise ValueError(f"Trainer emitted unsupported dtype {tensor.dtype} for {name!r}") from exc
-                try:
-                    baseline = read_hf(
-                        name,
-                        expected_dtype=expected_dtype,
-                        expected_shape=tuple(tensor.shape),
-                    )
-                except KeyError as exc:
-                    raise ValueError(
-                        f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint"
-                    ) from exc
+                if resumed_external:
+                    baseline = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().reshape(-1).copy()
+                else:
+                    try:
+                        baseline = read_hf(
+                            name,
+                            expected_dtype=expected_dtype,
+                            expected_shape=tuple(tensor.shape),
+                        )
+                    except KeyError as exc:
+                        raise ValueError(
+                            f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint"
+                        ) from exc
                 emitted_nbytes = tensor.numel() * tensor.element_size()
                 if emitted_nbytes != baseline.nbytes:
                     raise ValueError(
@@ -182,7 +192,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
                 self._snapshot[name] = baseline
 
         self._for_each_hf_bucket(seed_bucket)
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and not self._publish_only:
             _check_weight_sync_results(ray.get(pulls), is_lora=False)
             if self.args.check_weight_update_equal:
                 # The weights checker resets engine tensors at startup and compares after the
@@ -199,11 +209,22 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
                     ]
                 )
                 _check_weight_sync_results(results, is_lora=False)
+        if dist.get_rank() == 0:
             logger.info(
-                "[disk delta] captured baseline snapshot of %d tensors from %s",
+                "[disk delta] captured version %d baseline of %d tensors from %s",
+                self.weight_version,
                 len(self._snapshot),
-                self.args.hf_checkpoint,
+                "loaded actor" if resumed_external else self.args.hf_checkpoint,
             )
+
+    def _announce_version(self) -> None:
+        if self._post_write_hook is None:
+            raise RuntimeError(
+                "An opaque rollout fleet requires --custom-update-weight-post-write-path "
+                "to publish each disk-delta version."
+            )
+        self._post_write_hook(self.args, self._version_dir, [])
+        dist.barrier(group=get_gloo_group())
 
     def _for_each_hf_bucket(self, bucket_func: Callable[[list[tuple[str, torch.Tensor]], tqdm | None], None]) -> None:
         """Feed every gathered HF bucket through ``bucket_func``: the base-class TP pass then the
