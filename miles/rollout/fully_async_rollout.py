@@ -41,6 +41,7 @@ from miles.rollout.failures import (
     mark_loss_masked_failure,
 )
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
+from miles.rollout.generate_utils.generate_endpoint_utils import get_rollout_endpoint_url
 from miles.rollout.inference_rollout.inference_rollout_common import (
     GenerateState,
     SubmissionScheduler,
@@ -191,7 +192,7 @@ class _CachedWeightVersion:
             # taking the lock so they share one router request.
             if (time.monotonic() - self._last_query) < self._ttl:
                 return self._value
-            url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/model_info"
+            url = get_rollout_endpoint_url(args, "/model_info")
             try:
                 data = await asyncio.wait_for(get(url), timeout=WEIGHT_VERSION_QUERY_TIMEOUT_SECS)
                 self._value = int(data["weight_version"])
