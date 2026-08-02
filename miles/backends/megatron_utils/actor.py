@@ -249,6 +249,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.vocab_size is None:
             self.args.vocab_size = self.tokenizer.vocab_size
 
+        update_weight_kwargs = {}
         if self.args.colocate:
             update_weight_cls = UpdateWeightFromTensor
         else:
@@ -259,6 +260,11 @@ class MegatronTrainRayActor(TrainRayActor):
                 from .update_weight.update_weight_from_distributed.delta import UpdateWeightFromDiskDelta
 
                 update_weight_cls = UpdateWeightFromDiskDelta
+                if getattr(args, "rollout_endpoint_url", None):
+                    # The opaque fleet boots the loaded checkpoint under its
+                    # checkpoint iteration. Continue that service-owned version
+                    # namespace; the next delta publication increments it.
+                    update_weight_kwargs["initial_weight_version"] = max(0, loaded_rollout_id)
             else:
                 # Mooncake loads its RDMA shared libraries at import time.
                 # Broadcast and disk-delta must not depend on a compatible
@@ -273,6 +279,7 @@ class MegatronTrainRayActor(TrainRayActor):
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
             is_lora=lora_rollout_enabled(args),
+            **update_weight_kwargs,
         )
 
         # Adapters currently loaded into Megatron slots on this rank.
