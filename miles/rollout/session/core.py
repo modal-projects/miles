@@ -58,6 +58,7 @@ class ProxyRequest:
 
     method: str
     query: str = ""
+    session_id: str | None = None
 
 
 def _render_json(payload) -> bytes:
@@ -506,7 +507,12 @@ class SessionCore:
         # --- Phase 2: proxy to backend (generation lock held; state lock released) ---
         headers = {**headers, "X-SMG-Routing-Key": session_id}
         proxy_round_trip_started = time.monotonic()
-        result = await self.backend.do_proxy(ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers)
+        result = await self.backend.do_proxy(
+            ProxyRequest(method=method, query=query, session_id=session_id),
+            "v1/chat/completions",
+            body=proxy_body,
+            headers=headers,
+        )
         proxy_round_trip_seconds = time.monotonic() - proxy_round_trip_started
         model_request_seconds = float(result.get("backend_request_seconds", proxy_round_trip_seconds))
         async with session.lock:

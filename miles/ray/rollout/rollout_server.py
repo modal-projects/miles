@@ -18,6 +18,16 @@ def start_rollout_servers(args, pg) -> dict[str, "RolloutServer"]:
 
     Returns a dict mapping model name -> ``RolloutServer``.
     """
+    if getattr(args, "rollout_endpoint_url", None):
+        logger.info("Using opaque rollout fleet at %s", args.rollout_endpoint_url)
+        return {
+            "default": RolloutServer(
+                server_groups=[],
+                model_name="default",
+                update_weights=True,
+            )
+        }
+
     config = _resolve_sglang_config(args)
 
     servers: dict[str, RolloutServer] = {}

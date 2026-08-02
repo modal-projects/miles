@@ -239,14 +239,22 @@ async def _post(client, url, payload, max_retries=60, action="post", headers=Non
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
-    if not args.rollout_num_gpus:
+    uses_rollout_endpoint = bool(getattr(args, "rollout_endpoint_url", None))
+    if not args.rollout_num_gpus and not uses_rollout_endpoint:
         return
 
-    _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+    if uses_rollout_endpoint:
+        _client_concurrency = args.sglang_server_concurrency
+    else:
+        _client_concurrency = (
+            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        )
     if _http_client is None:
+        read_timeout = getattr(args, "rollout_request_timeout_secs", None)
+        timeout = httpx.Timeout(read_timeout, connect=30.0) if read_timeout is not None else httpx.Timeout(None)
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),
-            timeout=httpx.Timeout(None),
+            timeout=timeout,
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
@@ -272,6 +280,7 @@ def _init_ray_distributed_post(args):
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
         raise RuntimeError("No alive Ray nodes to place HTTP POST actors.")
+
     # Define the async actor
     @ray.remote
     class _HttpPosterActor:
