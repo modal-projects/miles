@@ -206,6 +206,32 @@ class TestSessionProxy:
         assert metadata["model_request/completion_tokens"] > 0
         assert len(metadata["model_request/durations_seconds"]) == 1
 
+    @pytest.mark.parametrize(
+        ("lora_train_only", "expects_lora_path"),
+        [(False, True), (True, False)],
+    )
+    def test_proxy_chat_applies_only_rollout_enabled_lora(
+        self,
+        router_env,
+        lora_train_only,
+        expects_lora_path,
+    ):
+        router_env.args.lora_rank = 8
+        router_env.args.lora_train_only = lora_train_only
+        try:
+            session_id = _create_session(router_env.url)
+            response = _post_chat(
+                router_env.url,
+                session_id,
+                {"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status_code == 200
+            request = router_env.backend.request_log[-1]
+            assert ("lora_path" in request) is expects_lora_path
+        finally:
+            del router_env.args.lora_rank
+            del router_env.args.lora_train_only
+
     def test_proxy_chat_response_has_no_duplicate_server_or_date_header(self, router_env):
         # Both the backend and this server run under uvicorn, so each emits its own
         # server/date. Echoing upstream's copy puts two of each on the wire, and

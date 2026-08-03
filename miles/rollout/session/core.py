@@ -38,7 +38,7 @@ from miles.rollout.session.samples.merge import (
     truncate_samples_by_total_tokens,
 )
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
-from miles.utils.lora import LORA_ADAPTER_NAME, is_lora_enabled
+from miles.utils.lora import LORA_ADAPTER_NAME, lora_rollout_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +428,7 @@ class SessionCore:
             request_body["no_stop_trim"] = False
             # Without this the engine serves the base weights, so the adapter being
             # trained would never shape the trajectories it is scored on.
-            if is_lora_enabled(self.args):
+            if lora_rollout_enabled(self.args):
                 request_body["lora_path"] = LORA_ADAPTER_NAME
             # FIXME(session): Only nested `chat_template_kwargs` reach the local renderer;
             # top-level `reasoning` and `reasoning_effort` are not mapped to template kwargs.
