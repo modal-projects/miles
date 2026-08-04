@@ -1327,14 +1327,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 choices=[
                     "grpo",
                     "gspo",
+                    "cispo",
                     "reinforce_plus_plus",
                     "reinforce_plus_plus_baseline",
                     "ppo",
                 ],
                 default="grpo",
                 help=(
-                    "Advantage estimator to use. Note: on-policy distillation (OPD) is now orthogonal "
-                    "to the advantage estimator. Use --opd-kl-coef > 0 to enable OPD on top of any estimator."
+                    "Advantage estimator to use. CISPO uses GRPO advantages with a detached, clipped "
+                    "importance weight and an additive policy-gradient surrogate. Note: on-policy "
+                    "distillation (OPD) is now orthogonal to the advantage estimator. Use "
+                    "--opd-kl-coef > 0 to enable OPD on top of any estimator."
                 ),
             )
             parser.add_argument(

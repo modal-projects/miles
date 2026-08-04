@@ -204,7 +204,7 @@ def _post_process_rewards(
         valid_mask.all()
         and prompt_group_sizes is None
         and args.advantage_estimator
-        in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
+        in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
         and args.rewards_normalization
     ):
         rewards = torch.tensor(raw_rewards, dtype=torch.float)
@@ -214,7 +214,7 @@ def _post_process_rewards(
             rewards = rewards.view(-1, rewards.shape[-1])
         rewards = rewards - rewards.mean(dim=-1, keepdim=True)
         if (
-            args.advantage_estimator in ["grpo", "gspo"]
+            args.advantage_estimator in ["grpo", "gspo", "cispo"]
             and args.grpo_std_normalization
         ):
             rewards = rewards / (rewards.std(dim=-1, keepdim=True) + 1e-6)
@@ -230,7 +230,10 @@ def _post_process_rewards(
         raw_rewards
     ), f"prompt group sizes sum to {sum(prompt_group_sizes)}, but got {len(raw_rewards)} rewards"
 
-    if args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"] and args.rewards_normalization:
+    if (
+        args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
+        and args.rewards_normalization
+    ):
         rewards = torch.tensor(raw_rewards, dtype=torch.float)
         normalized = torch.zeros_like(rewards)
         offset = 0
@@ -241,7 +244,7 @@ def _post_process_rewards(
             if valid_rewards.numel():
                 centered = valid_rewards - valid_rewards.mean()
                 if (
-                    args.advantage_estimator in ["grpo", "gspo"]
+                    args.advantage_estimator in ["grpo", "gspo", "cispo"]
                     and args.grpo_std_normalization
                     and valid_rewards.numel() > 1
                 ):
