@@ -344,9 +344,10 @@ class TestPostProcessRewards:
 
         assert processed == pytest.approx([-1.0, 0.0, 0.0, 1.0])
 
-    def test_gspo_uses_grpo_normalization_path(self):
+    @pytest.mark.parametrize("advantage_estimator", ["gspo", "cispo"])
+    def test_group_relative_estimators_use_grpo_normalization_path(self, advantage_estimator):
         args = make_args(
-            advantage_estimator="gspo",
+            advantage_estimator=advantage_estimator,
             rewards_normalization=True,
             grpo_std_normalization=False,
             n_samples_per_prompt=4,
