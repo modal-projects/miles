@@ -14,6 +14,7 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
     decode_routed_experts,
     get_indexer_topk_from_response,
 )
+from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
 from miles.utils.types import Sample
@@ -131,6 +132,12 @@ def _compute_sample_from_openai_record(
     output_log_probs = [item[0] for item in choice["meta_info"]["output_token_logprobs"]]
 
     sample = Sample()
+    # Production session records intentionally compact the request down to an
+    # empty dict unless trajectory debugging is enabled.  The configured
+    # rollout contract is therefore authoritative; the request flag remains a
+    # compatibility path for older/debug records and focused tests.
+    if getattr(args, "rollout_top_p", 1.0) < 1.0 or record.request.get("return_sampling_mask", False):
+        output_log_probs = append_sampling_metadata(sample, output_token_ids, choice["meta_info"])
     sample.tokens = prompt_token_ids + output_token_ids
     sample.rollout_log_probs = output_log_probs
     sample.response = tokenizer.decode(output_token_ids)

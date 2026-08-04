@@ -225,6 +225,9 @@ async def test_aborted_group_recycled(monkeypatch):
 
 async def test_non_retryable_infrastructure_failure_is_masked(monkeypatch):
     group = make_group(1)
+    for sample in group:
+        sample.rollout_sampling_mask_ids = [sample.tokens[-1], 999]
+        sample.rollout_sampling_mask_offsets = [0, 2]
     group.append(replace(group[-1], index=12))
     failed = group[-1]
     failed.status = Sample.Status.ABORTED
@@ -244,6 +247,8 @@ async def test_non_retryable_infrastructure_failure_is_masked(monkeypatch):
     assert masked.status == Sample.Status.COMPLETED
     assert masked.index == failed.index
     assert is_infrastructure_failure(masked)
+    assert masked.rollout_sampling_mask_ids == group[0].rollout_sampling_mask_ids
+    assert masked.rollout_sampling_mask_offsets == group[0].rollout_sampling_mask_offsets
     assert data_source.recycled == []
     assert output.metrics["rollout/fully_async/non_retryable_trajectories_masked"] == 1
     assert output.metrics["rollout/fully_async/infrastructure_trajectories_masked"] == 1

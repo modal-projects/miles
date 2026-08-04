@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import torch
@@ -9,10 +10,14 @@ from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
 
+logger = logging.getLogger(__name__)
+
 ROLLOUT_DATA_TENSOR_DTYPES = {
     "tokens": "int32",
     "loss_masks": "int32",
     "rollout_log_probs": "float32",
+    "rollout_sampling_mask_ids": "int32",
+    "rollout_sampling_mask_offsets": "int32",
     "teacher_log_probs": "float32",
     "opd_reverse_kl": "float32",
     "rollout_routed_experts": "int32",
@@ -134,6 +139,59 @@ def convert_samples_to_train_data(
     # Add rollout log probabilities for off-policy correction
     if all(has_rollout_log_probs):
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
+
+    if args.rollout_top_p < 1.0:
+        sampling_mask_ids = []
+        sampling_mask_offsets = []
+        synthesized_indices = []
+        for position, (sample, loss_mask) in enumerate(zip(samples, loss_masks, strict=True)):
+            sample.validate()
+            ids = sample.rollout_sampling_mask_ids
+            offsets = sample.rollout_sampling_mask_offsets
+            if ids is None:
+                is_zero_loss_placeholder = (
+                    is_loss_masked_failure(sample)
+                    and sample.remove_sample
+                    and not any(loss_mask)
+                )
+                if not is_zero_loss_placeholder:
+                    raise ValueError(
+                        "--rollout-top-p < 1 requires sampling-mask data for every active training sample; "
+                        f"position={position}, sample_index={sample.index}, group_index={sample.group_index}, "
+                        f"response_length={sample.response_length}, remove_sample={sample.remove_sample}, "
+                        f"loss_mask_sum={sum(loss_mask)}, status={sample.status}, "
+                        f"exit_status={sample.metadata.get('exit_status')!r}, "
+                        f"sampling_mask_ids_present={sample.rollout_sampling_mask_ids is not None}, "
+                        f"sampling_mask_offsets_present={sample.rollout_sampling_mask_offsets is not None}"
+                    )
+
+                # This row is excluded from reward normalization, the loss
+                # denominator, and token loss. Singleton support keeps the
+                # top-p replay tensors shape-safe without inventing a policy
+                # distribution for a trainable token.
+                response_tokens = (
+                    sample.tokens[-sample.response_length :]
+                    if sample.response_length
+                    else []
+                )
+                ids = [int(token_id) for token_id in response_tokens]
+                offsets = list(range(sample.response_length + 1))
+                if "rollout_log_probs" in train_data:
+                    train_data["rollout_log_probs"][position] = [0.0] * sample.response_length
+                synthesized_indices.append(sample.index)
+
+            sampling_mask_ids.append(ids)
+            sampling_mask_offsets.append(offsets)
+
+        if synthesized_indices:
+            logger.warning(
+                "Synthesized singleton top-p masks for %d zero-loss failure placeholders; "
+                "sample_indices=%s",
+                len(synthesized_indices),
+                synthesized_indices[:20],
+            )
+        train_data["rollout_sampling_mask_ids"] = sampling_mask_ids
+        train_data["rollout_sampling_mask_offsets"] = sampling_mask_offsets
 
     if samples[0].rollout_routed_experts is not None:
         train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
@@ -300,6 +358,8 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
             "round_number",
             "sample_indices",
             "rollout_log_probs",
+            "rollout_sampling_mask_ids",
+            "rollout_sampling_mask_offsets",
             "rollout_routed_experts",
             "rollout_indexer_topk",
             "prompt",

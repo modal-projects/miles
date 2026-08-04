@@ -2,10 +2,10 @@
 
 HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each request into primitives and calls these methods. Owns one ``SessionRegistry`` (per-session TITO/trajectory state) and one proxy ``backend``.
 
-- ``chat_completions`` strips the R3 replay payloads (``routed_experts`` /
-  ``indexer_topk``) from the client reply copy-on-write. Routed-expert records
-  are incremental: each request starts after the stable TITO prefix, and sample
-  assembly stitches those suffixes into one replay tensor.
+- ``chat_completions`` strips training-only replay payloads from the client
+  reply copy-on-write. Routed-expert records are incremental: each request
+  starts after the stable TITO prefix, and sample assembly stitches those
+  suffixes into one replay tensor.
 - ``chat_completions`` serializes backend calls per session with a dedicated
   generation lock. The shorter state lock still gates prep/update and lets
   DELETE mark an in-flight session as closing without waiting for inference.
@@ -70,10 +70,53 @@ def _samples_response(payload: bytes) -> Response:
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
 
 
+def _configure_top_p_sampling_request(request_body: dict, *, top_p: float, temperature: float) -> None:
+    """Keep session sampling compatible with the logits Miles can replay."""
+    expected_values = {
+        "temperature": temperature,
+        "top_p": top_p,
+    }
+    for key, expected in expected_values.items():
+        actual = request_body.get(key, expected)
+        if actual != expected:
+            raise MessageValidationError(
+                f"{key}={actual} does not match Miles rollout setting {expected}; "
+                "top-p session rollouts use the configured Miles sampling parameters"
+            )
+        request_body[key] = expected
+
+    unsupported = {
+        "frequency_penalty": (0, 0.0, None),
+        "presence_penalty": (0, 0.0, None),
+        "repetition_penalty": (1, 1.0, None),
+        "logit_bias": ({}, None),
+        "custom_logit_processor": (None,),
+    }
+    for key, allowed in unsupported.items():
+        if request_body.get(key) not in allowed:
+            raise MessageValidationError(
+                f"{key} is not supported with Miles top-p log-prob replay because the trainer cannot replay it"
+            )
+
+    custom_params = request_body.get("custom_params")
+    if custom_params is not None and not isinstance(custom_params, dict):
+        raise MessageValidationError("custom_params must be an object")
+    # The deployed Rust router preserves custom_params but drops newer unknown
+    # top-level request fields. Keep the native field for direct/new-router
+    # deployments and carry the same intent through typed older routers here.
+    request_body["custom_params"] = {
+        **(custom_params or {}),
+        "miles_return_sampling_mask": True,
+    }
+
+
 _CLIENT_STRIPPED_META_KEYS = (
     "routed_experts",
     "routed_experts_start_len",
     "indexer_topk",
+    "output_token_sampling_mask",
+    "output_token_sampling_logprobs",
+    "output_token_sampling_mask_length",
 )
 _RECORD_STRIPPED_META_KEYS = (
     # The growing prompt is represented once by accumulated_token_ids.
@@ -419,6 +462,13 @@ class SessionCore:
             # setdefault) so agent-side overrides cannot break token accumulation.
             request_body["logprobs"] = True
             request_body["return_meta_info"] = True
+            if getattr(self.args, "rollout_top_p", 1.0) < 1.0:
+                request_body["return_sampling_mask"] = True
+                _configure_top_p_sampling_request(
+                    request_body,
+                    top_p=self.args.rollout_top_p,
+                    temperature=getattr(self.args, "rollout_temperature", 1.0),
+                )
             if getattr(self.args, "use_rollout_routing_replay", False):
                 request_body["return_routed_experts"] = True
             if getattr(self.args, "use_rollout_indexer_replay", False):

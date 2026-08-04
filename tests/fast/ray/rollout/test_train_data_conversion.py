@@ -199,6 +199,72 @@ class TestConvertSamplesToTrainData:
         )
         assert out["rollout_log_probs"][0] == [-0.1, -0.2, -0.3, -0.4]
 
+    def test_top_p_sampling_mask_passed_through(self):
+        args = make_args(rewards_normalization=False, rollout_top_p=0.95)
+        s = make_sample()
+        s.rollout_sampling_mask_ids = [0, 7, 1, 8, 2, 9, 3, 10]
+        s.rollout_sampling_mask_offsets = [0, 2, 4, 6, 8]
+        out = convert_samples_to_train_data(
+            args,
+            [s],
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+        assert out["rollout_sampling_mask_ids"][0] == s.rollout_sampling_mask_ids
+        assert out["rollout_sampling_mask_offsets"][0] == s.rollout_sampling_mask_offsets
+
+    def test_top_p_requires_sampling_mask_for_every_sample(self):
+        args = make_args(rewards_normalization=False, rollout_top_p=0.95)
+
+        with pytest.raises(
+            ValueError,
+            match=r"requires sampling-mask data for every active training sample.*sample_index=0",
+        ):
+            convert_samples_to_train_data(
+                args,
+                [make_sample()],
+                metadata={},
+                custom_convert_samples_to_train_data_func=None,
+                custom_reward_post_process_func=None,
+            )
+
+    def test_top_p_zero_loss_failure_placeholder_gets_singleton_support(self):
+        args = make_args(rewards_normalization=False, rollout_top_p=0.95)
+        failed = make_sample(index=7, response_length=4)
+        failed.remove_sample = True
+        failed.rollout_log_probs = [-0.1, -0.2, -0.3, -0.4]
+        failed.metadata["exit_status"] = "sandbox_infra_error"
+        mark_loss_masked_failure(failed)
+
+        out = convert_samples_to_train_data(
+            args,
+            [failed],
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        assert out["loss_masks"] == [[0, 0, 0, 0]]
+        assert out["loss_denominator_mask"] == [False]
+        assert out["rollout_log_probs"] == [[0.0, 0.0, 0.0, 0.0]]
+        assert out["rollout_sampling_mask_ids"] == [[0, 1, 2, 3]]
+        assert out["rollout_sampling_mask_offsets"] == [[0, 1, 2, 3, 4]]
+
+    def test_top_p_generic_remove_sample_still_requires_native_mask(self):
+        args = make_args(rewards_normalization=False, rollout_top_p=0.95)
+        removed = make_sample(index=9)
+        removed.remove_sample = True
+
+        with pytest.raises(ValueError, match=r"active training sample.*sample_index=9"):
+            convert_samples_to_train_data(
+                args,
+                [removed],
+                metadata={},
+                custom_convert_samples_to_train_data_func=None,
+                custom_reward_post_process_func=None,
+            )
+
     def test_optional_field_round_number_from_metadata(self):
         args = make_args(rewards_normalization=False)
         s = make_sample()
