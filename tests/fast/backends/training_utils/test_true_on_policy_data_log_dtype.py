@@ -107,3 +107,43 @@ def test_failure_placeholders_do_not_bias_trainer_rollout_metrics(monkeypatch):
     assert captured["log_dict"]["raw_reward"] == 1.0
     assert captured["log_dict"]["rewards"] == 1.0
     assert captured["log_dict"]["response_lengths"] == 1.0
+
+
+def test_sampling_mask_csr_payload_is_not_averaged_as_a_metric(monkeypatch):
+    captured = {}
+    parallel_state = SimpleNamespace(
+        tp=SimpleNamespace(rank=0),
+        cp=SimpleNamespace(size=1),
+        is_pp_last_stage=True,
+    )
+    monkeypatch.setattr(log_utils, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(cp_utils, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(
+        log_utils,
+        "gather_log_data",
+        lambda _metric_name, _args, _rollout_id, log_dict: captured.setdefault("log_dict", log_dict),
+    )
+    rollout_data = {
+        "tokens": [torch.tensor([1, 2])],
+        "total_lengths": [2],
+        "response_lengths": [1],
+        "loss_masks": [torch.tensor([1], dtype=torch.int32)],
+        "rollout_sampling_mask_ids": [[1, 7]],
+        "rollout_sampling_mask_offsets": [[0, 2]],
+    }
+
+    log_utils.log_rollout_data(
+        1,
+        Namespace(
+            ci_test=False,
+            ci_disable_logprobs_checker=True,
+            qkv_format="thd",
+            log_multi_turn=False,
+            log_passrate=False,
+            log_correct_samples=False,
+        ),
+        rollout_data,
+    )
+
+    assert "rollout_sampling_mask_ids" not in captured["log_dict"]
+    assert "rollout_sampling_mask_offsets" not in captured["log_dict"]

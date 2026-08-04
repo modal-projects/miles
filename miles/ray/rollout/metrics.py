@@ -114,6 +114,7 @@ def _compute_metrics_from_samples(args, samples):
     log_dict |= _compute_spec_metrics(args, samples)
     log_dict |= _compute_prefix_cache_metrics(args, samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
+    log_dict |= _compute_top_p_metrics(args, samples)
     log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
     log_dict["truncated_ratio"] = np.mean([int(s.status == Sample.Status.TRUNCATED) for s in samples]).item()
 
@@ -150,6 +151,51 @@ def _compute_metrics_from_samples(args, samples):
             # from the pretokenized prefix and may differ from canonical tokenization.
 
     return log_dict
+
+
+def _compute_top_p_metrics(args, samples: list[Sample]) -> dict[str, float]:
+    """Summarize the ragged top-p support without logging raw CSR tensors.
+
+    Support cardinality is computed only for trainable model tokens.  The
+    transport-density metric intentionally covers the whole response, including
+    singleton supports inserted for environment observations, because those IDs
+    still cross the rollout/trainer boundary.
+    """
+    if getattr(args, "rollout_top_p", 1.0) >= 1.0:
+        return {}
+
+    support_sizes: list[int] = []
+    total_mask_ids = 0
+    total_response_tokens = 0
+    for sample in samples:
+        ids = sample.rollout_sampling_mask_ids
+        offsets = sample.rollout_sampling_mask_offsets
+        if ids is None or offsets is None:
+            # Active top-p samples fail closed during train-data conversion.  Do
+            # not turn a partial metric into a second, weaker validation path.
+            continue
+        sample.validate()
+        loss_mask = sample.loss_mask if sample.loss_mask is not None else [1] * sample.response_length
+        support_sizes.extend(
+            end - start
+            for start, end, trainable in zip(offsets[:-1], offsets[1:], loss_mask, strict=True)
+            if trainable
+        )
+        total_mask_ids += len(ids)
+        total_response_tokens += sample.response_length
+
+    if not support_sizes:
+        return {}
+
+    values = np.asarray(support_sizes)
+    return {
+        "top_p/support_size_mean": values.mean().item(),
+        "top_p/support_size_median": np.median(values).item(),
+        "top_p/support_size_p90": np.percentile(values, 90).item(),
+        "top_p/support_size_max": values.max().item(),
+        "top_p/singleton_support_ratio": np.mean(values == 1).item(),
+        "top_p/mask_ids_per_response_token": total_mask_ids / total_response_tokens,
+    }
 
 
 def _compute_perf_metrics_from_samples(args, samples, rollout_time):
