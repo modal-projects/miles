@@ -39,6 +39,7 @@ def fill_replay_data(
     register_replay_list_func: RegisterReplayListFunc,
     if_sp_region=True,
     indices_are_token_positions=False,
+    global_stream_indices_key: str | None = None,
 ):
     """Load rollout replay tensors into module replay queues.
 
@@ -51,6 +52,12 @@ def fill_replay_data(
     """
     if data_key not in rollout_data:
         raise ValueError(f"{data_key} is required in rollout_data for replay.")
+
+    global_stream_indices = (
+        rollout_data.pop(global_stream_indices_key)
+        if global_stream_indices_key is not None and global_stream_indices_key in rollout_data
+        else None
+    )
 
     for iterator in data_iterator:
         iterator.reset()
@@ -73,6 +80,8 @@ def fill_replay_data(
     for _ in range(sum(num_microbatches)):
         batch = data_iterator[0].get_next([data_key, "tokens", "max_seq_lens"])
         replay_data = batch[data_key]
+        if data_key == "rollout_routed_experts":
+            replay_data = [data.to(torch.int32) for data in replay_data]
         tokens = batch["tokens"]
         assert len(replay_data) == len(tokens)
         for a, b in zip(replay_data, tokens, strict=False):
@@ -125,7 +134,12 @@ def fill_replay_data(
             start, end = seqlen // tp_size * tp_rank, seqlen // tp_size * (tp_rank + 1)
             replay_data = replay_data[start:end]
 
-        register_replay_list_func(replay_list, replay_data, models=models)
+        register_replay_list_func(
+            replay_list,
+            replay_data,
+            models=models,
+            global_layer_indices=global_stream_indices,
+        )
 
     del rollout_data[data_key]
 

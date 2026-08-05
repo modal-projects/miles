@@ -12,8 +12,9 @@ def _get_rank():
 
 
 class Replay:
-    def __init__(self, stream_idx: int | None = None):
+    def __init__(self, stream_idx: int | None = None, module=None):
         self.stream_idx = stream_idx
+        self.module = module
         self.forward_index = 0
         self.backward_index = 0
         self.top_indices_list: list[torch.Tensor] = []
@@ -69,6 +70,9 @@ class BaseReplayManager:
         replay = Replay(stream_idx=stream_idx)
         self.replays.append(replay)
         return replay
+
+    def get_replays(self) -> list[Replay]:
+        return self.replays
 
     def set_current(self, replay: Replay):
         self.current = replay
@@ -147,10 +151,13 @@ class BaseReplayManager:
         if not self.enabled:
             return
         replay = self.create_replay(stream_idx=stream_idx)
+        replay.module = module
         setattr(module, attr_name, replay)
         manager = self
 
         def pre_forward_hook(*args, **kwargs):
+            if getattr(module, "is_mtp", False):
+                return
             manager.set_current(replay)
 
         module.register_forward_pre_hook(pre_forward_hook)
@@ -216,9 +223,16 @@ class RoutingReplayManager(BaseReplayManager):
     name = "routing"
     filename = "routing_replay.pt"
     data_key = "rollout_routed_experts"
+    global_stream_indices_key = "rollout_routed_experts_layer_indices"
     if_sp_region = True
     enable_check_replay_result = False
     replay_check_max_mismatch_fraction = 1e-2
+
+    def get_replays(self) -> list[Replay]:
+        # Megatron marks an MoE router as MTP only after constructing it, so
+        # registration-time manager toggles cannot reliably exclude it. MTP
+        # has no rollout routing stream and must not participate in R3.
+        return [replay for replay in self.replays if not getattr(replay.module, "is_mtp", False)]
 
 
 class IndexerReplayManager(BaseReplayManager):

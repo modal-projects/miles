@@ -77,6 +77,23 @@ class RayTrainGroup:
     async def train(self, rollout_id, rollout_data_pack, external_data=None):
         """Do one rollout training"""
         rollout_data_ref = rollout_data_pack["data_ref"]
+        routing_replay_refs = rollout_data_pack.get("routing_replay_refs") if self.role == "actor" else None
+        if routing_replay_refs is not None and len(routing_replay_refs) != len(self._actor_handles):
+            raise ValueError("routing_replay_refs must contain one reference per train worker")
+        if routing_replay_refs is not None:
+            if isinstance(external_data, list) and len(external_data) != len(self._actor_handles):
+                raise ValueError("external_data must contain one payload per train worker")
+            refs = []
+            for rank, actor in enumerate(self._actor_handles):
+                kwargs = {
+                    "routing_replay_ref": routing_replay_refs[rank],
+                    "witness_info": None,
+                    "attempt": 0,
+                }
+                if external_data is not None:
+                    kwargs["external_data"] = external_data[rank] if isinstance(external_data, list) else external_data
+                refs.append(actor.train.remote(rollout_id, rollout_data_ref, **kwargs))
+            return await asyncio.gather(*refs)
         if external_data is None:
             return await self._broadcast(
                 "train",

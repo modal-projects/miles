@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from miles.utils import object_store
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.data import get_minimum_num_micro_batch_size
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
@@ -34,8 +35,9 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
+    routing_replay_ref: Box | None = None,
     witness_info: WitnessInfo | None = None,
-) -> tuple[RolloutBatch, ObjectStoreGetResult]:
+) -> tuple[RolloutBatch, list[ObjectStoreGetResult]]:
     parallel_state = get_parallel_state()
     # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
     # Both first pp stage and the last pp stage will receive the data.
@@ -46,6 +48,15 @@ def get_rollout_data(
         parallel_state.effective_dp.size,
         witness_info=witness_info,
     )
+    store_get_results = [store_get_result]
+    if routing_replay_ref is not None:
+        routing_get_result = object_store.get_instance().get(routing_replay_ref)
+        routing_data = dict(routing_get_result.value)
+        duplicate_keys = rollout_data.keys() & routing_data.keys()
+        if duplicate_keys:
+            raise ValueError("Routing replay shard duplicates rollout fields: " f"{sorted(duplicate_keys)}")
+        rollout_data.update(routing_data)
+        store_get_results.append(routing_get_result)
     # move tokens to GPU in advance
     rollout_data["tokens"] = [
         torch.tensor(t, dtype=torch.long, device=torch.cuda.current_device()) for t in rollout_data["tokens"]
@@ -114,7 +125,7 @@ def get_rollout_data(
         rollout_data["rollout_routed_experts"] = [torch.from_numpy(r) for r in rollout_data["rollout_routed_experts"]]
     if "rollout_indexer_topk" in rollout_data:
         rollout_data["rollout_indexer_topk"] = [torch.from_numpy(r) for r in rollout_data["rollout_indexer_topk"]]
-    return rollout_data, store_get_result
+    return rollout_data, store_get_results
 
 
 def get_batch(

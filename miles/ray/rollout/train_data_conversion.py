@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+import numpy as np
 import torch
 
 from miles.rollout.failures import is_loss_masked_failure
@@ -45,6 +46,12 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "prompt_group_sizes": ValueSpec(codec="auto"),
 }
 
+ROUTING_REPLAY_LAYER_INDICES_KEY = "rollout_routed_experts_layer_indices"
+ROUTING_REPLAY_VALUE_SPEC = {
+    "rollout_routed_experts": ValueSpec(codec="typed_ragged"),
+    ROUTING_REPLAY_LAYER_INDICES_KEY: ValueSpec(codec="ndarray", dtype="int64"),
+}
+
 
 def convert_samples_to_train_data(
     args,
@@ -62,9 +69,7 @@ def convert_samples_to_train_data(
     for sample in samples:
         sample.validate()
 
-    has_rollout_log_probs = [
-        sample.rollout_log_probs is not None for sample in samples
-    ]
+    has_rollout_log_probs = [sample.rollout_log_probs is not None for sample in samples]
     if any(has_rollout_log_probs) and not all(has_rollout_log_probs):
         missing_indices = [
             sample.index
@@ -79,14 +84,10 @@ def convert_samples_to_train_data(
             "rollout_log_probs must be present for every sample or none; "
             f"missing sample indices={missing_indices[:20]}"
         )
-    if (
-        getattr(args, "use_rollout_logprobs", False)
-        or getattr(args, "use_tis", False)
-    ) and not all(has_rollout_log_probs):
-        raise ValueError(
-            "Async behavior-policy correction requires rollout_log_probs for "
-            "every sample"
-        )
+    if (getattr(args, "use_rollout_logprobs", False) or getattr(args, "use_tis", False)) and not all(
+        has_rollout_log_probs
+    ):
+        raise ValueError("Async behavior-policy correction requires rollout_log_probs for " "every sample")
 
     raw_rewards, rewards = _post_process_rewards(
         args,
@@ -150,9 +151,7 @@ def convert_samples_to_train_data(
             offsets = sample.rollout_sampling_mask_offsets
             if ids is None:
                 is_zero_loss_placeholder = (
-                    is_loss_masked_failure(sample)
-                    and sample.remove_sample
-                    and not any(loss_mask)
+                    is_loss_masked_failure(sample) and sample.remove_sample and not any(loss_mask)
                 )
                 if not is_zero_loss_placeholder:
                     raise ValueError(
@@ -169,11 +168,7 @@ def convert_samples_to_train_data(
                 # denominator, and token loss. Singleton support keeps the
                 # top-p replay tensors shape-safe without inventing a policy
                 # distribution for a trainable token.
-                response_tokens = (
-                    sample.tokens[-sample.response_length :]
-                    if sample.response_length
-                    else []
-                )
+                response_tokens = sample.tokens[-sample.response_length :] if sample.response_length else []
                 ids = [int(token_id) for token_id in response_tokens]
                 offsets = list(range(sample.response_length + 1))
                 if "rollout_log_probs" in train_data:
@@ -185,8 +180,7 @@ def convert_samples_to_train_data(
 
         if synthesized_indices:
             logger.warning(
-                "Synthesized singleton top-p masks for %d zero-loss failure placeholders; "
-                "sample_indices=%s",
+                "Synthesized singleton top-p masks for %d zero-loss failure placeholders; " "sample_indices=%s",
                 len(synthesized_indices),
                 synthesized_indices[:20],
             )
@@ -261,8 +255,7 @@ def _post_process_rewards(
     if (
         valid_mask.all()
         and prompt_group_sizes is None
-        and args.advantage_estimator
-        in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
+        and args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
         and args.rewards_normalization
     ):
         rewards = torch.tensor(raw_rewards, dtype=torch.float)
@@ -271,10 +264,7 @@ def _post_process_rewards(
         else:
             rewards = rewards.view(-1, rewards.shape[-1])
         rewards = rewards - rewards.mean(dim=-1, keepdim=True)
-        if (
-            args.advantage_estimator in ["grpo", "gspo", "cispo"]
-            and args.grpo_std_normalization
-        ):
+        if args.advantage_estimator in ["grpo", "gspo", "cispo"] and args.grpo_std_normalization:
             rewards = rewards / (rewards.std(dim=-1, keepdim=True) + 1e-6)
         return raw_rewards, rewards.flatten().tolist()
 
@@ -312,8 +302,7 @@ def _post_process_rewards(
         return raw_rewards, normalized.tolist()
 
     processed_rewards = [
-        reward if is_valid else 0.0
-        for reward, is_valid in zip(raw_rewards, valid_mask.tolist(), strict=True)
+        reward if is_valid else 0.0 for reward, is_valid in zip(raw_rewards, valid_mask.tolist(), strict=True)
     ]
     return raw_rewards, processed_rewards
 
@@ -323,6 +312,117 @@ def split_train_data_by_dp(args, data, dp_size):
     rollout_data_list = split_train_data_by_dp_raw(args, data, dp_size=dp_size)
     store = object_store.get_instance()
     return [store.put(value=rollout_data, value_spec=ROLLOUT_DATA_VALUE_SPEC) for rollout_data in rollout_data_list]
+
+
+def put_train_data(args, data, train_parallel_config: dict[str, Any]) -> dict[str, Any]:
+    """Store rollout data in the layout consumed by the trainer ranks."""
+    store = object_store.get_instance()
+    if args.delay_split_train_data_by_dp:
+        return {"data_ref": store.put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)}
+
+    dp_size = train_parallel_config["dp_size"]
+    dp_shards = split_train_data_by_dp_raw(args, data, dp_size=dp_size)
+    routing_specs = train_parallel_config.get("routing_replay_specs")
+    if "rollout_routed_experts" not in data:
+        return {"data_ref": [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in dp_shards]}
+    if routing_specs is None:
+        raise RuntimeError("Trainer did not provide its routing replay topology")
+
+    routing_by_dp = [shard.pop("rollout_routed_experts") for shard in dp_shards]
+    data_refs = [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in dp_shards]
+
+    wire_dtype = _routing_replay_wire_dtype(args.num_experts)
+    refs_by_spec = {}
+    routing_replay_refs = []
+    source_bytes = 0
+    stored_bytes = 0
+    for rank, spec in enumerate(routing_specs):
+        if spec["rank"] != rank:
+            raise ValueError(
+                "Routing replay specs must be ordered by trainer rank; " f"position={rank}, spec_rank={spec['rank']}"
+            )
+        dp_rank = int(spec["dp_rank"])
+        if not 0 <= dp_rank < dp_size:
+            raise ValueError(
+                f"Trainer rank {rank} has invalid routing replay DP rank " f"{dp_rank} for dp_size={dp_size}"
+            )
+        layer_indices = tuple(int(index) for index in spec["layer_indices"])
+        if len(set(layer_indices)) != len(layer_indices) or any(index < 0 for index in layer_indices):
+            raise ValueError(f"Trainer rank {rank} has invalid routing replay layers: " f"{layer_indices}")
+
+        key = (dp_rank, layer_indices)
+        if key not in refs_by_spec:
+            routed_experts = []
+            for sample in routing_by_dp[dp_rank]:
+                sample = np.asarray(sample)
+                if sample.dtype != np.int32 or sample.ndim != 3:
+                    raise ValueError(
+                        "rollout_routed_experts must contain int32 arrays with "
+                        f"shape [tokens, layers, topk], got dtype={sample.dtype}, "
+                        f"shape={sample.shape}"
+                    )
+                if sample.shape[2] != args.moe_router_topk:
+                    raise ValueError(
+                        "rollout_routed_experts has an invalid topk dimension: "
+                        f"shape={sample.shape}, expected_topk={args.moe_router_topk}"
+                    )
+                if layer_indices and max(layer_indices) >= sample.shape[1]:
+                    raise ValueError(
+                        f"Routing replay layer {max(layer_indices)} is outside "
+                        f"the rollout tensor's {sample.shape[1]} layers"
+                    )
+                local = sample[:, layer_indices, :]
+                _validate_routing_replay_ids(local, args.num_experts)
+                compact = np.ascontiguousarray(local, dtype=wire_dtype)
+                routed_experts.append(compact)
+                source_bytes += local.nbytes
+                stored_bytes += compact.nbytes
+
+            refs_by_spec[key] = store.put(
+                value={
+                    "rollout_routed_experts": routed_experts,
+                    ROUTING_REPLAY_LAYER_INDICES_KEY: np.asarray(
+                        layer_indices,
+                        dtype=np.int64,
+                    ),
+                },
+                value_spec=ROUTING_REPLAY_VALUE_SPEC,
+            )
+        routing_replay_refs.append(refs_by_spec[key])
+
+    logger.info(
+        "Stored routing replay for %d trainer ranks as %d unique shards " "(%s -> %s)",
+        len(routing_specs),
+        len(refs_by_spec),
+        _format_bytes(source_bytes),
+        _format_bytes(stored_bytes),
+    )
+    return {"data_ref": data_refs, "routing_replay_refs": routing_replay_refs}
+
+
+def _routing_replay_wire_dtype(num_experts: int) -> np.dtype:
+    if num_experts <= 0:
+        raise ValueError(f"num_experts must be positive, got {num_experts}")
+    if num_experts <= np.iinfo(np.uint8).max + 1:
+        return np.dtype(np.uint8)
+    if num_experts <= np.iinfo(np.uint16).max + 1:
+        return np.dtype(np.uint16)
+    return np.dtype(np.int32)
+
+
+def _validate_routing_replay_ids(data: np.ndarray, num_experts: int) -> None:
+    if data.size == 0:
+        return
+    minimum = int(data.min())
+    maximum = int(data.max())
+    if minimum < 0 or maximum >= num_experts:
+        raise ValueError(
+            "Routing replay contains an invalid expert ID: " f"range=[{minimum}, {maximum}], num_experts={num_experts}"
+        )
+
+
+def _format_bytes(num_bytes: int) -> str:
+    return f"{num_bytes / 1024**3:.2f} GiB"
 
 
 def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
@@ -415,9 +515,7 @@ def _compute_loss_global_batch_sizes(
 
     global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
     if global_batch_size % dp_size != 0:
-        raise ValueError(
-            f"global_batch_size={global_batch_size} must be divisible by dp_size={dp_size}"
-        )
+        raise ValueError(f"global_batch_size={global_batch_size} must be divisible by dp_size={dp_size}")
     local_batch_size = global_batch_size // dp_size
     if any(len(partition) % local_batch_size != 0 for partition in partitions):
         raise ValueError("Each DP partition must contain a whole number of local training batches")
