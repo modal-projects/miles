@@ -18,6 +18,10 @@ from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
 logger = logging.getLogger(__name__)
 
 
+def _initial_weight_sync_can_overlap_rollout(args) -> bool:
+    return args.update_weight_transfer_mode == "disk-delta" and bool(args.rollout_endpoint_url)
+
+
 # The framework supports other asynchronous approaches such as fully async (see miles/rollout/fully_async_rollout.py).
 async def train(args):
     assert not args.colocate, "Colocation is not supported for async training."
@@ -46,10 +50,19 @@ async def train(args):
 
     maybe_start_mini_ft_controller(args)
 
-    # always update weight first so that sglang has the loaded weights from training.
-    await actor_model.update_weights()
+    # An opaque disk-delta fleet already serves hf_checkpoint. Its first updater
+    # call only captures the trainer-side baseline, so rollout can proceed while
+    # that preparation runs. Other transports may mutate rollout weights here.
+    initial_weight_sync_task = None
+    if _initial_weight_sync_can_overlap_rollout(args):
+        initial_weight_sync_task = asyncio.create_task(actor_model.update_weights())
+    else:
+        await actor_model.update_weights()
 
     if args.check_weight_update_equal:
+        if initial_weight_sync_task is not None:
+            await initial_weight_sync_task
+            initial_weight_sync_task = None
         await rollout_manager.check_weights.remote(
             action="compare",
             allow_quant_error=args.check_weight_update_allow_quant_error,
@@ -60,6 +73,9 @@ async def train(args):
     eval_dispatcher = EvalDispatcher(args, actor_model, rollout_manager)
 
     if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
+        if initial_weight_sync_task is not None:
+            await initial_weight_sync_task
+            initial_weight_sync_task = None
         await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
 
     async def save_training_model(model, rollout_id, force_sync):
@@ -71,6 +87,8 @@ async def train(args):
 
     # async train loop.
     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
+    if initial_weight_sync_task is not None:
+        await initial_weight_sync_task
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:
