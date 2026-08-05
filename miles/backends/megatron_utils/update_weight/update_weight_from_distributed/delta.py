@@ -28,6 +28,27 @@ from .mixin import DistBucketedWeightUpdateMixin
 
 logger = logging.getLogger(__name__)
 
+_SAFETENSORS_DTYPE_BY_TORCH_NAME = {
+    "torch.float64": "F64",
+    "torch.float32": "F32",
+    "torch.float16": "F16",
+    "torch.bfloat16": "BF16",
+    "torch.int64": "I64",
+    "torch.int32": "I32",
+    "torch.int16": "I16",
+    "torch.int8": "I8",
+    "torch.uint8": "U8",
+    "torch.bool": "BOOL",
+    "torch.float8_e4m3fn": "F8_E4M3",
+    "torch.float8_e4m3fnuz": "F8_E4M3FNUZ",
+    "torch.float8_e5m2": "F8_E5M2",
+    "torch.float8_e5m2fnuz": "F8_E5M2FNUZ",
+    "torch.complex64": "C64",
+    "torch.uint64": "U64",
+    "torch.uint32": "U32",
+    "torch.uint16": "U16",
+}
+
 
 class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
     """
@@ -123,9 +144,9 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         """Capture the baseline snapshot the first delta diffs against (no publish), and clear any
         stale stream from a prior run. Seeds from hf_checkpoint — what each host materializes its
         base from — so the invariant ``snapshot == engine base`` holds even where the megatron->HF
-        round-trip trims vocab-padding rows (embed/lm_head). A tensor absent there (rare) falls back
-        to the gathered value. For Miles-managed engines, pull_weights(0) materializes each host's
-        local base while the trainer gathers its snapshot."""
+        round-trip trims vocab-padding rows (embed/lm_head). Every emitted tensor must have the same
+        name, dtype, and shape as that checkpoint. For Miles-managed engines, pull_weights(0)
+        materializes each host's local base while the trainer gathers its snapshot."""
         # a prior run's versions would apply against the wrong base; start the dir clean
         pulls = []
         if dist.get_rank() == 0:
@@ -142,10 +163,27 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         def seed_bucket(converted_named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None) -> None:
             for name, tensor in converted_named_tensors:
                 try:
-                    self._snapshot[name] = read_hf(name)
-                except KeyError:
-                    self._snapshot[name] = tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
-                    logger.warning("seed: %s absent from hf_checkpoint; seeding from current weights", name)
+                    expected_dtype = _SAFETENSORS_DTYPE_BY_TORCH_NAME[str(tensor.dtype)]
+                except KeyError as exc:
+                    raise ValueError(f"Trainer emitted unsupported dtype {tensor.dtype} for {name!r}") from exc
+                try:
+                    baseline = read_hf(
+                        name,
+                        expected_dtype=expected_dtype,
+                        expected_shape=tuple(tensor.shape),
+                    )
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint"
+                    ) from exc
+                emitted_nbytes = tensor.numel() * tensor.element_size()
+                if emitted_nbytes != baseline.nbytes:
+                    raise ValueError(
+                        f"Trainer output for {name!r} does not match the canonical checkpoint layout: "
+                        f"shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+                        f"emitted_bytes={emitted_nbytes}, checkpoint_bytes={baseline.nbytes}"
+                    )
+                self._snapshot[name] = baseline
 
         self._for_each_hf_bucket(seed_bucket)
         if dist.get_rank() == 0 and not self._publish_only:
