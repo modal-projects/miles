@@ -150,7 +150,7 @@ def convert_deepseekv3_to_hf(args, name, param):
             return [
                 (
                     f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias",
-                    _to_checkpoint_dtype(args, param),
+                    param,
                 )
             ]
 
