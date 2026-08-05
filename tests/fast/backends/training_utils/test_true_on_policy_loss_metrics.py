@@ -26,6 +26,7 @@ def _make_args(*, use_rollout_logprobs: bool) -> Namespace:
         kl_loss_type="k1",
         kl_loss_coef=0.0,
         rollout_temperature=1.0,
+        rollout_top_p=1.0,
         log_probs_chunk_size=-1,
         true_on_policy_mode=False,
         allgather_cp=False,
@@ -120,6 +121,12 @@ def test_train_rollout_logprob_abs_diff_uses_policy_loss_reference_logprobs(
 
     assert torch.isfinite(loss)
     torch.testing.assert_close(metrics["train_rollout_logprob_abs_diff"], torch.tensor(expected_abs_diff))
+    expected_log_ratio = old_log_probs - rollout_log_probs
+    torch.testing.assert_close(
+        metrics["train_rollout_logprob_signed_diff"],
+        expected_log_ratio.mean(),
+    )
+    torch.testing.assert_close(metrics["train_rollout_ess_ratio"], torch.tensor(1.0))
 
 
 def test_train_rollout_logprob_abs_diff_falls_back_to_loss_forward(monkeypatch):
