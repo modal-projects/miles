@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import ray
 import torch
@@ -11,7 +12,9 @@ from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples
 
 from miles.ray.rollout.train_data_conversion import (
     _post_process_rewards,
+    _routing_replay_wire_dtype,
     convert_samples_to_train_data,
+    put_train_data,
     split_train_data_by_dp,
     split_train_data_by_dp_raw,
 )
@@ -690,6 +693,115 @@ class TestSplitTrainDataByDp:
         parts = [ray.get(r.inner) for r in refs]
         all_indices = sorted(i for p in parts for i in p["partition"])
         assert all_indices == list(range(n))
+
+
+class TestPutTrainData:
+    @pytest.fixture(autouse=True)
+    def _init_object_store(self):
+        object_store.init_instance(make_args())
+
+    @staticmethod
+    def _data():
+        tokens = [[1, 2, 3], [4, 5], [6, 7, 8, 9], [10, 11, 12]]
+        routed_experts = [
+            np.arange((len(sample) - 1) * 4 * 2, dtype=np.int32).reshape(len(sample) - 1, 4, 2) for sample in tokens
+        ]
+        return {
+            "tokens": tokens,
+            "response_lengths": [len(sample) - 1 for sample in tokens],
+            "rewards": [0.0] * len(tokens),
+            "truncated": [0] * len(tokens),
+            "loss_masks": [[1] * (len(sample) - 1) for sample in tokens],
+            "sample_indices": list(range(len(tokens))),
+            "rollout_routed_experts": routed_experts,
+        }
+
+    def test_routing_replay_is_dp_and_layer_sharded(self):
+        args = make_args(balance_data=False, num_experts=256, moe_router_topk=2)
+        data = self._data()
+        result = put_train_data(
+            args,
+            data,
+            {
+                "dp_size": 2,
+                "routing_replay_specs": [
+                    {"rank": 0, "dp_rank": 0, "layer_indices": [0, 1]},
+                    {"rank": 1, "dp_rank": 0, "layer_indices": [0, 1]},
+                    {"rank": 2, "dp_rank": 1, "layer_indices": [2, 3]},
+                    {"rank": 3, "dp_rank": 1, "layer_indices": [2, 3]},
+                ],
+            },
+        )
+
+        common = [ray.get(ref.inner) for ref in result["data_ref"]]
+        assert all("rollout_routed_experts" not in shard for shard in common)
+        assert list(common[0]["partition"]) == [0, 2]
+        assert list(common[1]["partition"]) == [1, 3]
+
+        routing_refs = result["routing_replay_refs"]
+        assert routing_refs[0].inner == routing_refs[1].inner
+        assert routing_refs[2].inner == routing_refs[3].inner
+        assert routing_refs[0].inner != routing_refs[2].inner
+
+        first = ray.get(routing_refs[0].inner)
+        np.testing.assert_array_equal(
+            first["rollout_routed_experts_layer_indices"],
+            [0, 1],
+        )
+        assert all(value.dtype == np.uint8 for value in first["rollout_routed_experts"])
+        np.testing.assert_array_equal(
+            first["rollout_routed_experts"][0],
+            data["rollout_routed_experts"][0][:, [0, 1], :],
+        )
+        np.testing.assert_array_equal(
+            first["rollout_routed_experts"][1],
+            data["rollout_routed_experts"][2][:, [0, 1], :],
+        )
+
+    @pytest.mark.parametrize(
+        ("num_experts", "expected_dtype"),
+        [(256, np.uint8), (257, np.uint16), (65536, np.uint16), (65537, np.int32)],
+    )
+    def test_routing_wire_dtype_is_lossless(self, num_experts, expected_dtype):
+        assert _routing_replay_wire_dtype(num_experts) == np.dtype(expected_dtype)
+
+    def test_invalid_expert_id_fails_before_compaction(self):
+        args = make_args(balance_data=False, num_experts=256, moe_router_topk=2)
+        data = self._data()
+        data["rollout_routed_experts"][0][0, 0, 0] = 256
+
+        with pytest.raises(ValueError, match="invalid expert ID"):
+            put_train_data(
+                args,
+                data,
+                {
+                    "dp_size": 1,
+                    "routing_replay_specs": [
+                        {"rank": 0, "dp_rank": 0, "layer_indices": [0]},
+                    ],
+                },
+            )
+
+    def test_routing_replay_requires_trainer_topology(self):
+        args = make_args(balance_data=False, num_experts=256, moe_router_topk=2)
+
+        with pytest.raises(RuntimeError, match="routing replay topology"):
+            put_train_data(args, self._data(), {"dp_size": 1})
+
+    def test_invalid_routing_topk_fails_before_storage(self):
+        args = make_args(balance_data=False, num_experts=256, moe_router_topk=4)
+
+        with pytest.raises(ValueError, match="invalid topk dimension"):
+            put_train_data(
+                args,
+                self._data(),
+                {
+                    "dp_size": 1,
+                    "routing_replay_specs": [
+                        {"rank": 0, "dp_rank": 0, "layer_indices": [0]},
+                    ],
+                },
+            )
 
 
 class TestSplitTrainDataRaw:

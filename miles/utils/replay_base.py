@@ -216,6 +216,7 @@ class RoutingReplayManager(BaseReplayManager):
     name = "routing"
     filename = "routing_replay.pt"
     data_key = "rollout_routed_experts"
+    global_stream_indices_key = "rollout_routed_experts_layer_indices"
     if_sp_region = True
     enable_check_replay_result = False
     replay_check_max_mismatch_fraction = 1e-2

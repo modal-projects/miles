@@ -22,6 +22,7 @@ async def test_train_routes_each_critic_payload_to_matching_actor_rank():
 
     calls = []
     group = object.__new__(RayTrainGroup)
+    group.role = "actor"
     group._actor_handles = [_Handle(0, calls), _Handle(1, calls)]
     payloads = [{"values": ["v0"]}, {"values": ["v1"]}]
 
@@ -39,6 +40,7 @@ async def test_train_broadcasts_without_lifecycle_options():
 
     calls = []
     group = object.__new__(RayTrainGroup)
+    group.role = "actor"
     group._actor_handles = [_Handle(0, calls), _Handle(1, calls)]
 
     await group.train(7, {"data_ref": "rollout"})
@@ -55,7 +57,48 @@ async def test_train_rejects_wrong_number_of_rank_payloads():
     from miles.ray.actor_group import RayTrainGroup
 
     group = object.__new__(RayTrainGroup)
+    group.role = "actor"
     group._actor_handles = [_Handle(0, []), _Handle(1, [])]
 
     with pytest.raises(ValueError, match="one payload per train worker"):
         await group.train(5, {"data_ref": "rollout"}, external_data=[{"values": []}])
+
+
+async def test_train_routes_each_routing_shard_to_matching_actor_rank():
+    from miles.ray.actor_group import RayTrainGroup
+
+    calls = []
+    group = object.__new__(RayTrainGroup)
+    group.role = "actor"
+    group._actor_handles = [_Handle(0, calls), _Handle(1, calls)]
+
+    await group.train(
+        8,
+        {
+            "data_ref": "rollout",
+            "routing_replay_refs": ["routing-0", "routing-1"],
+        },
+    )
+
+    assert calls == [
+        (
+            0,
+            8,
+            "rollout",
+            {
+                "witness_info": None,
+                "attempt": 0,
+                "routing_replay_ref": "routing-0",
+            },
+        ),
+        (
+            1,
+            8,
+            "rollout",
+            {
+                "witness_info": None,
+                "attempt": 0,
+                "routing_replay_ref": "routing-1",
+            },
+        ),
+    ]
