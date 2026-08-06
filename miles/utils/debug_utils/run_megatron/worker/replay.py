@@ -124,9 +124,7 @@ def _load_replay(
     do_sp_slice: bool = sequence_parallel and routing_replay_manager.if_sp_region and ranks.tp_size > 1
 
     total_entries: int = 0
-    for replay_idx, (replay, indices_list) in enumerate(
-        zip(replays, saved_replays, strict=True)
-    ):
+    for replay_idx, (replay, indices_list) in enumerate(zip(replays, saved_replays, strict=True)):
         sliced: list[torch.Tensor] = indices_list
 
         if ranks.cp_size > 1:

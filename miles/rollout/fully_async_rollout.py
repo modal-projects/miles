@@ -449,9 +449,7 @@ class FullyAsyncRolloutFn:
             queried_current = (
                 await self._weight_version.get(args) if oldest is not None or finish_version is not None else None
             )
-            query_available = bool(
-                queried_current is not None and getattr(self._weight_version, "available", True)
-            )
+            query_available = bool(queried_current is not None and getattr(self._weight_version, "available", True))
             if oldest is not None or finish_version is not None:
                 current_version_available.append(int(query_available))
                 current_version_fallback.append(int(not query_available))
@@ -565,12 +563,12 @@ class FullyAsyncRolloutFn:
             metrics["rollout/fully_async/avg_staleness"] = sum(staleness_values) / len(staleness_values)
             metrics["rollout/fully_async/max_staleness"] = max(staleness_values)
         if current_version_available:
-            metrics["rollout_staleness/current_version_available_ratio"] = sum(
+            metrics["rollout_staleness/current_version_available_ratio"] = sum(current_version_available) / len(
                 current_version_available
-            ) / len(current_version_available)
-            metrics["rollout_staleness/filter_current_version_fallback_ratio"] = sum(
+            )
+            metrics["rollout_staleness/filter_current_version_fallback_ratio"] = sum(current_version_fallback) / len(
                 current_version_fallback
-            ) / len(current_version_fallback)
+            )
         if current_version_ages:
             metrics["rollout_staleness/current_version_age_seconds_max"] = max(current_version_ages)
         for population, generation, post_finish, spans, queue_waits in (

@@ -309,6 +309,7 @@ def _init_ray_distributed_post(args):
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
         raise RuntimeError("No alive Ray nodes to place HTTP POST actors.")
+
     # Define the async actor
     @ray.remote
     class _HttpPosterActor:

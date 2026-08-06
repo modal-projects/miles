@@ -31,9 +31,7 @@ def bind_local_moe_replay_streams(models, replay_list) -> list[int]:
         )
     for replay, layer_index in zip(replay_list, layer_indices, strict=True):
         if replay.stream_idx is not None and replay.stream_idx != layer_index:
-            raise ValueError(
-                f"Routing replay stream {replay.stream_idx} was registered for local layer {layer_index}"
-            )
+            raise ValueError(f"Routing replay stream {replay.stream_idx} was registered for local layer {layer_index}")
         replay.stream_idx = layer_index
     return layer_indices
 

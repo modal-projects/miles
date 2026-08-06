@@ -35,7 +35,9 @@ class GenerateState:
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.generate_fn_semaphore = asyncio.Semaphore(args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine)
+        self.generate_fn_semaphore = asyncio.Semaphore(
+            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        )
         self.sampling_params: dict[str, Any] = compute_sampling_params(
             args,
             temperature=args.rollout_temperature,

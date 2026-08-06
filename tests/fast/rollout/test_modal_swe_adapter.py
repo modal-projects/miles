@@ -12,23 +12,24 @@ sys.path.insert(0, str(MODAL_SWE_DIR))
 
 import modal_swe_agent_function as agent_function_module  # noqa: E402
 from modal_swe_agent_function import (  # noqa: E402
-    _AgentWorker,
-    _EnvironmentSnapshot,
     _OBSERVATION_TEMPLATE,
-    _RayAgentWorkerPool,
+    _AgentWorker,
     _attach_client_model_timings,
+    _environment_metrics,
+    _EnvironmentSnapshot,
     _exception_metadata,
     _failure,
     _instrument_model_requests,
     _is_context_limit_error,
     _is_sandbox_not_found_error,
-    _sandbox_boot_semaphore,
-    _environment_metrics,
     _parse_reward,
     _prepare_environment,
+    _RayAgentWorkerPool,
+    _sandbox_boot_semaphore,
     _task_cwd,
     reward_func,
 )
+from modal_swe_metrics import log_rollout_data  # noqa: E402
 from modal_swe_sandbox import (  # noqa: E402
     _BOUNDED_COMMAND_RUNNER,
     ModalSWEEnvironment,
@@ -36,7 +37,7 @@ from modal_swe_sandbox import (  # noqa: E402
     _parse_bounded_command_response,
     sandbox_settings,
 )
-from modal_swe_metrics import log_rollout_data  # noqa: E402
+
 from miles.utils.types import Sample
 
 
@@ -405,10 +406,7 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
     assert metrics["rollout_agent/agent_tool_output_hard_limit_count_mean"] == 0.5
     assert metrics["rollout_agent/context_limit_exit_ratio"] == 0.5
     assert "model_request/durations_seconds" not in samples[0].metadata
-    assert (
-        "client_model_request_durations_seconds"
-        not in samples[0].metadata["agent_metrics"]
-    )
+    assert "client_model_request_durations_seconds" not in samples[0].metadata["agent_metrics"]
 
 
 def test_rollout_metrics_include_masked_infrastructure_attempts():
