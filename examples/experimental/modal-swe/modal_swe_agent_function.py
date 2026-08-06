@@ -1121,11 +1121,13 @@ class _AgentWorker:
 class _RayAgentWorkerPool:
     """Load-balanced handles for independent Modal-controller processes."""
 
-    def __init__(self, workers: list[Any]) -> None:
+    def __init__(self, workers: list[Any], per_worker_capacity: int = 1) -> None:
         self.workers = workers
         self.in_flight = [0] * len(workers)
         self.next_tie_break = 0
         self.progress_reporter: asyncio.Task | None = None
+        self.capacity = len(workers) * per_worker_capacity
+        self._available = asyncio.Semaphore(self.capacity)
 
     def _acquire(self) -> tuple[int, Any]:
         minimum = min(self.in_flight)
@@ -1142,8 +1144,17 @@ class _RayAgentWorkerPool:
         assert self.in_flight[index] >= 0
 
     async def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # Keep excess episode coroutines in this process. Submitting them to
+        # Ray would put them ahead of lightweight stats RPCs in each actor's
+        # mailbox and eventually exhaust max_pending_calls.
+        await self._available.acquire()
         index, worker = self._acquire()
-        future = asyncio.ensure_future(worker.run_episode.remote(payload))
+        try:
+            future = asyncio.ensure_future(worker.run_episode.remote(payload))
+        except Exception:
+            self._release(index)
+            self._available.release()
+            raise
 
         def release_when_finished(completed: asyncio.Future) -> None:
             # Retrieve failures even when the caller was cancelled so asyncio
@@ -1151,6 +1162,7 @@ class _RayAgentWorkerPool:
             if not completed.cancelled():
                 completed.exception()
             self._release(index)
+            self._available.release()
 
         future.add_done_callback(release_when_finished)
         try:
@@ -1207,7 +1219,7 @@ class _RayAgentWorkerPool:
                 len(self.workers),
                 dispatched,
                 sum(phases.values()),
-                len(self.workers) * _threads_per_agent_process(),
+                self.capacity,
                 dict(sorted(phases.items())),
                 {phase: round(seconds, 1) for phase, seconds in sorted(oldest_by_phase.items())},
                 max(
@@ -1242,7 +1254,7 @@ def _ray_agent_pool() -> _RayAgentWorkerPool:
     # worker so an import/scheduling failure is surfaced once at pool startup
     # rather than converting early trajectories into infrastructure failures.
     ready = ray.get([worker.ping.remote() for worker in workers])
-    pool = _RayAgentWorkerPool(workers)
+    pool = _RayAgentWorkerPool(workers, per_worker_capacity=threads)
     logger.info(
         "Started %s Modal agent-controller processes with %s threads each (pids=%s)",
         process_count,

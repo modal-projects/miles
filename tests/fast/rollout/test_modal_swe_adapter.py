@@ -620,6 +620,44 @@ async def test_cancelled_dispatch_retains_capacity_until_remote_episode_finishes
 
 
 @pytest.mark.asyncio
+async def test_worker_pool_queues_excess_episodes_before_ray_submission():
+    finishes = [asyncio.Event(), asyncio.Event()]
+    submitted = 0
+
+    class RemoteMethod:
+        def remote(self, _payload):
+            nonlocal submitted
+            index = submitted
+            submitted += 1
+
+            async def run():
+                await finishes[index].wait()
+                return {"reward": 0}
+
+            return run()
+
+    worker = _FakeWorker()
+    worker.run_episode = RemoteMethod()
+    pool = _RayAgentWorkerPool([worker], per_worker_capacity=1)
+
+    first = asyncio.create_task(pool.run_episode({}))
+    second = asyncio.create_task(pool.run_episode({}))
+    await asyncio.sleep(0)
+    assert submitted == 1
+    assert pool.in_flight == [1]
+
+    finishes[0].set()
+    await first
+    await asyncio.sleep(0)
+    assert submitted == 2
+    assert pool.in_flight == [1]
+
+    finishes[1].set()
+    await second
+    assert pool.in_flight == [0]
+
+
+@pytest.mark.asyncio
 async def test_agent_worker_records_live_phase_accounting(monkeypatch):
     def fake_episode(*, phase_callback, **_kwargs):
         phase_callback("sandbox_boot")
