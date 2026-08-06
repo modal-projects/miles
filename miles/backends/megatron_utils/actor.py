@@ -68,6 +68,20 @@ logging.getLogger("megatron").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _global_peak_gpu_memory(prefix: str) -> dict[str, float]:
+    peaks = torch.tensor(
+        [torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()],
+        dtype=torch.float64,
+        device=torch.cuda.current_device(),
+    )
+    dist.all_reduce(peaks, op=dist.ReduceOp.MAX)
+    gib = 1024**3
+    return {
+        f"perf/{prefix}_peak_gpu_allocated_gib": peaks[0].item() / gib,
+        f"perf/{prefix}_peak_gpu_reserved_gib": peaks[1].item() / gib,
+    }
+
+
 def _setup_disk_offload_reclaim(disk_dir: str) -> None:
     """Wipe this rank's train disk-offload dir on startup and re-arm the atexit wipe.
 
@@ -476,6 +490,7 @@ class MegatronTrainRayActor(TrainRayActor):
     ) -> TrainStepOutcome:
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
+        perf_metrics = {}
 
         log_prob_data_iterator = data_iterator
         log_prob_num_microbatches = num_microbatches
@@ -503,26 +518,30 @@ class MegatronTrainRayActor(TrainRayActor):
 
         separate_log_prob_batches = log_prob_data_iterator is not data_iterator
 
-        for m in all_replay_managers:
-            if self._use_rollout_replay(m):
-                fill_replay_data(
-                    args=self.args,
-                    models=self.model,
-                    data_iterator=log_prob_data_iterator,
-                    num_microbatches=log_prob_num_microbatches,
-                    rollout_data=rollout_data,
-                    data_key=m.data_key,
-                    replay_list=m.replays,
-                    register_replay_list_func=m.register_replay_list_func,
-                    if_sp_region=m.if_sp_region,
-                    indices_are_token_positions=m.replay_indices_are_token_positions,
-                    global_stream_indices_key=getattr(m, "global_stream_indices_key", None),
-                    consume=not separate_log_prob_batches,
-                )
+        with timer("log_probs_replay_prepare"):
+            for m in all_replay_managers:
+                if self._use_rollout_replay(m):
+                    fill_replay_data(
+                        args=self.args,
+                        models=self.model,
+                        data_iterator=log_prob_data_iterator,
+                        num_microbatches=log_prob_num_microbatches,
+                        rollout_data=rollout_data,
+                        data_key=m.data_key,
+                        replay_list=m.replays,
+                        register_replay_list_func=m.register_replay_list_func,
+                        if_sp_region=m.if_sp_region,
+                        indices_are_token_positions=m.replay_indices_are_token_positions,
+                        global_stream_indices_key=getattr(m, "global_stream_indices_key", None),
+                        consume=not separate_log_prob_batches,
+                    )
 
         with inverse_timer("train_wait"), timer("train"):
+            ran_log_prob = False
+            torch.cuda.reset_peak_memory_stats()
             if self.args.compute_advantages_and_returns:
                 if "ref" in self.weights_backuper.backup_tags:
+                    ran_log_prob = True
                     self._set_replay_stage("fallthrough")
                     self._switch_model("ref")
                     rollout_data.update(
@@ -535,6 +554,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
                 # Forward teacher model to get teacher_log_probs for Megatron-based OPD
                 if "teacher" in self.weights_backuper.backup_tags:
+                    ran_log_prob = True
                     self._set_replay_stage("fallthrough")
                     self._switch_model("teacher")
                     rollout_data.update(
@@ -547,6 +567,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
                 if not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics:
+                    ran_log_prob = True
                     for m in all_replay_managers:
                         if m.enabled:
                             if self._use_rollout_replay(m):
@@ -584,23 +605,27 @@ class MegatronTrainRayActor(TrainRayActor):
                 compute_advantages_and_returns(self.args, rollout_data)
                 log_train_advantage_computation_event(rollout_data)
 
+            if ran_log_prob:
+                perf_metrics.update(_global_peak_gpu_memory("log_probs"))
+
             if separate_log_prob_batches:
-                for m in all_replay_managers:
-                    if self._use_rollout_replay(m):
-                        m.clear_all()
-                        fill_replay_data(
-                            args=self.args,
-                            models=self.model,
-                            data_iterator=data_iterator,
-                            num_microbatches=num_microbatches,
-                            rollout_data=rollout_data,
-                            data_key=m.data_key,
-                            replay_list=m.replays,
-                            register_replay_list_func=m.register_replay_list_func,
-                            if_sp_region=m.if_sp_region,
-                            indices_are_token_positions=m.replay_indices_are_token_positions,
-                            global_stream_indices_key=getattr(m, "global_stream_indices_key", None),
-                        )
+                with timer("actor_replay_prepare"):
+                    for m in all_replay_managers:
+                        if self._use_rollout_replay(m):
+                            m.clear_all()
+                            fill_replay_data(
+                                args=self.args,
+                                models=self.model,
+                                data_iterator=data_iterator,
+                                num_microbatches=num_microbatches,
+                                rollout_data=rollout_data,
+                                data_key=m.data_key,
+                                replay_list=m.replays,
+                                register_replay_list_func=m.register_replay_list_func,
+                                if_sp_region=m.if_sp_region,
+                                indices_are_token_positions=m.replay_indices_are_token_positions,
+                                global_stream_indices_key=getattr(m, "global_stream_indices_key", None),
+                            )
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)
@@ -609,6 +634,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
             # Train
             self._set_replay_stage("replay_backward")
+            torch.cuda.reset_peak_memory_stats()
             with timer("actor_train"):
                 train_step_outcome = train(
                     rollout_id,
@@ -621,6 +647,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     attempt=attempt,
                     ft_test_action_executor=self._ft_test_action_executor,
                 )
+            perf_metrics.update(_global_peak_gpu_memory("actor_train"))
 
             self.prof.step(rollout_id=rollout_id)
 
@@ -653,7 +680,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
             commit_trained_batch(rollout_data, rollout_id, self._multi_lora_pending_push)
 
-        log_perf_data(rollout_id, self.args, extra_metrics=self.weight_updater.pop_metrics())
+        perf_metrics.update(self.weight_updater.pop_metrics())
+        log_perf_data(rollout_id, self.args, extra_metrics=perf_metrics)
 
         self._heartbeat.bump()
         return train_step_outcome

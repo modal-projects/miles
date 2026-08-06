@@ -35,6 +35,7 @@ from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
 from miles.utils.multi_lora import is_multi_lora_enabled
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
+from miles.utils.timer import timer
 from miles.utils.tracking_utils.structured_log import log_structured
 
 from ...utils.misc import filter_keys
@@ -288,6 +289,10 @@ def forward_only(
     config = get_model_config(model[0])
     use_rollout_sampling_mask = store_prefix == "" and args.rollout_top_p < 1.0
 
+    def collect_non_loss_data(logits: torch.Tensor, **kwargs):
+        with timer(f"{store_prefix}log_probs_postprocess"):
+            return f(logits, **kwargs)
+
     @dumper_phase_util.wrap_forward_step
     def forward_step(
         data_iterator: DataIterator, model: GPTModel, return_schedule_plan: bool = False
@@ -351,7 +356,7 @@ def forward_only(
         )
 
         return output_tensor, partial(
-            f,
+            collect_non_loss_data,
             args=args,
             unconcat_tokens=unconcat_tokens,
             total_lengths=total_lengths,
@@ -560,16 +565,17 @@ def train_one_step(
 
     # Forward pass.
     forward_backward_func = get_forward_backward_func()
-    losses_reduced = forward_backward_func(
-        forward_step_func=forward_step,
-        data_iterator=data_iterator,
-        model=model,
-        num_microbatches=num_microbatches,
-        seq_length=args.seq_length,
-        micro_batch_size=args.micro_batch_size,
-        decoder_seq_length=args.decoder_seq_length,
-        forward_only=False,
-    )
+    with timer("actor_forward_backward"):
+        losses_reduced = forward_backward_func(
+            forward_step_func=forward_step,
+            data_iterator=data_iterator,
+            model=model,
+            num_microbatches=num_microbatches,
+            seq_length=args.seq_length,
+            micro_batch_size=args.micro_batch_size,
+            decoder_seq_length=args.decoder_seq_length,
+            forward_only=False,
+        )
 
     outcome = TrainStepOutcome.NORMAL
     grad_norm = 0.0
@@ -614,19 +620,20 @@ def train_one_step(
         dumper_phase_util.finalize(model)
 
     if not disable_optimizer and valid_step:
-        if multi_lora:
-            from miles.backends.megatron_utils.multi_lora_utils import step_stepped_adapter_slots
+        with timer("actor_optimizer_step"):
+            if multi_lora:
+                from miles.backends.megatron_utils.multi_lora_utils import step_stepped_adapter_slots
 
-            grad_norm = step_stepped_adapter_slots(
-                args, model, optimizer, data_iterator[0].rollout_data, rollout_id, step_id
-            )
-        else:
-            # Update parameters.
-            update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+                grad_norm = step_stepped_adapter_slots(
+                    args, model, optimizer, data_iterator[0].rollout_data, rollout_id, step_id
+                )
+            else:
+                # Update parameters.
+                update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
-            # Update learning rate.
-            assert update_successful
-            opt_param_scheduler.step(increment=args.global_batch_size)
+                # Update learning rate.
+                assert update_successful
+                opt_param_scheduler.step(increment=args.global_batch_size)
 
     # release grad (multi-LoRA retains accumulated grads; stepped slots were
     # zeroed selectively inside step_adapter_slots)
