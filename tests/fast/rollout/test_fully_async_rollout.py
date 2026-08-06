@@ -615,6 +615,26 @@ async def test_weight_version_coalesces_concurrent_queries(monkeypatch):
     assert calls == 1
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"weight_version": 9}, 9),
+        ({"weight_version": "9"}, 9),
+        ({"weight_version": {"min_version": 9}}, 9),
+        ({"weight_version": {"min_version": 8, "exact_version": 9}}, 9),
+    ],
+)
+async def test_weight_version_accepts_stitch_constraint_shape(monkeypatch, response, expected):
+    async def router_version(_url):
+        return response
+
+    monkeypatch.setattr(fully_async, "get", router_version)
+    version = fully_async._CachedWeightVersion(ttl=60.0)
+
+    assert await version.get(make_args()) == expected
+    assert version.available
+
+
 async def test_backfill_submits_replacement_before_the_group_returns(monkeypatch):
     """With --rollout-sample-completion-backfill, finished samples free slots immediately."""
     callbacks = []

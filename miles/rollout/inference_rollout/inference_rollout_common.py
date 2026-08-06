@@ -17,7 +17,7 @@ from miles.rollout.base_types import (
     RolloutFnTrainOutput,
 )
 from miles.rollout.generate_hub.single_turn import generate
-from miles.rollout.generate_utils.generate_endpoint_utils import policy_uses_routing_key
+from miles.rollout.generate_utils.generate_endpoint_utils import get_rollout_concurrency, policy_uses_routing_key
 from miles.rollout.inference_rollout.compatibility import load_generate_function
 from miles.rollout.rm_hub import async_rm, batched_async_rm
 from miles.utils.processing_utils import load_processor, load_tokenizer
@@ -35,9 +35,7 @@ class GenerateState:
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.generate_fn_semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-        )
+        self.generate_fn_semaphore = asyncio.Semaphore(get_rollout_concurrency(args))
         self.sampling_params: dict[str, Any] = compute_sampling_params(
             args,
             temperature=args.rollout_temperature,

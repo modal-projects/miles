@@ -10,6 +10,7 @@ from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_
 from miles.backends.sglang_utils.arguments import validate_args as validate_sglang_args
 from miles.utils.arguments import (
     _maybe_apply_dumper_overrides,
+    _normalize_rollout_endpoint_url,
     _resolve_checkpoint_load,
     _resolve_ft_components,
     get_miles_extra_args_provider,
@@ -289,6 +290,61 @@ def test_custom_megatron_post_save_hook_path_is_parsed():
     args = parser.parse_args(["--custom-megatron-post-save-hook-path", "pkg.module.hook"] + REQUIRED_ARGS)
 
     assert args.custom_megatron_post_save_hook_path == "pkg.module.hook"
+
+
+def test_opaque_rollout_arguments_are_parsed():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    args = parser.parse_args(
+        [
+            "--rollout-endpoint-url",
+            "https://rollout.example/",
+            "--rollout-request-timeout-secs",
+            "300",
+            "--custom-rollout-request-hook-path",
+            "pkg.module.hook",
+        ]
+        + REQUIRED_ARGS
+    )
+
+    assert args.rollout_endpoint_url == "https://rollout.example/"
+    assert args.rollout_request_timeout_secs == 300
+    assert args.custom_rollout_request_hook_path == "pkg.module.hook"
+
+
+def test_normalize_rollout_endpoint_url():
+    assert _normalize_rollout_endpoint_url("https://rollout.example/") == "https://rollout.example"
+    with pytest.raises(ValueError, match="absolute HTTP URL"):
+        _normalize_rollout_endpoint_url("rollout.example")
+
+
+def test_opaque_rollout_validation(tmp_path):
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(
+        [
+            "--num-rollout",
+            "1",
+            "--rollout-endpoint-url",
+            "https://rollout.example/",
+            "--update-weight-transfer-mode",
+            "disk-delta",
+            "--update-weight-disk-dir",
+            str(tmp_path / "updates"),
+            "--custom-update-weight-post-write-path",
+            "pkg.module.hook",
+            "--hf-checkpoint",
+            str(tmp_path),
+        ]
+        + REQUIRED_ARGS
+    )
+
+    miles_validate_args(args)
+
+    assert args.rollout_endpoint_url == "https://rollout.example"
+    assert args.rollout_num_gpus == 0
+    assert args.rollout_request_timeout_secs == 600
 
 
 def test_custom_megatron_post_save_hook_path_requires_save():
