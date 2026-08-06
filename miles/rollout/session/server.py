@@ -6,6 +6,7 @@
 - ``run_session_server`` is the subprocess entry point: fresh interpreter, so it configures logging and the process title itself, then serves uvicorn.
 """
 
+import asyncio
 import json
 import logging
 
@@ -14,6 +15,7 @@ import setproctitle
 import uvicorn
 from fastapi import FastAPI
 
+from miles.rollout.generate_utils.rollout_request import RolloutRequestContext, prepare_rollout_request
 from miles.rollout.session.core import ProxyRequest
 from miles.rollout.session.sessions import setup_session_routes
 from miles.utils.logging_utils import configure_logger_raw
@@ -29,10 +31,13 @@ class SessionServer:
     requests through the inference router (sglang or miles)."""
 
     def __init__(self, args, backend_url: str):
+        self.args = args
         self.backend_url = backend_url
         self.app = FastAPI()
 
-        timeout = getattr(args, "miles_router_timeout", 600.0)
+        timeout = getattr(args, "rollout_request_timeout_secs", None)
+        if timeout is None:
+            timeout = getattr(args, "miles_router_timeout", 600.0)
         self.client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=1024),
             timeout=httpx.Timeout(timeout),
@@ -50,17 +55,48 @@ class SessionServer:
 
         headers = {k: v for k, v in headers.items() if k.lower() not in _DROP_REQUEST_HEADERS}
 
-        try:
-            response = await self.client.request(request.method, url, content=body, headers=headers)
-        except httpx.TransportError as exc:
-            logger.warning("Proxy transport error for %s %s: %s", request.method, path, exc)
-            error_body = json.dumps({"error": f"backend transport error: {type(exc).__name__}: {exc}"}).encode()
-            return {
-                "request_body": body,
-                "response_body": error_body,
-                "status_code": 502,
-                "headers": {"content-type": "application/json"},
-            }
+        max_retries = 1
+        retry_sleep = 1.0
+        if request.session_id is not None and getattr(self.args, "custom_rollout_request_hook_path", None):
+            prepared = await prepare_rollout_request(
+                self.args,
+                RolloutRequestContext(session_id=request.session_id),
+                url=url,
+                payload=json.loads(body),
+                headers=headers,
+            )
+            url = prepared["url"]
+            headers = prepared["headers"] or {}
+            body = json.dumps(
+                prepared["payload"], ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+            max_retries = prepared["max_retries"]
+            retry_sleep = prepared["retry_sleep"]
+
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.request(request.method, url, content=body, headers=headers)
+            except httpx.TransportError as exc:
+                if attempt + 1 == max_retries:
+                    logger.warning("Proxy transport error for %s %s: %s", request.method, path, exc)
+                    error_body = json.dumps(
+                        {"error": f"backend transport error: {type(exc).__name__}: {exc}"}
+                    ).encode()
+                    return {
+                        "request_body": body,
+                        "response_body": error_body,
+                        "status_code": 502,
+                        "headers": {"content-type": "application/json"},
+                    }
+            else:
+                retryable = response.status_code in (409, 429) or response.status_code >= 500
+                if not retryable or attempt + 1 == max_retries:
+                    break
+                await response.aread()
+            await asyncio.sleep(retry_sleep)
+
+        assert response is not None
         content = await response.aread()
         return {
             "request_body": body,
