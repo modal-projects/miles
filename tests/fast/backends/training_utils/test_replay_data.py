@@ -2,10 +2,13 @@ from tests.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=60, suite="stage-a-cpu", labels=[])
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from miles.backends.training_utils.replay_data import register_replay_list_sequential
+from miles.backends.training_utils import replay_data as replay_data_module
+from miles.backends.training_utils.replay_data import fill_replay_data, register_replay_list_sequential
 
 
 class _Replay:
@@ -45,3 +48,36 @@ def test_register_replay_list_sequential_rejects_out_of_range_stream_idx():
 
     with pytest.raises(AssertionError, match="out of range"):
         register_replay_list_sequential(replays, replay_data)
+
+
+@pytest.mark.parametrize("consume", [False, True])
+def test_fill_replay_data_optionally_consumes_source(monkeypatch, consume):
+    class _Iterator:
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(
+        replay_data_module,
+        "get_parallel_state",
+        lambda: SimpleNamespace(tp=SimpleNamespace(rank=0, size=1)),
+    )
+    rollout_data = {
+        "rollout_routed_experts": [],
+        "rollout_routed_experts_layer_indices": [3, 4],
+    }
+
+    fill_replay_data(
+        args=SimpleNamespace(qkv_format="thd", sequence_parallel=False, data_pad_size_multiplier=1),
+        models=[],
+        data_iterator=[_Iterator()],
+        num_microbatches=[],
+        rollout_data=rollout_data,
+        data_key="rollout_routed_experts",
+        replay_list=[],
+        register_replay_list_func=lambda *_args, **_kwargs: None,
+        global_stream_indices_key="rollout_routed_experts_layer_indices",
+        consume=consume,
+    )
+
+    assert ("rollout_routed_experts" in rollout_data) is not consume
+    assert ("rollout_routed_experts_layer_indices" in rollout_data) is not consume

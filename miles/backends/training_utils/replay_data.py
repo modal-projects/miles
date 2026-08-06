@@ -40,6 +40,7 @@ def fill_replay_data(
     if_sp_region=True,
     indices_are_token_positions=False,
     global_stream_indices_key: str | None = None,
+    consume: bool = True,
 ):
     """Load rollout replay tensors into module replay queues.
 
@@ -48,13 +49,14 @@ def fill_replay_data(
     data iterator to process those tensors in the same microbatch order as
     log-prob and train forwards, pads/slices them to match the local CP/SP
     token layout, and then delegates stream-to-module mapping to
-    `register_replay_list_func`.
+    `register_replay_list_func`. Set `consume=False` when another batching
+    schedule must be built from the same source tensors.
     """
     if data_key not in rollout_data:
         raise ValueError(f"{data_key} is required in rollout_data for replay.")
 
     global_stream_indices = (
-        rollout_data.pop(global_stream_indices_key)
+        rollout_data[global_stream_indices_key]
         if global_stream_indices_key is not None and global_stream_indices_key in rollout_data
         else None
     )
@@ -141,7 +143,10 @@ def fill_replay_data(
             global_layer_indices=global_stream_indices,
         )
 
-    del rollout_data[data_key]
+    if consume:
+        del rollout_data[data_key]
+        if global_stream_indices_key is not None:
+            rollout_data.pop(global_stream_indices_key, None)
 
     for iterator in data_iterator:
         iterator.reset()
