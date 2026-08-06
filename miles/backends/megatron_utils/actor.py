@@ -477,13 +477,39 @@ class MegatronTrainRayActor(TrainRayActor):
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
+        log_prob_data_iterator = data_iterator
+        log_prob_num_microbatches = num_microbatches
+        uses_recorded_replay = any(m.enabled and not self._use_rollout_replay(m) for m in all_replay_managers)
+        if (
+            self.args.use_dynamic_batch_size
+            and self.args.log_probs_max_tokens_per_gpu != self.args.max_tokens_per_gpu
+            and not uses_recorded_replay
+        ):
+            log_prob_data_iterator, log_prob_num_microbatches = get_data_iterator(
+                self.args,
+                self.model,
+                rollout_data,
+                max_tokens_per_gpu=self.args.log_probs_max_tokens_per_gpu,
+            )
+            if self._is_first_replica_megatron_main_rank:
+                logger.info(
+                    "Log-prob batching: max_tokens_per_gpu=%d, microbatches=%s; "
+                    "training max_tokens_per_gpu=%d, microbatches=%s",
+                    self.args.log_probs_max_tokens_per_gpu,
+                    log_prob_num_microbatches,
+                    self.args.max_tokens_per_gpu,
+                    num_microbatches,
+                )
+
+        separate_log_prob_batches = log_prob_data_iterator is not data_iterator
+
         for m in all_replay_managers:
             if self._use_rollout_replay(m):
                 fill_replay_data(
                     args=self.args,
                     models=self.model,
-                    data_iterator=data_iterator,
-                    num_microbatches=num_microbatches,
+                    data_iterator=log_prob_data_iterator,
+                    num_microbatches=log_prob_num_microbatches,
                     rollout_data=rollout_data,
                     data_key=m.data_key,
                     replay_list=m.replays,
@@ -491,6 +517,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     if_sp_region=m.if_sp_region,
                     indices_are_token_positions=m.replay_indices_are_token_positions,
                     global_stream_indices_key=getattr(m, "global_stream_indices_key", None),
+                    consume=not separate_log_prob_batches,
                 )
 
         with inverse_timer("train_wait"), timer("train"):
@@ -500,8 +527,8 @@ class MegatronTrainRayActor(TrainRayActor):
                     self._switch_model("ref")
                     rollout_data.update(
                         self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
+                            log_prob_data_iterator,
+                            log_prob_num_microbatches,
                             rollout_id=rollout_id,
                             store_prefix="ref_",
                         )
@@ -512,8 +539,8 @@ class MegatronTrainRayActor(TrainRayActor):
                     self._switch_model("teacher")
                     rollout_data.update(
                         self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
+                            log_prob_data_iterator,
+                            log_prob_num_microbatches,
                             rollout_id=rollout_id,
                             store_prefix="teacher_",
                         )
@@ -528,8 +555,8 @@ class MegatronTrainRayActor(TrainRayActor):
                                 m.stage = "record"
                     rollout_data.update(
                         self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
+                            log_prob_data_iterator,
+                            log_prob_num_microbatches,
                             rollout_id=rollout_id,
                             store_prefix="",
                         )
@@ -556,6 +583,24 @@ class MegatronTrainRayActor(TrainRayActor):
                 # because we may need normalize the whole rollout.
                 compute_advantages_and_returns(self.args, rollout_data)
                 log_train_advantage_computation_event(rollout_data)
+
+            if separate_log_prob_batches:
+                for m in all_replay_managers:
+                    if self._use_rollout_replay(m):
+                        m.clear_all()
+                        fill_replay_data(
+                            args=self.args,
+                            models=self.model,
+                            data_iterator=data_iterator,
+                            num_microbatches=num_microbatches,
+                            rollout_data=rollout_data,
+                            data_key=m.data_key,
+                            replay_list=m.replays,
+                            register_replay_list_func=m.register_replay_list_func,
+                            if_sp_region=m.if_sp_region,
+                            indices_are_token_positions=m.replay_indices_are_token_positions,
+                            global_stream_indices_key=getattr(m, "global_stream_indices_key", None),
+                        )
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)
