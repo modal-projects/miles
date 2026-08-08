@@ -122,17 +122,39 @@ class FullyAsyncRolloutFn:
             evaluation=False,
             sample_done_callback=self._scheduler.sample_done_callback,
         )
-        return DataBufferInput(prompt_group=prompt_group, group=result)
+        return DataBufferInput(prompt_group=prompt_group, group=result, finished_at=asyncio.get_running_loop().time())
 
     async def _worker_loop(self):
         active: set[asyncio.Task] = set()
-        while True:
-            await self._producer_resumed.wait()
-            while self._scheduler.has_capacity(pending_groups=len(active), group_budget=self._max_in_flight_groups()):
-                active.add(self._submit_one_group())
-            done, active = await self._scheduler.wait_for_progress(active)
-            for task in done:
-                await self._output.put(task.result())
+        try:
+            while True:
+                await self._producer_resumed.wait()
+                while self._scheduler.has_capacity(
+                    pending_groups=len(active), group_budget=self._max_in_flight_groups()
+                ):
+                    active.add(self._submit_one_group())
+                done, active = await self._scheduler.wait_for_progress(active)
+                # Retrieve every completed task before propagating one failure;
+                # otherwise simultaneous failures become unobserved task
+                # exceptions when the worker exits on the first result().
+                results = await asyncio.gather(*done, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
+                for result in results:
+                    await self._output.put(result)
+        finally:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+
+    async def close(self) -> None:
+        """Stop the persistent producer and settle its in-flight groups."""
+        if self._worker is None:
+            return
+        self._worker.cancel()
+        await asyncio.gather(self._worker, return_exceptions=True)
+        self._worker = None
 
     # -------------------------- consumer --------------------------
 

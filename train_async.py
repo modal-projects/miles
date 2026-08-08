@@ -105,7 +105,10 @@ async def train(args):
                 os.remove(args.save_trigger_sentinel)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            # sync generate before update weights to prevent update weight in the middle of generation
+            # Preserve the legacy batch rollout invariant. FullyAsyncRolloutFn
+            # owns a persistent producer, so awaiting this drain does not stop
+            # rollout production; it only prevents the orchestration future
+            # from crossing a weight update.
             rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
             rollout_data_next_future = None
             await actor_model.update_weights(rollout_id=rollout_id)
@@ -125,6 +128,12 @@ async def train(args):
             break
 
     await eval_dispatcher.drain()
+
+    # Shared-mode tracking writers live in separate Ray actor processes.
+    # Flush them before actor teardown so short jobs retain their final step.
+    await actor_model.finish_tracking()
+    if critic_model is not None:
+        await critic_model.finish_tracking()
     await rollout_manager.dispose.remote()
 
 

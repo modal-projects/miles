@@ -253,6 +253,29 @@ async def test_worker_error_propagates(monkeypatch):
         await fn(RolloutFnTrainInput(rollout_id=0))
 
 
+async def test_close_cancels_worker_and_in_flight_groups(monkeypatch):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource(), generate=blocking_generate)
+    drain = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+    await started.wait()
+
+    await fn.close()
+
+    await cancelled.wait()
+    assert fn._worker is None
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+
 async def test_worker_bounds_in_flight_groups(monkeypatch):
     release = asyncio.Event()
 
@@ -423,6 +446,9 @@ async def test_buffer_blocks_producer_when_full():
 
     assert (await buffer.get()).group[0].group_index == 1
     await blocked
+    metrics = buffer.get_metrics()
+    assert metrics["rollout/fully_async/backpressure_events"] == 1
+    assert metrics["rollout/fully_async/backpressure_seconds"] >= 0
     assert (await buffer.get()).group[0].group_index == 2
     assert (await buffer.get()).group[0].group_index == 3
 
@@ -459,6 +485,25 @@ async def test_buffer_staleness_metrics():
     assert metrics["rollout/fully_async/avg_staleness"] == 6.0  # consumed group 1: 10 - 4
     assert metrics["rollout/fully_async/buffer_avg_staleness"] == 3.0  # buffered groups 2, 3: (4 + 2) / 2
     assert metrics["rollout/fully_async/buffer_max_staleness"] == 4
+
+
+async def test_buffer_splits_generation_span_from_post_generation_lag():
+    buffer, _ = make_buffer(max_groups=8)
+    group = make_group(1, weight_versions=["6", "8"])
+    await buffer.put(
+        data_buffer.DataBufferInput(
+            prompt_group=group,
+            group=group,
+            finished_at=asyncio.get_running_loop().time(),
+        )
+    )
+
+    await buffer.get(current_version=10)
+    metrics = buffer.get_metrics()
+
+    assert metrics["rollout/fully_async/within_group_version_span_avg"] == 2
+    assert metrics["rollout/fully_async/newest_to_consume_lag_avg"] == 2
+    assert metrics["rollout/fully_async/queue_wait_seconds_max"] >= 0
 
 
 class RecordingBuffer(data_buffer.DefaultDataBuffer):

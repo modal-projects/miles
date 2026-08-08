@@ -148,6 +148,16 @@ class TestInit:
         assert group._cells[1].indep_dp_info.alive_rank == 1
         assert group._cells[2].indep_dp_info.alive_rank == 2
 
+    async def test_finish_tracking_broadcasts_to_all_live_actors(self):
+        group = await _make_alive_group(num_cells=2)
+
+        await group.finish_tracking()
+
+        for cell in group._cells:
+            for handle in cell._get_actor_handles():
+                calls = ray.get(handle.get_calls.remote())
+                assert sum(call[0] == "finish_tracking" for call in calls) == 1
+
 
 class TestStopStartCell:
     async def test_stop_cell_transitions_to_stopped(self):

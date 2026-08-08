@@ -61,6 +61,9 @@ class DummyTrainActor:
     def clear_memory(self) -> None:
         self._record("clear_memory", (), {})
 
+    def finish_tracking(self) -> None:
+        self._record("finish_tracking", (), {})
+
     def save_model(self, *args: Any, **kwargs: Any) -> None:
         self._record("save_model", args, kwargs)
 
