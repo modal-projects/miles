@@ -33,6 +33,7 @@ from miles.rollout.session.samples.merge import (
 )
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.lora import LORA_ADAPTER_NAME, lora_rollout_enabled
+from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,31 @@ def _render_json(payload) -> bytes:
 def _samples_response(payload: bytes) -> Response:
     """The samples-op reply: one safetensors binary payload."""
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
+
+
+def _aborted_generation_response() -> Response:
+    """Turn a status-less backend abort into a retryable protocol error.
+
+    An aborted decode is not a model completion. In particular, it may not
+    carry the top-p or routing-replay metadata required to train on it. Some
+    SGLang versions historically encoded this outcome as HTTP 200 with
+    ``finish_reason=\"abort\"``; stop it at the session boundary so it cannot
+    be committed as a valid trajectory turn.
+    """
+    return Response(
+        content=_render_json(
+            {
+                "error": {
+                    "message": "upstream generation aborted before completion",
+                    "type": "upstream_generation_aborted",
+                    "code": "upstream_generation_aborted",
+                }
+            }
+        ),
+        status_code=503,
+        headers={"retry-after": "0"},
+        media_type=JSON_MEDIA_TYPE,
+    )
 
 
 def _routed_experts_start_len(previous_token_ids: list[int], prompt_token_ids: list[int]) -> int:
@@ -367,11 +393,12 @@ class SessionCore:
                 return _samples_response(encode_samples([], metadata, empty_reason="all_truncated"))
             records = session.records[: len(samples)]
             sample = merge_samples(samples, tokenizer)
-            sample.rollout_routed_experts = reconstruct_routed_experts(
-                self.args,
-                records,
-                final_num_tokens=len(sample.tokens) - 1,
-            )
+            if sample.status != Sample.Status.ABORTED:
+                sample.rollout_routed_experts = reconstruct_routed_experts(
+                    self.args,
+                    records,
+                    final_num_tokens=len(sample.tokens) - 1,
+                )
             sample.validate()
             samples = [sample]
         except (AssertionError, ValueError) as exc:
@@ -444,6 +471,8 @@ class SessionCore:
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if choice.get("finish_reason") == "abort":
+            return _aborted_generation_response()
         if getattr(self.args, "use_rollout_routing_replay", False):
             choice["meta_info"]["routed_experts_start_len"] = routed_experts_start_len
 

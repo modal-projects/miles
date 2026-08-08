@@ -69,11 +69,12 @@ def build_leaf_material(
         if not turns:
             continue
         sample = merge_samples(turns, registry.tokenizer)
-        sample.rollout_routed_experts = reconstruct_routed_experts(
-            args,
-            [node.record for node in path[: len(turns)]],
-            final_num_tokens=len(sample.tokens) - 1,
-        )
+        if sample.status != Sample.Status.ABORTED:
+            sample.rollout_routed_experts = reconstruct_routed_experts(
+                args,
+                [node.record for node in path[: len(turns)]],
+                final_num_tokens=len(sample.tokens) - 1,
+            )
         sample.validate()
         tools = path[-1].record.request.get("tools")
         flat: dict[str, Any] = {

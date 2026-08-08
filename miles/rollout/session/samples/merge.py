@@ -107,20 +107,12 @@ def _compute_sample_from_openai_record(
     output_log_probs = [item[0] for item in choice["meta_info"]["output_token_logprobs"]]
 
     sample = Sample()
-    if record.request.get("return_sampling_mask", False):
-        has_sampling_metadata = (
-            choice["meta_info"].get("output_token_sampling_mask") is not None
-            and choice["meta_info"].get("output_token_sampling_logprobs") is not None
-        )
-        # SGLang aborts are infrastructure outcomes, not samples from the
-        # configured top-p distribution. In particular, a request cancelled
-        # before scheduler dispatch has no sampled-token support to return.
-        # Keep the trajectory explicitly ABORTED and let the rollout buffer
-        # discard it; successful and policy-truncated generations remain
-        # strict because training either without their exact behavior policy
-        # would be incorrect.
-        if finish_reason != "abort" or has_sampling_metadata:
-            output_log_probs = append_sampling_metadata(sample, output_token_ids, choice["meta_info"])
+    is_aborted = finish_reason == "abort"
+    # Infrastructure-aborted generations are not behavior-policy samples.
+    # They may legitimately lack every exact-replay payload because no token
+    # was dispatched. Completed and policy-truncated turns remain strict.
+    if not is_aborted and record.request.get("return_sampling_mask", False):
+        output_log_probs = append_sampling_metadata(sample, output_token_ids, choice["meta_info"])
     sample.tokens = prompt_token_ids + output_token_ids
     sample.rollout_log_probs = output_log_probs
     sample.response = tokenizer.decode(output_token_ids)
@@ -130,7 +122,7 @@ def _compute_sample_from_openai_record(
     # represented by a previous TITO turn. Reconstruct once after turn-level
     # truncation instead of materializing a cumulative tensor for every turn.
     sample.rollout_routed_experts = None
-    sample.rollout_indexer_topk = get_indexer_topk_from_response(args, choice, sample)
+    sample.rollout_indexer_topk = None if is_aborted else get_indexer_topk_from_response(args, choice, sample)
 
     if trim_count > 0:
         sample.strip_last_output_tokens(trim_count, tokenizer)

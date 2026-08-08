@@ -317,6 +317,29 @@ async def test_all_truncated_reply(core):
     assert reply.samples == [] and reply.empty_reason == "all_truncated"
 
 
+async def test_legacy_abort_suffix_skips_missing_routing_replay(core):
+    """A status-less historical backend abort may already be in a session.
+
+    Preserve its valid prefix for diagnostics, but classify the assembled
+    trajectory ABORTED instead of demanding replay metadata that the aborted
+    request could not have produced.
+    """
+    first = _two_turn_records()[0]
+    aborted = _make_record(
+        prompt_token_ids=[1, 2, 3, 10, 11, 20, 21],
+        output_token_ids=[],
+        finish_reason="abort",
+    )
+    sid = await _make_session(core, [first, aborted], [1, 2, 3, 10, 11, 20, 21])
+
+    status, payload = await _collect_via_op(core, sid)
+
+    assert status == 200
+    (sample,) = decode_samples_and_merge_input_sample(payload, _input_sample()).samples
+    assert sample.status == Sample.Status.ABORTED
+    assert sample.rollout_routed_experts is None
+
+
 # ── the 422 lane ──
 
 

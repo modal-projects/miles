@@ -8,6 +8,7 @@ from miles.rollout.session.core import (
     JSON_MEDIA_TYPE,
     ProxyRequest,
     SessionCore,
+    _aborted_generation_response,
     _chat_client_response,
     _render_json,
     _routed_experts_start_len,
@@ -177,6 +178,8 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if choice.get("finish_reason") == "abort":
+            return _aborted_generation_response()
         if getattr(self.args, "use_rollout_routing_replay", False):
             choice["meta_info"]["routed_experts_start_len"] = routed_experts_start_len
 
