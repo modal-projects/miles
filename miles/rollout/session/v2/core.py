@@ -8,6 +8,7 @@ from miles.rollout.session.core import (
     JSON_MEDIA_TYPE,
     ProxyRequest,
     SessionCore,
+    _aborted_generation_response,
     _chat_client_response,
     _render_json,
     _samples_response,
@@ -182,6 +183,8 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if choice.get("finish_reason") == "abort":
+            return _aborted_generation_response()
 
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:

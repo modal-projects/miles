@@ -74,6 +74,31 @@ def _samples_response(payload: bytes) -> Response:
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
 
 
+def _aborted_generation_response() -> Response:
+    """Turn a status-less backend abort into a retryable protocol error.
+
+    An aborted decode is not a model completion. In particular, it may not
+    carry the top-p or routing-replay metadata required to train on it. Some
+    SGLang versions historically encoded this outcome as HTTP 200 with
+    ``finish_reason=\"abort\"``; stop it at the session boundary so it cannot
+    be committed as a valid trajectory turn.
+    """
+    return Response(
+        content=_render_json(
+            {
+                "error": {
+                    "message": "upstream generation aborted before completion",
+                    "type": "upstream_generation_aborted",
+                    "code": "upstream_generation_aborted",
+                }
+            }
+        ),
+        status_code=503,
+        headers={"retry-after": "0"},
+        media_type=JSON_MEDIA_TYPE,
+    )
+
+
 def _configure_sampling_replay_request(
     request_body: dict, *, top_p: float, top_k: int, temperature: float
 ) -> None:
@@ -386,9 +411,11 @@ class SessionCore:
             if not samples:
                 return _samples_response(encode_samples([], metadata, empty_reason="all_truncated"))
             if self.use_addition_r3:
-                samples = [merge_samples_with_addition_r3(self.args, samples, session.records, tokenizer)]
+                sample = merge_samples_with_addition_r3(self.args, samples, session.records, tokenizer)
             else:
-                samples = [merge_samples(samples, tokenizer)]
+                sample = merge_samples(samples, tokenizer)
+            sample.validate()
+            samples = [sample]
         except (AssertionError, ValueError) as exc:
             return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
         return _samples_response(encode_samples(samples, metadata))
@@ -458,7 +485,9 @@ class SessionCore:
         if result["status_code"] != 200:
             return proxy_result_to_response(result)
 
-        response, _, assistant_message, completion_token_ids = extract_completion(result)
+        response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if choice.get("finish_reason") == "abort":
+            return _aborted_generation_response()
 
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:
