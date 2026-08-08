@@ -277,6 +277,29 @@ def compute_policy_loss(
     return pg_losses, clipfrac
 
 
+@torch.compile(dynamic=True)
+def compute_cispo_loss(
+    ppo_kl: torch.Tensor,
+    advantages: torch.Tensor,
+    log_probs: torch.Tensor,
+    eps_clip: float,
+    eps_clip_high: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the CISPO surrogate while preserving every active token's gradient.
+
+    ``ppo_kl`` is ``log(pi_behavior) - log(pi_current)``. The detached,
+    clipped importance weight therefore corrects the additive REINFORCE
+    surrogate to the behavior policy without PPO's token-dropping ``min``.
+    """
+    ratio = _safe_exp_neg_ppo_kl(ppo_kl)
+    lower = 1.0 - eps_clip
+    upper = 1.0 + eps_clip_high
+    clipped_ratio = ratio.clamp(lower, upper).detach()
+    pg_losses = -clipped_ratio * advantages * log_probs
+    clipfrac = ((ratio < lower) | (ratio > upper)).float()
+    return pg_losses, clipfrac
+
+
 def compute_log_probs(
     logits: torch.Tensor,
     tokens: torch.Tensor,

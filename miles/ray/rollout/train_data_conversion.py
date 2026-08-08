@@ -179,7 +179,10 @@ def _post_process_rewards(
         return f(args, samples)
 
     raw_rewards = [sample.get_reward_value(args) for sample in samples]
-    if args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"] and args.rewards_normalization:
+    if (
+        args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
+        and args.rewards_normalization
+    ):
         # group norm
         rewards = torch.tensor(raw_rewards, dtype=torch.float)
         if prompt_group_sizes is not None:
@@ -192,7 +195,7 @@ def _post_process_rewards(
             for group_rewards in rewards.split(prompt_group_sizes):
                 centered = group_rewards - group_rewards.mean()
                 if (
-                    args.advantage_estimator in ["grpo", "gspo"]
+                    args.advantage_estimator in ["grpo", "gspo", "cispo"]
                     and args.grpo_std_normalization
                     and group_rewards.numel() > 1
                 ):
@@ -207,7 +210,7 @@ def _post_process_rewards(
         mean = rewards.mean(dim=-1, keepdim=True)
         rewards = rewards - mean
 
-        if args.advantage_estimator in ["grpo", "gspo"] and args.grpo_std_normalization:
+        if args.advantage_estimator in ["grpo", "gspo", "cispo"] and args.grpo_std_normalization:
             std = rewards.std(dim=-1, keepdim=True)
             rewards = rewards / (std + 1e-6)
 
