@@ -339,6 +339,25 @@ def test_dynamic_global_batch_size_requires_dynamic_batch_size():
         miles_validate_args(args)
 
 
+def test_cispo_requires_rollout_logprobs():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(["--advantage-estimator", "cispo", "--num-rollout", "1"] + REQUIRED_ARGS)
+
+    with pytest.raises(AssertionError, match="CISPO requires --use-rollout-logprobs"):
+        miles_validate_args(args)
+
+
+def test_cispo_accepts_rollout_logprobs():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(
+        ["--advantage-estimator", "cispo", "--use-rollout-logprobs", "--num-rollout", "1"] + REQUIRED_ARGS
+    )
+
+    miles_validate_args(args)
+
+
 class TestCriticSaveDerivation:
     def _validate(self, extra):
         parser = argparse.ArgumentParser()
