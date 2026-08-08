@@ -124,6 +124,23 @@ def test_lora_adapter_reaches_backend():
         assert env.backend.request_log[-1]["lora_path"] == LORA_ADAPTER_NAME
 
 
+def test_aborted_backend_generation_is_retryable_and_not_committed():
+    with _serve_router() as env:
+        session_id = _create_session(env.url)
+        env.backend.process_fn = lambda _: ProcessResult(text="", finish_reason="abort")
+
+        response = _post_chat(
+            env.url,
+            session_id,
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "upstream_generation_aborted"
+        session = requests.get(f"{env.url}/sessions/{session_id}", timeout=5.0).json()
+        assert session["records"] == []
+
+
 def _keep_all_picker(leaf_samples, _session_metadata):
     return list(leaf_samples)
 
