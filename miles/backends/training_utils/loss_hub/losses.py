@@ -309,21 +309,36 @@ def policy_loss_function(
     if log_probs.numel() == 0:
         loss += 0 * logits.sum()
 
-    train_scored_log_probs = old_log_probs
     train_rollout_logprob_abs_diff = None
+    train_rollout_logprob_signed_diff = None
     train_rollout_kl = None
+    train_rollout_ess_ratio = None
     if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
-        abs_diff = (train_scored_log_probs - rollout_log_probs).abs()
-        abs_diff = torch.where(
+        # This metric measures the scoring mismatch between the current
+        # trainer forward pass and the rollout engine. It must be independent
+        # of which denominator the policy loss uses: with
+        # --use-rollout-logprobs, old_log_probs is the rollout tensor itself.
+        train_rollout_log_ratio = log_probs - rollout_log_probs
+        train_rollout_log_ratio = torch.where(
             active_tokens,
-            torch.nan_to_num(abs_diff, nan=0.0, posinf=0.0, neginf=0.0),
-            abs_diff.new_zeros(()),
+            torch.nan_to_num(train_rollout_log_ratio, nan=0.0, posinf=0.0, neginf=0.0),
+            train_rollout_log_ratio.new_zeros(()),
         )
-        train_rollout_logprob_abs_diff = sum_of_sample_mean(abs_diff)
+        train_rollout_logprob_abs_diff = sum_of_sample_mean(train_rollout_log_ratio.abs())
+        train_rollout_logprob_signed_diff = sum_of_sample_mean(train_rollout_log_ratio)
+        train_rollout_ess_ratio = compute_ess_ratio_contribution(
+            ppo_kl=-train_rollout_log_ratio,
+            loss_masks=batch["loss_masks"],
+            total_lengths=total_lengths,
+            response_lengths=response_lengths,
+            qkv_format=args.qkv_format,
+            max_seq_lens=max_seq_lens,
+            calculate_per_token_loss=args.calculate_per_token_loss,
+        )
 
         # KL(rollout || train) at sampled tokens via Schulman k3 with per-token clamp [-10, 10]
-        rollout_train_kl = compute_approx_kl(rollout_log_probs, train_scored_log_probs, kl_loss_type="low_var_kl")
+        rollout_train_kl = compute_approx_kl(rollout_log_probs, log_probs, kl_loss_type="low_var_kl")
         rollout_train_kl = torch.where(
             active_tokens,
             torch.nan_to_num(rollout_train_kl, nan=0.0, posinf=0.0, neginf=0.0),
@@ -342,8 +357,14 @@ def policy_loss_function(
 
     if train_rollout_logprob_abs_diff is not None:
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
+    if train_rollout_logprob_signed_diff is not None:
+        reported_loss["train_rollout_logprob_signed_diff"] = (
+            train_rollout_logprob_signed_diff.clone().detach()
+        )
     if train_rollout_kl is not None:
         reported_loss["train_rollout_kl"] = train_rollout_kl.clone().detach()
+    if train_rollout_ess_ratio is not None:
+        reported_loss["train_rollout_ess_ratio"] = train_rollout_ess_ratio.squeeze().clone().detach()
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
