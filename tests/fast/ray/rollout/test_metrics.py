@@ -156,6 +156,33 @@ class TestTitoMismatchMetrics:
         assert "rollout/tito_session_mismatch_rate/assistant_text" not in logged
 
 
+class TestTopPMetrics:
+    def test_reports_trainable_support_and_transport_density(self):
+        args = make_args(advantage_estimator="ppo", rollout_top_p=0.95)
+        [sample] = make_samples_grouped(1, 1, response_length=4)
+        # Token support sizes are [3, 1, 2, 4].  The third token represents an
+        # environment observation and is excluded from support-size statistics,
+        # but its IDs still contribute to transport density.
+        sample.loss_mask = [1, 1, 0, 1]
+        sample.rollout_sampling_mask_ids = list(range(10))
+        sample.rollout_sampling_mask_offsets = [0, 3, 4, 6, 10]
+
+        out = _compute_metrics_from_samples(args, [sample])
+
+        assert out["top_p/support_size_mean"] == pytest.approx(8 / 3)
+        assert out["top_p/support_size_median"] == 3
+        assert out["top_p/support_size_p90"] == pytest.approx(3.8)
+        assert out["top_p/support_size_max"] == 4
+        assert out["top_p/singleton_support_ratio"] == pytest.approx(1 / 3)
+        assert out["top_p/mask_ids_per_response_token"] == 2.5
+
+    def test_emits_no_top_p_metrics_when_disabled(self):
+        args = make_args(advantage_estimator="ppo", rollout_top_p=1.0)
+        out = _compute_metrics_from_samples(args, make_samples_grouped(1, 1))
+
+        assert not any(key.startswith("top_p/") for key in out)
+
+
 class TestComputePassrateFromSamples:
     def test_returns_empty_when_group_size_is_one(self):
         args = make_args(n_samples_per_prompt=1)

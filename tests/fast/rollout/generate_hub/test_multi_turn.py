@@ -138,6 +138,7 @@ def expected_request(
     *,
     return_routed_experts: bool = False,
     return_indexer_topk: bool = False,
+    return_sampling_mask: bool = False,
 ) -> dict:
     return {
         "input_ids": input_ids,
@@ -145,6 +146,7 @@ def expected_request(
         "return_logprob": True,
         "return_routed_experts": return_routed_experts,
         "return_indexer_topk": return_indexer_topk,
+        "return_sampling_mask": return_sampling_mask,
     }
 
 

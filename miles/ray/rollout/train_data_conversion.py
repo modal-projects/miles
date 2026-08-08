@@ -17,6 +17,8 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
     "tokens": "int32",
     "loss_masks": "int32",
     "rollout_log_probs": "float32",
+    "rollout_sampling_mask_ids": "int32",
+    "rollout_sampling_mask_offsets": "int32",
     "teacher_log_probs": "float32",
     "opd_reverse_kl": "float32",
     "rollout_routed_experts": "int32",
@@ -111,6 +113,30 @@ def convert_samples_to_train_data(
     # Add rollout log probabilities for off-policy correction
     if samples[0].rollout_log_probs is not None:
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
+
+    if args.rollout_top_p < 1.0:
+        sampling_mask_ids = []
+        sampling_mask_offsets = []
+        for position, (sample, loss_mask) in enumerate(zip(samples, loss_masks, strict=True)):
+            sample.validate()
+            ids = sample.rollout_sampling_mask_ids
+            offsets = sample.rollout_sampling_mask_offsets
+            if ids is None:
+                raise ValueError(
+                    "--rollout-top-p < 1 requires sampling-mask data for every training sample; "
+                    f"position={position}, sample_index={sample.index}, group_index={sample.group_index}, "
+                    f"response_length={sample.response_length}, remove_sample={sample.remove_sample}, "
+                    f"loss_mask_sum={sum(loss_mask)}, status={sample.status}, "
+                    f"exit_status={sample.metadata.get('exit_status')!r}, "
+                    f"sampling_mask_ids_present={sample.rollout_sampling_mask_ids is not None}, "
+                    f"sampling_mask_offsets_present={sample.rollout_sampling_mask_offsets is not None}"
+                )
+
+            sampling_mask_ids.append(ids)
+            sampling_mask_offsets.append(offsets)
+
+        train_data["rollout_sampling_mask_ids"] = sampling_mask_ids
+        train_data["rollout_sampling_mask_offsets"] = sampling_mask_offsets
 
     if samples[0].rollout_routed_experts is not None:
         train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
@@ -314,6 +340,8 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "rollout_ids",
             "rollout_mask_sums",
             "rollout_log_probs",
+            "rollout_sampling_mask_ids",
+            "rollout_sampling_mask_offsets",
             "rollout_routed_experts",
             "rollout_indexer_topk",
             "prompt",
