@@ -87,4 +87,15 @@ def run_session_server(args, backend_url: str):
         args.session_server_port,
         backend_url,
     )
-    uvicorn.run(server.app, host=args.session_server_ip, port=args.session_server_port, log_level="info")
+    # A long-horizon agent sends one HTTP request per model turn. Uvicorn's
+    # default access logger therefore emits thousands of successful 200 lines,
+    # obscuring lifecycle warnings and errors while duplicating the aggregate
+    # request metrics collected by the rollout hooks. Keep application logging
+    # at info, but disable per-request transport access logs.
+    uvicorn.run(
+        server.app,
+        host=args.session_server_ip,
+        port=args.session_server_port,
+        log_level="info",
+        access_log=False,
+    )
