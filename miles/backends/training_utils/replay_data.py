@@ -5,12 +5,20 @@ import torch
 from .cp_utils import slice_with_cp
 from .parallel import get_parallel_state
 
+ROUTING_REPLAY_LAYER_INDICES_KEY = "rollout_routed_experts_layer_indices"
+
 
 class RegisterReplayListFunc(Protocol):
     def __call__(self, replay_list: list, replay_data: torch.Tensor, **kwargs) -> None: ...
 
 
-def register_replay_list_sequential(replay_list, replay_data, **_kwargs):
+def register_replay_list_sequential(
+    replay_list,
+    replay_data,
+    *,
+    global_layer_indices=None,
+    **_kwargs,
+):
     """Map replay streams to registered modules.
 
     Each replay records `replay_data[:, replay.stream_idx]` if `stream_idx` is
@@ -18,8 +26,25 @@ def register_replay_list_sequential(replay_list, replay_data, **_kwargs):
     tensor contains more streams than this rank registered). Otherwise falls
     back to 1:1 enumeration order.
     """
+    local_positions = None
+    if global_layer_indices is not None:
+        local_positions = {
+            int(layer_index): position
+            for position, layer_index in enumerate(global_layer_indices)
+        }
+        if len(local_positions) != len(global_layer_indices):
+            raise ValueError(f"Replay shard contains duplicate stream indices: {global_layer_indices}")
+
     for replay_idx, replay in enumerate(replay_list):
-        stream_idx = replay.stream_idx if replay.stream_idx is not None else replay_idx
+        global_stream_idx = replay.stream_idx if replay.stream_idx is not None else replay_idx
+        if local_positions is not None:
+            if global_stream_idx not in local_positions:
+                raise ValueError(
+                    f"Replay stream {global_stream_idx} is absent from shard {list(global_layer_indices)}"
+                )
+            stream_idx = local_positions[global_stream_idx]
+        else:
+            stream_idx = global_stream_idx
         if not 0 <= stream_idx < replay_data.shape[1]:
             raise AssertionError(
                 f"replay stream_idx {stream_idx} out of range " f"(replay_data has {replay_data.shape[1]} streams)"
@@ -39,6 +64,8 @@ def fill_replay_data(
     register_replay_list_func: RegisterReplayListFunc,
     if_sp_region=True,
     indices_are_token_positions=False,
+    global_stream_indices_key: str | None = None,
+    consume: bool = True,
 ):
     """Load rollout replay tensors into module replay queues.
 
@@ -47,10 +74,17 @@ def fill_replay_data(
     data iterator to process those tensors in the same microbatch order as
     log-prob and train forwards, pads/slices them to match the local CP/SP
     token layout, and then delegates stream-to-module mapping to
-    `register_replay_list_func`.
+    `register_replay_list_func`. Set `consume=False` when another batching
+    schedule must be built from the same source tensors.
     """
     if data_key not in rollout_data:
         raise ValueError(f"{data_key} is required in rollout_data for replay.")
+
+    global_stream_indices = (
+        rollout_data[global_stream_indices_key]
+        if global_stream_indices_key is not None and global_stream_indices_key in rollout_data
+        else None
+    )
 
     for iterator in data_iterator:
         iterator.reset()
@@ -73,6 +107,8 @@ def fill_replay_data(
     for _ in range(sum(num_microbatches)):
         batch = data_iterator[0].get_next([data_key, "tokens", "max_seq_lens"])
         replay_data = batch[data_key]
+        if data_key == "rollout_routed_experts":
+            replay_data = [data.to(torch.int32) for data in replay_data]
         tokens = batch["tokens"]
         assert len(replay_data) == len(tokens)
         for a, b in zip(replay_data, tokens, strict=False):
@@ -126,9 +162,17 @@ def fill_replay_data(
             start, end = seqlen // tp_size * tp_rank, seqlen // tp_size * (tp_rank + 1)
             replay_data = replay_data[start:end]
 
-        register_replay_list_func(replay_list, replay_data, models=models)
+        register_replay_list_func(
+            replay_list,
+            replay_data,
+            models=models,
+            global_layer_indices=global_stream_indices,
+        )
 
-    del rollout_data[data_key]
+    if consume:
+        del rollout_data[data_key]
+        if global_stream_indices_key is not None:
+            rollout_data.pop(global_stream_indices_key, None)
 
     for iterator in data_iterator:
         iterator.reset()

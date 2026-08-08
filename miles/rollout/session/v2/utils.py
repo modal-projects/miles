@@ -4,7 +4,11 @@ from typing import Any
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.errors import TokenizationError
-from miles.rollout.session.samples.merge import compute_samples_from_openai_records, truncate_samples_by_total_tokens
+from miles.rollout.session.samples.merge import (
+    compute_samples_from_openai_records,
+    reconstruct_routed_experts,
+    truncate_samples_by_total_tokens,
+)
 from miles.rollout.session.v2.session_state import SessionRegistryV2, SessionStateV2
 from miles.utils.types import Sample
 
@@ -65,6 +69,12 @@ def build_leaf_material(
         if not turns:
             continue
         sample = merge_samples(turns, registry.tokenizer)
+        sample.rollout_routed_experts = reconstruct_routed_experts(
+            args,
+            [node.record for node in path[: len(turns)]],
+            final_num_tokens=len(sample.tokens) - 1,
+        )
+        sample.validate()
         tools = path[-1].record.request.get("tools")
         flat: dict[str, Any] = {
             "accumulated_token_ids": list(leaf.token_ids),

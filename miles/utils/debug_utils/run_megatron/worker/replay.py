@@ -70,7 +70,9 @@ def save_replay_data(script: WorkerScriptArgs, *, rank: int) -> None:
 
     script.routing_replay_dump_path.mkdir(parents=True, exist_ok=True)
 
-    replays_data: list[list[torch.Tensor]] = [replay.top_indices_list for replay in routing_replay_manager.replays]
+    replays_data: list[list[torch.Tensor]] = [
+        replay.top_indices_list for replay in routing_replay_manager.get_replays()
+    ]
     total_entries: int = sum(len(d) for d in replays_data)
     assert total_entries > 0
 
@@ -113,7 +115,8 @@ def _load_replay(
     """Load replay from rank 0's file with CP zigzag slicing and SP slicing."""
     saved_replays: list[list[torch.Tensor]] = torch.load(replay_file, weights_only=False)
 
-    expected: int = len(routing_replay_manager.replays)
+    replays = routing_replay_manager.get_replays()
+    expected: int = len(replays)
     if len(saved_replays) != expected:
         raise ValueError(f"Replay file has {len(saved_replays)} replays but model expects {expected}")
 
@@ -122,7 +125,7 @@ def _load_replay(
 
     total_entries: int = 0
     for replay_idx, (replay, indices_list) in enumerate(
-        zip(routing_replay_manager.replays, saved_replays, strict=True)
+        zip(replays, saved_replays, strict=True)
     ):
         sliced: list[torch.Tensor] = indices_list
 

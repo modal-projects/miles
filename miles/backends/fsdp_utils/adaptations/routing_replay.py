@@ -19,7 +19,11 @@ from typing import Any
 
 import torch.nn as nn
 
-from miles.backends.training_utils.replay_data import fill_replay_data, register_replay_list_sequential
+from miles.backends.training_utils.replay_data import (
+    ROUTING_REPLAY_LAYER_INDICES_KEY,
+    fill_replay_data,
+    register_replay_list_sequential,
+)
 from miles.utils.replay_base import routing_replay_manager
 
 logger = logging.getLogger(__name__)
@@ -131,6 +135,14 @@ def install(model: nn.Module, hf_config) -> int:
     return len(layers)
 
 
+def local_layer_indices() -> list[int]:
+    """Return the global decoder-layer indices consumed by this rank."""
+    indices = [replay.stream_idx for replay in routing_replay_manager.replays]
+    if any(index is None for index in indices):
+        raise ValueError("FSDP routing replay streams must have global layer indices")
+    return [int(index) for index in indices]
+
+
 def fill(args, model, data_iterator, num_microbatches, rollout_data) -> None:
     """Load the rollout's routing into the per-layer replay queues.
 
@@ -151,6 +163,7 @@ def fill(args, model, data_iterator, num_microbatches, rollout_data) -> None:
         register_replay_list_func=routing_replay_manager.register_replay_list_func,
         if_sp_region=routing_replay_manager.if_sp_region,
         indices_are_token_positions=routing_replay_manager.replay_indices_are_token_positions,
+        global_stream_indices_key=ROUTING_REPLAY_LAYER_INDICES_KEY,
     )
 
 

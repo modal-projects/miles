@@ -26,7 +26,11 @@ from miles.rollout.session.errors import (
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.samples.codec import encode_samples
-from miles.rollout.session.samples.merge import compute_samples_from_openai_records, truncate_samples_by_total_tokens
+from miles.rollout.session.samples.merge import (
+    compute_samples_from_openai_records,
+    reconstruct_routed_experts,
+    truncate_samples_by_total_tokens,
+)
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.lora import LORA_ADAPTER_NAME, lora_rollout_enabled
 
@@ -58,6 +62,18 @@ def _render_json(payload) -> bytes:
 def _samples_response(payload: bytes) -> Response:
     """The samples-op reply: one safetensors binary payload."""
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
+
+
+def _routed_experts_start_len(previous_token_ids: list[int], prompt_token_ids: list[int]) -> int:
+    """Return the first routing row not already represented by TITO state."""
+    common_tokens = 0
+    for previous, current in zip(previous_token_ids, prompt_token_ids, strict=False):
+        if previous != current:
+            break
+        common_tokens += 1
+    # N stable tokens represent routing rows [0, N - 1). If rendering consumes
+    # a trailing stop token, the shorter common prefix requests its replacement.
+    return max(0, common_tokens - 1)
 
 
 def _configure_top_p_sampling_request(request_body: dict, *, top_p: float, temperature: float) -> None:
@@ -349,7 +365,15 @@ class SessionCore:
                 samples = truncate_samples_by_total_tokens(samples, max_seq_len, tokenizer)
             if not samples:
                 return _samples_response(encode_samples([], metadata, empty_reason="all_truncated"))
-            samples = [merge_samples(samples, tokenizer)]
+            records = session.records[: len(samples)]
+            sample = merge_samples(samples, tokenizer)
+            sample.rollout_routed_experts = reconstruct_routed_experts(
+                self.args,
+                records,
+                final_num_tokens=len(sample.tokens) - 1,
+            )
+            sample.validate()
+            samples = [sample]
         except (AssertionError, ValueError) as exc:
             return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
         return _samples_response(encode_samples(samples, metadata))
@@ -398,6 +422,10 @@ class SessionCore:
                 tito_tokenizer=tito_tokenizer,
             )
             request_body["input_ids"] = prompt_token_ids
+            routed_experts_start_len = 0
+            if getattr(self.args, "use_rollout_routing_replay", False):
+                routed_experts_start_len = _routed_experts_start_len(session.token_ids, prompt_token_ids)
+                request_body["routed_experts_start_len"] = routed_experts_start_len
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
             proxy_body = json.dumps(request_body).encode()
@@ -415,7 +443,9 @@ class SessionCore:
         if result["status_code"] != 200:
             return proxy_result_to_response(result)
 
-        response, _, assistant_message, completion_token_ids = extract_completion(result)
+        response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            choice["meta_info"]["routed_experts_start_len"] = routed_experts_start_len
 
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:

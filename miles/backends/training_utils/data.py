@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from miles.utils import object_store
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.data import get_minimum_num_micro_batch_size
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
@@ -34,8 +35,9 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
+    routing_replay_ref: Box | None = None,
     witness_info: WitnessInfo | None = None,
-) -> tuple[RolloutBatch, ObjectStoreGetResult]:
+) -> tuple[RolloutBatch, list[ObjectStoreGetResult]]:
     parallel_state = get_parallel_state()
     # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
     # Both first pp stage and the last pp stage will receive the data.
@@ -46,6 +48,15 @@ def get_rollout_data(
         parallel_state.effective_dp.size,
         witness_info=witness_info,
     )
+    store_get_results = [store_get_result]
+    if routing_replay_ref is not None:
+        routing_get_result = object_store.get_instance().get(routing_replay_ref)
+        routing_data = dict(routing_get_result.value)
+        duplicate_keys = rollout_data.keys() & routing_data.keys()
+        if duplicate_keys:
+            raise ValueError("Routing replay shard duplicates rollout fields: " f"{sorted(duplicate_keys)}")
+        rollout_data.update(routing_data)
+        store_get_results.append(routing_get_result)
     # move tokens to GPU in advance
     rollout_data["tokens"] = [
         torch.tensor(t, dtype=torch.long, device=torch.cuda.current_device()) for t in rollout_data["tokens"]
@@ -118,7 +129,7 @@ def get_rollout_data(
         rollout_data["rollout_routed_experts"] = [torch.from_numpy(r) for r in rollout_data["rollout_routed_experts"]]
     if "rollout_indexer_topk" in rollout_data:
         rollout_data["rollout_indexer_topk"] = [torch.from_numpy(r) for r in rollout_data["rollout_indexer_topk"]]
-    return rollout_data, store_get_result
+    return rollout_data, store_get_results
 
 
 def get_batch(
@@ -425,6 +436,8 @@ def get_data_iterator(
     args: Namespace,
     model: torch.nn.Module | Sequence[torch.nn.Module],
     rollout_data: RolloutBatch,
+    *,
+    max_tokens_per_gpu: int | None = None,
 ) -> tuple[list[DataIterator], list[int]]:
     """
     Create iterators and a micro-batch schedule for a rollout step.
@@ -432,7 +445,7 @@ def get_data_iterator(
     - If `use_dynamic_batch_size` is False, splits into fixed-size contiguous
       micro-batches of `micro_batch_size`.
     - If True, computes the number of micro-batches per local step based on
-      `max_tokens_per_gpu` and per-sample lengths, all-reduces to a DP-wide
+      `max_tokens_per_gpu` (or `args.max_tokens_per_gpu`) and per-sample lengths, all-reduces to a DP-wide
       maximum, optionally enforces divisibility for Virtual Pipeline Parallelism (VPP), and builds a balanced
       index schedule to equalize token counts across micro-batches.
 
@@ -487,16 +500,15 @@ def get_data_iterator(
         num_microbatches = [num_local_gbs // args.micro_batch_size for _ in range(num_steps_per_rollout)]
         data_iterator = _generate_data_iterator(rollout_data, args.micro_batch_size)
     else:
-        assert args.max_tokens_per_gpu is not None
+        token_budget = args.max_tokens_per_gpu if max_tokens_per_gpu is None else max_tokens_per_gpu
+        assert token_budget is not None
         # calculate the number of mirobatches for each step
         samples = rollout_data["total_lengths"]
         assert len(samples) == num_local_samples
         num_microbatches = []
         for i in range(num_steps_per_rollout):
             start, end = i * num_local_gbs, (i + 1) * num_local_gbs
-            num_microbatches.append(
-                get_minimum_num_micro_batch_size(samples[start:end], args.max_tokens_per_gpu * cp_size)
-            )
+            num_microbatches.append(get_minimum_num_micro_batch_size(samples[start:end], token_budget * cp_size))
 
         num_microbatches = torch.tensor(num_microbatches, dtype=torch.int, device=torch.cuda.current_device())
         GeneralPGUtil.create(dp_group).all_reduce(num_microbatches, dp_group, op=dist.ReduceOp.MAX)

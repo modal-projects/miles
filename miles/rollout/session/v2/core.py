@@ -10,6 +10,7 @@ from miles.rollout.session.core import (
     SessionCore,
     _chat_client_response,
     _render_json,
+    _routed_experts_start_len,
     _samples_response,
     extract_completion,
     prepare_chat_request,
@@ -152,6 +153,12 @@ class SessionCoreV2(SessionCore):
                 tito_tokenizer=tito_tokenizer,
             )
             request_body["input_ids"] = prompt_token_ids
+            routed_experts_start_len = 0
+            if getattr(self.args, "use_rollout_routing_replay", False):
+                routed_experts_start_len = _routed_experts_start_len(
+                    session.active_token_ids(), prompt_token_ids
+                )
+                request_body["routed_experts_start_len"] = routed_experts_start_len
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
             proxy_body = json.dumps(request_body).encode()
@@ -170,6 +177,8 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            choice["meta_info"]["routed_experts_start_len"] = routed_experts_start_len
 
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:

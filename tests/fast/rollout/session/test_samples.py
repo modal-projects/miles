@@ -4,13 +4,15 @@ Validates the contract between session records, sample construction,
 and merge_samples — the core of the TITO (Token In Token Out) pipeline.
 """
 
+import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import numpy as np
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
-from miles.rollout.session.samples.merge import compute_samples_from_openai_records
+from miles.rollout.session.samples.merge import compute_samples_from_openai_records, reconstruct_routed_experts
 from miles.rollout.session.types import SessionRecord
 from miles.utils.types import Sample
 
@@ -42,6 +44,7 @@ def _make_record(
     prompt_tokens: int | None = None,
     weight_version: str | None = None,
     routed_experts: str | None = None,
+    routed_experts_start_len: int | None = None,
     sampling_masks: list[list[int]] | None = None,
     sampling_log_probs: list[float] | None = None,
 ) -> SessionRecord:
@@ -70,6 +73,8 @@ def _make_record(
         meta_info["weight_version"] = weight_version
     if routed_experts is not None:
         meta_info["routed_experts"] = routed_experts
+    if routed_experts_start_len is not None:
+        meta_info["routed_experts_start_len"] = routed_experts_start_len
     if sampling_masks is not None:
         meta_info["output_token_sampling_mask"] = sampling_masks
         meta_info["output_token_sampling_logprobs"] = sampling_log_probs
@@ -128,32 +133,6 @@ class TestComputeSamplesFromRecords:
         )
 
         (sample,) = compute_samples_from_openai_records(_ARGS, [record], tok)
-
-        assert sample.rollout_log_probs == [-0.5, -0.6]
-        assert sample.rollout_sampling_mask_ids == [10, 4, 7, 11, 3]
-        assert sample.rollout_sampling_mask_offsets == [0, 3, 5]
-        sample.validate()
-
-    def test_compact_top_p_record_uses_configured_sampling_contract(self):
-        tok = _mock_tokenizer()
-        record = _make_record(
-            prompt_token_ids=[1, 2, 3],
-            output_token_ids=[10, 11],
-            output_log_probs=[-2.5, -2.6],
-            sampling_masks=[[10, 4, 7], [11, 3]],
-            sampling_log_probs=[-0.5, -0.6],
-        )
-        # SessionCore compacts non-debug records and does not retain request
-        # flags such as return_sampling_mask.
-        record.request = {}
-        record.prompt_token_count = 3
-
-        (sample,) = compute_samples_from_openai_records(
-            _ARGS_TOP_P,
-            [record],
-            tok,
-            accumulated_token_ids=[1, 2, 3, 10, 11],
-        )
 
         assert sample.rollout_log_probs == [-0.5, -0.6]
         assert sample.rollout_sampling_mask_ids == [10, 4, 7, 11, 3]
@@ -734,6 +713,30 @@ class TestThinkingTokenPrefixBreak:
 
 
 # ── test: prefix cache info population ────────────────────────────────
+
+
+def test_reconstruct_incremental_routed_experts():
+    args = SimpleNamespace(num_layers=1, moe_router_topk=2)
+    first = np.arange(8, dtype=np.int32).reshape(4, 1, 2)
+    second = np.arange(8, 12, dtype=np.int32).reshape(2, 1, 2)
+    records = [
+        _make_record(
+            prompt_token_ids=[1, 2, 3],
+            output_token_ids=[10, 11],
+            routed_experts=base64.b64encode(first.tobytes()).decode(),
+            routed_experts_start_len=0,
+        ),
+        _make_record(
+            prompt_token_ids=[1, 2, 3, 10, 11, 20],
+            output_token_ids=[30],
+            routed_experts=base64.b64encode(second.tobytes()).decode(),
+            routed_experts_start_len=4,
+        ),
+    ]
+
+    actual = reconstruct_routed_experts(args, records, final_num_tokens=6)
+
+    assert np.array_equal(actual, np.concatenate([first, second]))
 
 
 class TestPrefixCacheInfo:

@@ -138,6 +138,15 @@ class FSDPTrainRayActor(TrainRayActor):
 
         apply_model_instance_patches(model, self.hf_config, self.args)
         routing_replay.install(model, self.hf_config)
+        if role == "actor" and args.use_rollout_routing_replay:
+            local_spec = {
+                "rank": dist.get_rank(),
+                "dp_rank": get_parallel_state().intra_dp.rank,
+                "layer_indices": routing_replay.local_layer_indices(),
+            }
+            routing_specs = [None] * dist.get_world_size()
+            dist.all_gather_object(routing_specs, local_spec, group=get_gloo_group())
+            self.train_parallel_config["routing_replay_specs"] = routing_specs
         if self.precision_policy.keep_fp32_master:
             model = apply_fp32_master(model, self.precision_policy.sync_dtype_resolver)
 
@@ -425,6 +434,7 @@ class FSDPTrainRayActor(TrainRayActor):
         self,
         rollout_id: int,
         rollout_data_ref: Box,
+        routing_replay_ref: Box | None = None,
         witness_info: "WitnessInfo | None" = None,
         attempt: int = 0,
     ) -> None:
@@ -438,8 +448,14 @@ class FSDPTrainRayActor(TrainRayActor):
             self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"), ExitStack() as stack:
-            rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref, witness_info=None)
-            stack.enter_context(store_get_result)
+            rollout_data, store_get_results = get_rollout_data(
+                self.args,
+                rollout_data_ref,
+                routing_replay_ref=routing_replay_ref,
+                witness_info=None,
+            )
+            for store_get_result in store_get_results:
+                stack.enter_context(store_get_result)
             if self.args.debug_rollout_only:
                 return
             self._train_core(rollout_id=rollout_id, rollout_data=rollout_data)

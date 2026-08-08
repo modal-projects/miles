@@ -4,7 +4,7 @@ register_cpu_ci(est_time=60, suite="stage-a-cpu", labels=[])
 
 import torch
 
-from miles.utils.replay_base import BaseReplayManager
+from miles.utils.replay_base import BaseReplayManager, RoutingReplayManager
 
 
 class _FakeReplay:
@@ -51,3 +51,19 @@ def test_get_topk_fn_preserves_partial_padding():
     topk_fn = manager.get_topk_fn(_topk, return_probs=False)
 
     torch.testing.assert_close(topk_fn(scores, 3), replayed_top_indices)
+
+
+def test_routing_replay_manager_excludes_mtp_registered_after_construction():
+    manager = RoutingReplayManager()
+    manager.enabled = True
+    main_router = torch.nn.Module()
+    main_router.is_mtp = False
+    mtp_router = torch.nn.Module()
+    mtp_router.is_mtp = False
+
+    manager.register_to_module(main_router, "routing_replay")
+    manager.register_to_module(mtp_router, "routing_replay")
+    mtp_router.is_mtp = True
+
+    assert manager.replays == [main_router.routing_replay, mtp_router.routing_replay]
+    assert manager.get_replays() == [main_router.routing_replay]

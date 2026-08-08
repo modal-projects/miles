@@ -317,6 +317,13 @@ def process_rollout_data(
 
 def remove_rollout_data_refs(args, rollout_data_pack: dict) -> None:
     store = object_store.get_instance()
-    data_ref = rollout_data_pack["data_ref"]
-    for ref in data_ref if isinstance(data_ref, list) else [data_ref]:
-        store.remove(ref)
+    removed_refs = set()
+    for key in ("data_ref", "routing_replay_refs"):
+        refs = rollout_data_pack.get(key)
+        if refs is None:
+            continue
+        for ref in refs if isinstance(refs, list) else [refs]:
+            if ref in removed_refs:
+                continue
+            store.remove(ref)
+            removed_refs.add(ref)

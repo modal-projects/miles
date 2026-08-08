@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+import numpy as np
 import torch
 
 from miles.utils import object_store
@@ -10,6 +11,7 @@ from miles.utils.object_store import ValueSpec
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
+from miles.backends.training_utils.replay_data import ROUTING_REPLAY_LAYER_INDICES_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,11 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "num_microbatches": ValueSpec(codec="auto"),
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
+}
+
+ROUTING_REPLAY_VALUE_SPEC = {
+    "rollout_routed_experts": ValueSpec(codec="typed_ragged"),
+    ROUTING_REPLAY_LAYER_INDICES_KEY: ValueSpec(codec="ndarray", dtype="int64"),
 }
 
 
@@ -251,12 +258,23 @@ def split_train_data_by_dp(args, data: dict[str, Any], train_parallel_config: di
     When the training backend can consume a rollout-side schedule, the shards
     also carry the precomputed micro-batch layout; otherwise this falls back to
     the legacy split (the training side schedules locally)."""
-    if can_schedule_on_rollout_side(args, data, train_parallel_config):
-        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
-    else:
-        shards = split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config["dp_size"])
+    shards = _make_train_data_shards(args, data, train_parallel_config)
     store = object_store.get_instance()
     return [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
+
+
+def _make_train_data_shards(args, data: dict[str, Any], train_parallel_config: dict[str, Any]):
+    if can_schedule_on_rollout_side(args, data, train_parallel_config):
+        return split_train_data_by_dp_scheduled_raw(
+            args,
+            data,
+            train_parallel_config=train_parallel_config,
+        )
+    return split_train_data_by_dp_raw(
+        args,
+        data,
+        dp_size=train_parallel_config["dp_size"],
+    )
 
 
 def can_schedule_on_rollout_side(args, data: dict[str, Any], train_parallel_config: dict | None) -> bool:
@@ -299,6 +317,117 @@ def split_train_data_by_dp_scheduled_raw(
         shard["micro_batch_indices"] = micro_batch_indices[rank]
         shard["num_rollouts"] = num_rollouts
     return shards
+
+
+def put_train_data(args, data, train_parallel_config: dict[str, Any]) -> dict[str, Any]:
+    """Store rollout data in the layout consumed by the trainer ranks."""
+    store = object_store.get_instance()
+    if args.delay_split_train_data_by_dp:
+        return {"data_ref": store.put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)}
+
+    dp_size = train_parallel_config["dp_size"]
+    dp_shards = _make_train_data_shards(args, data, train_parallel_config)
+    routing_specs = train_parallel_config.get("routing_replay_specs")
+    if "rollout_routed_experts" not in data:
+        return {"data_ref": [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in dp_shards]}
+    if routing_specs is None:
+        raise RuntimeError("Trainer did not provide its routing replay topology")
+
+    routing_by_dp = [shard.pop("rollout_routed_experts") for shard in dp_shards]
+    data_refs = [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in dp_shards]
+
+    wire_dtype = _routing_replay_wire_dtype(args.num_experts)
+    refs_by_spec = {}
+    routing_replay_refs = []
+    source_bytes = 0
+    stored_bytes = 0
+    for rank, spec in enumerate(routing_specs):
+        if spec["rank"] != rank:
+            raise ValueError(
+                "Routing replay specs must be ordered by trainer rank; " f"position={rank}, spec_rank={spec['rank']}"
+            )
+        dp_rank = int(spec["dp_rank"])
+        if not 0 <= dp_rank < dp_size:
+            raise ValueError(
+                f"Trainer rank {rank} has invalid routing replay DP rank " f"{dp_rank} for dp_size={dp_size}"
+            )
+        layer_indices = tuple(int(index) for index in spec["layer_indices"])
+        if len(set(layer_indices)) != len(layer_indices) or any(index < 0 for index in layer_indices):
+            raise ValueError(f"Trainer rank {rank} has invalid routing replay layers: " f"{layer_indices}")
+
+        key = (dp_rank, layer_indices)
+        if key not in refs_by_spec:
+            routed_experts = []
+            for sample in routing_by_dp[dp_rank]:
+                sample = np.asarray(sample)
+                if sample.dtype != np.int32 or sample.ndim != 3:
+                    raise ValueError(
+                        "rollout_routed_experts must contain int32 arrays with "
+                        f"shape [tokens, layers, topk], got dtype={sample.dtype}, "
+                        f"shape={sample.shape}"
+                    )
+                if sample.shape[2] != args.moe_router_topk:
+                    raise ValueError(
+                        "rollout_routed_experts has an invalid topk dimension: "
+                        f"shape={sample.shape}, expected_topk={args.moe_router_topk}"
+                    )
+                if layer_indices and max(layer_indices) >= sample.shape[1]:
+                    raise ValueError(
+                        f"Routing replay layer {max(layer_indices)} is outside "
+                        f"the rollout tensor's {sample.shape[1]} layers"
+                    )
+                local = sample[:, layer_indices, :]
+                _validate_routing_replay_ids(local, args.num_experts)
+                compact = np.ascontiguousarray(local, dtype=wire_dtype)
+                routed_experts.append(compact)
+                source_bytes += local.nbytes
+                stored_bytes += compact.nbytes
+
+            refs_by_spec[key] = store.put(
+                value={
+                    "rollout_routed_experts": routed_experts,
+                    ROUTING_REPLAY_LAYER_INDICES_KEY: np.asarray(
+                        layer_indices,
+                        dtype=np.int64,
+                    ),
+                },
+                value_spec=ROUTING_REPLAY_VALUE_SPEC,
+            )
+        routing_replay_refs.append(refs_by_spec[key])
+
+    logger.info(
+        "Stored routing replay for %d trainer ranks as %d unique shards " "(%s -> %s)",
+        len(routing_specs),
+        len(refs_by_spec),
+        _format_bytes(source_bytes),
+        _format_bytes(stored_bytes),
+    )
+    return {"data_ref": data_refs, "routing_replay_refs": routing_replay_refs}
+
+
+def _routing_replay_wire_dtype(num_experts: int) -> np.dtype:
+    if num_experts <= 0:
+        raise ValueError(f"num_experts must be positive, got {num_experts}")
+    if num_experts <= np.iinfo(np.uint8).max + 1:
+        return np.dtype(np.uint8)
+    if num_experts <= np.iinfo(np.uint16).max + 1:
+        return np.dtype(np.uint16)
+    return np.dtype(np.int32)
+
+
+def _validate_routing_replay_ids(data: np.ndarray, num_experts: int) -> None:
+    if data.size == 0:
+        return
+    minimum = int(data.min())
+    maximum = int(data.max())
+    if minimum < 0 or maximum >= num_experts:
+        raise ValueError(
+            "Routing replay contains an invalid expert ID: " f"range=[{minimum}, {maximum}], num_experts={num_experts}"
+        )
+
+
+def _format_bytes(num_bytes: int) -> str:
+    return f"{num_bytes / 1024**3:.2f} GiB"
 
 
 def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
