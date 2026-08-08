@@ -118,6 +118,24 @@ class TestSessionRoutes:
         assert data["session_id"] == session_id
         assert data["records"] == []
 
+    def test_aborted_backend_generation_is_retryable_and_not_recorded(self, router_env):
+        session_id = requests.post(f"{router_env.url}/sessions", timeout=5.0).json()["session_id"]
+        process_fn = router_env.backend.process_fn
+        router_env.backend.process_fn = lambda _: ProcessResult(text="", finish_reason="abort")
+        try:
+            response = _post_chat(
+                router_env.url,
+                session_id,
+                {"messages": [{"role": "user", "content": "hi"}]},
+            )
+        finally:
+            router_env.backend.process_fn = process_fn
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "upstream_generation_aborted"
+        session = requests.get(f"{router_env.url}/sessions/{session_id}", timeout=5.0).json()
+        assert session["records"] == []
+
     def test_get_session_not_found(self, router_env):
         response = requests.get(f"{router_env.url}/sessions/nonexistent", timeout=5.0)
         assert response.status_code == 404
