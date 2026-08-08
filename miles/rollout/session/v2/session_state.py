@@ -66,7 +66,7 @@ def position_for_request(state: SessionStateV2, request_messages: list[dict[str,
         )
 
     if attach.node is not state.active_leaf:
-        logger.info(
+        logger.debug(
             "Branching: request(%d msgs) attaches at node seq=%s "
             "(matched %d msgs, best overlap %d), tree has %d nodes",
             len(request_messages),
