@@ -11,6 +11,7 @@ from miles.ray.rollout.metrics import log_eval_rollout_data, log_eval_skip, log_
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
+    compact_routing_replay_for_transport,
     convert_samples_to_train_data,
     split_train_data_by_dp,
 )
@@ -135,6 +136,7 @@ class RolloutExecutor:
             custom_reward_post_process_func=self.custom_reward_post_process_func,
         )
         sample_indices = data.get("sample_indices")
+        data = compact_routing_replay_for_transport(self.args, data)
         if self.args.delay_split_train_data_by_dp:
             data_ref = object_store.get_instance().put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)
         else:
