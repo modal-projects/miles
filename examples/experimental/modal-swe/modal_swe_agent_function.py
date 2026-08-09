@@ -1164,6 +1164,10 @@ class _RayAgentWorkerPool:
             # accounting until the episode actually exits.
             return await asyncio.shield(future)
         except asyncio.CancelledError:
+            # The caller owns resources used by the remote episode, including
+            # its inference session. Do not let it tear those down while the
+            # non-cancellable executor thread is still using them.
+            await asyncio.shield(asyncio.gather(future, return_exceptions=True))
             raise
 
     def ensure_progress_reporter(self) -> None:

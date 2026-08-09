@@ -587,7 +587,7 @@ def test_empty_worker_pool_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_dispatch_retains_capacity_until_remote_episode_finishes():
+async def test_cancelled_dispatch_waits_for_remote_episode_before_returning():
     finish = asyncio.Event()
 
     class RemoteMethod:
@@ -607,13 +607,17 @@ async def test_cancelled_dispatch_retains_capacity_until_remote_episode_finishes
     assert pool.in_flight == [1]
 
     dispatch.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await dispatch
+    await asyncio.sleep(0)
+    returned_before_remote = dispatch.done()
     assert pool.in_flight == [1]
 
     finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+    assert not returned_before_remote
     assert pool.in_flight == [0]
 
 
