@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import ray
 import torch
@@ -11,7 +12,9 @@ from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples
 
 from miles.ray.rollout.train_data_conversion import (
     _post_process_rewards,
+    _routing_replay_wire_dtype,
     can_schedule_on_rollout_side,
+    compact_routing_replay_for_transport,
     convert_samples_to_train_data,
     split_train_data_by_dp,
     split_train_data_by_dp_raw,
@@ -459,6 +462,70 @@ class TestPostProcessRewardsProperties:
         samples = make_samples_grouped(1, n, rewards=rewards_list)
         raw, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
         assert raw == processed == rewards_list
+
+
+# ----------------------------- routing replay transport -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("num_experts", "expected_dtype"),
+    [
+        (1, np.dtype(np.uint8)),
+        (256, np.dtype(np.uint8)),
+        (257, np.dtype(np.uint16)),
+        (65_536, np.dtype(np.uint16)),
+        (65_537, np.dtype(np.int32)),
+        (np.iinfo(np.int32).max + 1, np.dtype(np.int32)),
+    ],
+)
+def test_routing_replay_wire_dtype_uses_smallest_lossless_width(num_experts, expected_dtype):
+    assert _routing_replay_wire_dtype(num_experts) == expected_dtype
+
+
+@pytest.mark.parametrize("num_experts", [0, -1, np.iinfo(np.int32).max + 2])
+def test_routing_replay_wire_dtype_rejects_unsupported_expert_counts(num_experts):
+    with pytest.raises(ValueError):
+        _routing_replay_wire_dtype(num_experts)
+
+
+@pytest.mark.parametrize(
+    ("num_experts", "expected_dtype"),
+    [(256, np.uint8), (257, np.uint16), (65_537, np.int32)],
+)
+def test_compact_routing_replay_for_transport_preserves_values(num_experts, expected_dtype):
+    values = np.array([0, num_experts - 1], dtype=np.int32).reshape(1, 1, 2)
+    data = {"tokens": [[1]], "rollout_routed_experts": [values]}
+
+    result = compact_routing_replay_for_transport(
+        make_args(num_experts=num_experts, moe_router_topk=2), data
+    )
+
+    assert result is not data
+    assert result["rollout_routed_experts"][0].dtype == np.dtype(expected_dtype)
+    np.testing.assert_array_equal(result["rollout_routed_experts"][0], values)
+    assert data["rollout_routed_experts"][0].dtype == np.int32
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        (np.array([[[-1, 0]]], dtype=np.int32), "invalid expert ID"),
+        (np.array([[[0, 4]]], dtype=np.int32), "invalid expert ID"),
+        (np.array([[[0, 1, 2]]], dtype=np.int32), "invalid topk"),
+        (np.array([[[0, 1]]], dtype=np.int64), "must contain int32"),
+    ],
+)
+def test_compact_routing_replay_for_transport_validates_input(values, message):
+    with pytest.raises(ValueError, match=message):
+        compact_routing_replay_for_transport(
+            make_args(num_experts=4, moe_router_topk=2),
+            {"rollout_routed_experts": [values]},
+        )
+
+
+def test_compact_routing_replay_for_transport_is_noop_without_r3():
+    data = {"tokens": [[1]]}
+    assert compact_routing_replay_for_transport(make_args(), data) is data
 
 
 # ----------------------------- split_train_data_by_dp -----------------------------
