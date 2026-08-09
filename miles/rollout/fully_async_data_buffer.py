@@ -9,6 +9,7 @@ Every group-level decision lives here — what to keep, what to hand to
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import Callable, Iterator
@@ -43,6 +44,18 @@ def group_oldest_weight_version(group: Group) -> int | None:
     return min(versions) if versions else None
 
 
+def group_newest_weight_version(group: Group) -> int | None:
+    """Return the newest numeric generation version observed by the group."""
+    versions = []
+    for sample in iter_samples(group):
+        for version in sample.weight_versions:
+            try:
+                versions.append(int(version))
+            except (TypeError, ValueError):
+                continue
+    return max(versions) if versions else None
+
+
 @dataclass(frozen=True)
 class DataBufferConstructorInput:
     args: Namespace
@@ -53,6 +66,7 @@ class DataBufferConstructorInput:
 class DataBufferInput:
     prompt_group: list[Sample]  # resubmittable, for recycling
     group: Group  # finished samples
+    enqueued_at: float | None = None
 
 
 class DataBuffer(ABC):
@@ -120,7 +134,13 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
         self._metric_stale_groups = 0
-        self._metric_consumed_staleness: list[int] = []
+        self._metric_accepted_staleness: list[int] = []
+        self._metric_filtered_staleness: list[int] = []
+        self._metric_accepted_version_spans: list[int] = []
+        self._metric_accepted_newest_to_consume_lag: list[int] = []
+        self._metric_queue_residence_seconds: list[float] = []
+        self._metric_backpressure_seconds = 0.0
+        self._metric_backpressure_events = 0
 
     async def put(self, input: DataBufferInput) -> None:
         # filters at receiving sample: abort filter, dynamic filter
@@ -135,8 +155,15 @@ class DefaultDataBuffer(DataBuffer):
             return
 
         async with self._cond:
+            blocked_at = None
             while len(self._buffer) >= self._capacity:
+                if blocked_at is None:
+                    blocked_at = time.monotonic()
                 await self._cond.wait()
+            if blocked_at is not None:
+                self._metric_backpressure_events += 1
+                self._metric_backpressure_seconds += time.monotonic() - blocked_at
+            input.enqueued_at = time.monotonic()
             self._buffer.append(input)
             self._cond.notify_all()
 
@@ -150,39 +177,97 @@ class DefaultDataBuffer(DataBuffer):
                 entry = self._buffer.pop(0)
                 self._cond.notify_all()  # wake producers blocked on a full buffer
 
+                dequeued_at = time.monotonic()
+                if entry.enqueued_at is not None:
+                    self._metric_queue_residence_seconds.append(
+                        max(0.0, dequeued_at - entry.enqueued_at)
+                    )
+                oldest = group_oldest_weight_version(entry.group)
+                newest = group_newest_weight_version(entry.group)
+
                 # filters at retrieving sample: staleness filter
                 staleness = self._staleness(entry.group, current_version)
-                if staleness is None:
-                    return entry
-                self._metric_consumed_staleness.append(staleness)
-                if self._args.max_weight_staleness is None or staleness <= self._args.max_weight_staleness:
+                if (
+                    staleness is None
+                    or self._args.max_weight_staleness is None
+                    or staleness <= self._args.max_weight_staleness
+                ):
+                    if staleness is not None:
+                        self._metric_accepted_staleness.append(staleness)
+                    if oldest is not None and newest is not None:
+                        self._metric_accepted_version_spans.append(newest - oldest)
+                    if current_version is not None and newest is not None:
+                        self._metric_accepted_newest_to_consume_lag.append(
+                            current_version - newest
+                        )
                     return entry
                 logger.info(f"Filtered stale group ({staleness=} > max={self._args.max_weight_staleness})")
                 self._metric_stale_groups += 1
+                self._metric_filtered_staleness.append(staleness)
                 self._unused_handler_fn(entry.prompt_group)
 
     def get_metrics(self) -> dict[str, float]:
         prefix = "rollout/fully_async/"
         metrics = {
             f"{prefix}queue_size": len(self._buffer),
+            f"{prefix}queue_capacity": self._capacity,
             f"{prefix}aborted_groups_filtered": self._metric_aborted_groups,
             f"{prefix}stale_groups_filtered": self._metric_stale_groups,
+            f"{prefix}backpressure_events": self._metric_backpressure_events,
+            f"{prefix}backpressure_seconds": self._metric_backpressure_seconds,
             **self._metric_gatherer.collect(),
         }
-        if consumed := self._metric_consumed_staleness:
-            metrics[f"{prefix}avg_staleness"] = sum(consumed) / len(consumed)
-            metrics[f"{prefix}max_staleness"] = max(consumed)
+        self._add_distribution(
+            metrics,
+            f"{prefix}accepted_staleness",
+            self._metric_accepted_staleness,
+        )
+        self._add_distribution(
+            metrics,
+            f"{prefix}filtered_staleness",
+            self._metric_filtered_staleness,
+        )
         buffered = [
             s for entry in self._buffer if (s := self._staleness(entry.group, self._current_version)) is not None
         ]
         if buffered:
             metrics[f"{prefix}buffer_avg_staleness"] = sum(buffered) / len(buffered)
             metrics[f"{prefix}buffer_max_staleness"] = max(buffered)
+        self._add_distribution(
+            metrics,
+            f"{prefix}accepted_within_group_version_span",
+            self._metric_accepted_version_spans,
+        )
+        self._add_distribution(
+            metrics,
+            f"{prefix}accepted_newest_to_consume_lag",
+            self._metric_accepted_newest_to_consume_lag,
+        )
+        self._add_distribution(
+            metrics,
+            f"{prefix}queue_residence_seconds",
+            self._metric_queue_residence_seconds,
+        )
 
         self._metric_gatherer = MetricGatherer()
-        self._metric_consumed_staleness = []
+        self._metric_accepted_staleness = []
+        self._metric_filtered_staleness = []
+        self._metric_accepted_version_spans = []
+        self._metric_accepted_newest_to_consume_lag = []
+        self._metric_queue_residence_seconds = []
+        self._metric_backpressure_seconds = 0.0
+        self._metric_backpressure_events = 0
         self._metric_aborted_groups = self._metric_stale_groups = 0
         return metrics
+
+    @staticmethod
+    def _add_distribution(metrics: dict[str, float], prefix: str, values: list[float | int]) -> None:
+        if not values:
+            return
+        ordered = sorted(values)
+        metrics[f"{prefix}_avg"] = sum(values) / len(values)
+        metrics[f"{prefix}_p90"] = ordered[round((len(ordered) - 1) * 0.90)]
+        metrics[f"{prefix}_max"] = max(values)
 
     @staticmethod
     def _staleness(group: Group, current_version: int | None) -> int | None:

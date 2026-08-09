@@ -229,7 +229,7 @@ async def test_stale_group_recycled(monkeypatch):
 
     assert data_source.recycled == [stale]
     assert output.metrics["rollout/fully_async/stale_groups_filtered"] == 1
-    assert output.metrics["rollout/fully_async/max_staleness"] == 5
+    assert output.metrics["rollout/fully_async/filtered_staleness_max"] == 5
 
 
 async def test_stale_group_dropped_by_default(monkeypatch):
@@ -446,6 +446,9 @@ async def test_buffer_blocks_producer_when_full():
 
     assert (await buffer.get()).group[0].group_index == 1
     await blocked
+    metrics = buffer.get_metrics()
+    assert metrics["rollout/fully_async/backpressure_events"] == 1
+    assert metrics["rollout/fully_async/backpressure_seconds"] >= 0
     assert (await buffer.get()).group[0].group_index == 2
     assert (await buffer.get()).group[0].group_index == 3
 
@@ -479,9 +482,41 @@ async def test_buffer_staleness_metrics():
     await put_group(buffer, make_group(3, weight_versions=["8"]))
     await buffer.get(current_version=10)  # pops group 1 and tracks the engine version clock
     metrics = buffer.get_metrics()
-    assert metrics["rollout/fully_async/avg_staleness"] == 6.0  # consumed group 1: 10 - 4
+    assert metrics["rollout/fully_async/accepted_staleness_avg"] == 6.0  # accepted group 1: 10 - 4
     assert metrics["rollout/fully_async/buffer_avg_staleness"] == 3.0  # buffered groups 2, 3: (4 + 2) / 2
     assert metrics["rollout/fully_async/buffer_max_staleness"] == 4
+
+
+async def test_buffer_splits_generation_span_from_post_generation_lag():
+    buffer, _ = make_buffer(max_groups=8)
+    group = make_group(1, weight_versions=["6", "8"])
+    await buffer.put(
+        data_buffer.DataBufferInput(
+            prompt_group=group,
+            group=group,
+        )
+    )
+
+    await buffer.get(current_version=10)
+    metrics = buffer.get_metrics()
+
+    assert metrics["rollout/fully_async/accepted_within_group_version_span_avg"] == 2
+    assert metrics["rollout/fully_async/accepted_newest_to_consume_lag_avg"] == 2
+    assert metrics["rollout/fully_async/queue_residence_seconds_max"] >= 0
+
+
+async def test_buffer_does_not_mix_filtered_groups_into_accepted_lag_metrics():
+    buffer, _ = make_buffer(max_groups=8, max_staleness=2)
+    await put_group(buffer, make_group(1, weight_versions=["2", "4"]))
+    await put_group(buffer, make_group(2, weight_versions=["9", "10"]))
+
+    assert (await buffer.get(current_version=10)).group[0].group_index == 2
+    metrics = buffer.get_metrics()
+
+    assert metrics["rollout/fully_async/filtered_staleness_avg"] == 8
+    assert metrics["rollout/fully_async/accepted_staleness_avg"] == 1
+    assert metrics["rollout/fully_async/accepted_within_group_version_span_avg"] == 1
+    assert metrics["rollout/fully_async/accepted_newest_to_consume_lag_avg"] == 0
 
 
 class RecordingBuffer(data_buffer.DefaultDataBuffer):
