@@ -4,6 +4,10 @@ import os
 
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from miles.ray.rollout.eval_dispatch import EvalDispatcher
+from miles.rollout.generate_utils.generate_endpoint_utils import (
+    can_overlap_external_weight_sync,
+    uses_external_disk_deltas,
+)
 from miles.utils import object_store
 from miles.utils.arguments import parse_args, validate_async_off_policy_correction
 from miles.utils.audit_utils.process_identity import MainProcessIdentity
@@ -46,10 +50,22 @@ async def train(args):
 
     maybe_start_mini_ft_controller(args)
 
-    # always update weight first so that sglang has the loaded weights from training.
-    await actor_model.update_weights()
+    external_disk_deltas = uses_external_disk_deltas(args)
+    live_weight_sync_can_overlap = can_overlap_external_weight_sync(args)
+
+    # An opaque disk-delta fleet already serves hf_checkpoint. Its first updater
+    # call only captures the trainer-side baseline, so rollout can proceed while
+    # that preparation runs. Other transports may mutate rollout weights here.
+    initial_weight_sync_task = None
+    if external_disk_deltas:
+        initial_weight_sync_task = asyncio.create_task(actor_model.update_weights())
+    else:
+        await actor_model.update_weights()
 
     if args.check_weight_update_equal:
+        if initial_weight_sync_task is not None:
+            await initial_weight_sync_task
+            initial_weight_sync_task = None
         await rollout_manager.check_weights.remote(
             action="compare",
             allow_quant_error=args.check_weight_update_allow_quant_error,
@@ -60,6 +76,9 @@ async def train(args):
     eval_dispatcher = EvalDispatcher(args, actor_model, rollout_manager)
 
     if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
+        if initial_weight_sync_task is not None:
+            await initial_weight_sync_task
+            initial_weight_sync_task = None
         await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
 
     async def save_training_model(model, rollout_id, force_sync):
@@ -71,6 +90,8 @@ async def train(args):
 
     # async train loop.
     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
+    if initial_weight_sync_task is not None:
+        await initial_weight_sync_task
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:
@@ -105,9 +126,11 @@ async def train(args):
                 os.remove(args.save_trigger_sentinel)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            # sync generate before update weights to prevent update weight in the middle of generation
-            rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
-            rollout_data_next_future = None
+            if not live_weight_sync_can_overlap:
+                # Engines without in-place updates must finish generation before
+                # their weights change.
+                rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
+                rollout_data_next_future = None
             await actor_model.update_weights(rollout_id=rollout_id)
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout):

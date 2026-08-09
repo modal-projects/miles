@@ -29,6 +29,16 @@ def get_rollout_concurrency(args) -> int:
     return args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
 
 
+def uses_external_disk_deltas(args) -> bool:
+    """Whether weight updates are published to an opaque rollout endpoint."""
+    return args.update_weight_transfer_mode == "disk-delta" and bool(args.rollout_endpoint_url)
+
+
+def can_overlap_external_weight_sync(args) -> bool:
+    """Whether the external fleet can update weights without draining rollout."""
+    return uses_external_disk_deltas(args) and args.pause_generation_mode == "in_place"
+
+
 # Make this an isolated function because users may want to compute their own
 def compute_prompt_ids_from_sample(state, sample, tools=None):
     prompt = sample.prompt
