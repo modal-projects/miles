@@ -10,6 +10,7 @@ from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_
 from miles.backends.sglang_utils.arguments import validate_args as validate_sglang_args
 from miles.utils.arguments import (
     _maybe_apply_dumper_overrides,
+    _resolve_checkpoint_load,
     _resolve_ft_components,
     _resolve_rollout_functions,
     _validate_rematerialize_param_from_master_weight,
@@ -178,6 +179,58 @@ def test_fully_async_rejects_abort_pause_mode():
 
     args.pause_generation_mode = "retract"
     _resolve_rollout_functions(args)
+
+
+class TestResolveCheckpointLoad:
+    @staticmethod
+    def _make_args(tmp_path, **overrides):
+        defaults = dict(
+            load=None,
+            exit_on_missing_checkpoint=False,
+            megatron_to_hf_mode="bridge",
+            ref_load="/reference",
+            hf_checkpoint="/hf",
+            start_rollout_id=None,
+            no_load_optim=False,
+            no_load_rng=False,
+            finetune=False,
+            ref_ckpt_step=None,
+            ckpt_step=None,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_bridge_resume_leaves_rollout_start_for_loaded_iteration(self, tmp_path):
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        (checkpoint / "latest_checkpointed_iteration.txt").write_text("39")
+        args = self._make_args(tmp_path, load=str(checkpoint))
+
+        _resolve_checkpoint_load(args)
+
+        assert args.load == str(checkpoint)
+        assert args.start_rollout_id is None
+        assert args.no_load_optim is False
+        assert args.no_load_rng is False
+        assert args.finetune is False
+
+    def test_bridge_fresh_start_uses_reference_weights(self, tmp_path):
+        args = self._make_args(tmp_path)
+
+        _resolve_checkpoint_load(args)
+
+        assert args.load == "/reference"
+        assert args.start_rollout_id == 0
+
+    def test_explicit_missing_resume_fails_before_fallback(self, tmp_path):
+        args = self._make_args(
+            tmp_path,
+            load=str(tmp_path / "missing"),
+            exit_on_missing_checkpoint=True,
+        )
+
+        with pytest.raises(FileNotFoundError, match="missing or has no"):
+            _resolve_checkpoint_load(args)
 
 
 def test_recompute_logprobs_via_prefill_flag_is_parsed():
