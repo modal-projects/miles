@@ -18,6 +18,7 @@ from miles.ray.rollout.router_manager import start_session_server
 from miles.ray.rollout.server_cell import get_cell_indexer_of_id_map
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
+    compact_routing_replay_for_transport,
     convert_samples_to_train_data,
     split_train_data_by_dp,
 )
@@ -176,6 +177,7 @@ class RolloutManager:
             custom_reward_post_process_func=self.custom_reward_post_process_func,
         )
         sample_indices = data.get("sample_indices")
+        data = compact_routing_replay_for_transport(self.args, data)
         if self.args.delay_split_train_data_by_dp:
             data_ref = object_store.get_instance().put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)
         else:
