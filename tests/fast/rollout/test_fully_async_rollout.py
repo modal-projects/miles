@@ -3,6 +3,7 @@ from tests.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=60, suite="stage-a-cpu", labels=[])
 
 import asyncio
+import time
 from argparse import Namespace
 from collections import deque
 from dataclasses import replace
@@ -446,6 +447,9 @@ async def test_buffer_blocks_producer_when_full():
 
     assert (await buffer.get()).group[0].group_index == 1
     await blocked
+    metrics = buffer.get_metrics()
+    assert metrics["rollout/fully_async/backpressure_events"] == 1
+    assert metrics["rollout/fully_async/backpressure_seconds"] >= 0
     assert (await buffer.get()).group[0].group_index == 2
     assert (await buffer.get()).group[0].group_index == 3
 
@@ -482,6 +486,25 @@ async def test_buffer_staleness_metrics():
     assert metrics["rollout/fully_async/avg_staleness"] == 6.0  # consumed group 1: 10 - 4
     assert metrics["rollout/fully_async/buffer_avg_staleness"] == 3.0  # buffered groups 2, 3: (4 + 2) / 2
     assert metrics["rollout/fully_async/buffer_max_staleness"] == 4
+
+
+async def test_buffer_splits_generation_span_from_post_generation_lag():
+    buffer, _ = make_buffer(max_groups=8)
+    group = make_group(1, weight_versions=["6", "8"])
+    await buffer.put(
+        data_buffer.DataBufferInput(
+            prompt_group=group,
+            group=group,
+            finished_at=time.monotonic(),
+        )
+    )
+
+    await buffer.get(current_version=10)
+    metrics = buffer.get_metrics()
+
+    assert metrics["rollout/fully_async/within_group_version_span_avg"] == 2
+    assert metrics["rollout/fully_async/newest_to_consume_lag_avg"] == 2
+    assert metrics["rollout/fully_async/queue_wait_seconds_max"] >= 0
 
 
 class RecordingBuffer(data_buffer.DefaultDataBuffer):

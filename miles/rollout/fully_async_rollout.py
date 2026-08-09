@@ -18,6 +18,7 @@ rollout engines, pausing producer submissions for the duration of the
 
 import asyncio
 import logging
+import time
 
 from miles.rollout.base_types import (
     RolloutFnConstructorInput,
@@ -123,7 +124,7 @@ class FullyAsyncRolloutFn:
             evaluation=False,
             sample_done_callback=self._scheduler.sample_done_callback,
         )
-        return DataBufferInput(prompt_group=prompt_group, group=result)
+        return DataBufferInput(prompt_group=prompt_group, group=result, finished_at=time.monotonic())
 
     async def _worker_loop(self):
         active: set[asyncio.Task] = set()
