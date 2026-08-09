@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+import numpy as np
 import torch
 
 from miles.utils import object_store
@@ -48,6 +49,68 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
 }
+
+
+def compact_routing_replay_for_transport(args, data: dict[str, Any]) -> dict[str, Any]:
+    """Compact R3 expert IDs without changing their training-side semantics.
+
+    SGLang and :class:`Sample` use signed int32 expert IDs.  The object-store
+    payload does not need that width when the model has fewer experts, so use
+    the smallest lossless wire dtype and restore int32 after transport.
+    """
+    routed_experts = data.get("rollout_routed_experts")
+    if routed_experts is None:
+        return data
+
+    num_experts = int(args.num_experts)
+    topk = int(args.moe_router_topk)
+    wire_dtype = _routing_replay_wire_dtype(num_experts)
+    compact = []
+    for position, value in enumerate(routed_experts):
+        value = np.asarray(value)
+        if value.dtype != np.int32 or value.ndim != 3:
+            raise ValueError(
+                "rollout_routed_experts must contain int32 arrays with shape "
+                f"[tokens, layers, topk]; position={position}, dtype={value.dtype}, shape={value.shape}"
+            )
+        if value.shape[2] != topk:
+            raise ValueError(
+                "rollout_routed_experts has an invalid topk dimension: "
+                f"position={position}, shape={value.shape}, expected_topk={topk}"
+            )
+        _validate_routing_replay_ids(value, num_experts=num_experts, position=position)
+        compact.append(np.ascontiguousarray(value, dtype=wire_dtype))
+
+    result = dict(data)
+    result["rollout_routed_experts"] = compact
+    return result
+
+
+def _routing_replay_wire_dtype(num_experts: int) -> np.dtype:
+    """Return the smallest wire dtype that represents IDs ``[0, num_experts)``."""
+    if num_experts <= 0:
+        raise ValueError(f"num_experts must be positive, got {num_experts}")
+    if num_experts <= np.iinfo(np.uint8).max + 1:
+        return np.dtype(np.uint8)
+    if num_experts <= np.iinfo(np.uint16).max + 1:
+        return np.dtype(np.uint16)
+    if num_experts <= np.iinfo(np.int32).max + 1:
+        return np.dtype(np.int32)
+    raise ValueError(
+        f"num_experts={num_experts} exceeds the signed int32 R3 protocol range"
+    )
+
+
+def _validate_routing_replay_ids(data: np.ndarray, *, num_experts: int, position: int) -> None:
+    if data.size == 0:
+        return
+    minimum = int(data.min())
+    maximum = int(data.max())
+    if minimum < 0 or maximum >= num_experts:
+        raise ValueError(
+            "rollout_routed_experts contains an invalid expert ID: "
+            f"position={position}, range=[{minimum}, {maximum}], num_experts={num_experts}"
+        )
 
 
 def convert_samples_to_train_data(
