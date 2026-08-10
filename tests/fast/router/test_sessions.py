@@ -83,7 +83,7 @@ def router_env():
             url = f"http://127.0.0.1:{port}"
 
             try:
-                yield SimpleNamespace(url=url, backend=backend)
+                yield SimpleNamespace(url=url, backend=backend, args=args)
             finally:
                 server.stop()
 
@@ -164,6 +164,32 @@ class TestSessionProxy:
         record = records[0]
         assert record["path"] == "/v1/chat/completions"
         assert record["status_code"] == 200
+
+    @pytest.mark.parametrize(
+        ("lora_train_only", "expects_lora_path"),
+        [(False, True), (True, False)],
+    )
+    def test_proxy_chat_applies_only_rollout_enabled_lora(
+        self,
+        router_env,
+        lora_train_only,
+        expects_lora_path,
+    ):
+        router_env.args.lora_rank = 8
+        router_env.args.lora_train_only = lora_train_only
+        try:
+            session_id = _create_session(router_env.url)
+            response = _post_chat(
+                router_env.url,
+                session_id,
+                {"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status_code == 200
+            request = router_env.backend.request_log[-1]
+            assert ("lora_path" in request) is expects_lora_path
+        finally:
+            del router_env.args.lora_rank
+            del router_env.args.lora_train_only
 
     def test_proxy_chat_response_has_no_duplicate_server_or_date_header(self, router_env):
         # Both the backend and this server run under uvicorn, so each emits its own
