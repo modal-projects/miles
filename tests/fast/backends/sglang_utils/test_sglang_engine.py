@@ -30,3 +30,26 @@ def test_flush_cache_sleeps_between_pending_request_retries(monkeypatch):
         f"expected the loop to back off on every one of its 60 attempts, got {len(sleep_calls)} sleeps "
         "-- a 400 response (pending requests) must not skip the retry delay"
     )
+
+
+def test_update_weight_version_preserves_active_requests(monkeypatch):
+    """SGLang defaults ``abort_all_requests`` to true on this endpoint.
+
+    Updating bookkeeping after an in-place weight update must not discard the
+    requests whose KV state the pause mode intentionally preserved.
+    """
+    pytest.importorskip("sglang")
+    from miles.backends.sglang_utils.sglang_engine import SGLangEngine
+
+    engine = SGLangEngine.__new__(SGLangEngine)
+    calls = []
+    monkeypatch.setattr(engine, "_make_request", lambda path, payload: calls.append((path, payload)))
+
+    engine.update_weight_version("7")
+
+    assert calls == [
+        (
+            "update_weight_version",
+            {"new_version": "7", "abort_all_requests": False},
+        )
+    ]
