@@ -846,6 +846,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-initial-version",
+                type=int,
+                default=None,
+                help=(
+                    "Initial externally served version for disk-delta publication. "
+                    "Defaults to the loaded rollout checkpoint id."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-local-checkpoint-dir",
                 type=str,
                 default=None,

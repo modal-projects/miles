@@ -67,14 +67,17 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         *,
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
+        initial_weight_version: int = 0,
         is_lora: bool = False,
     ) -> None:
         assert not is_lora, "LoRA weight sync is not supported for disk-delta weight transfer."
+        if initial_weight_version < 0:
+            raise ValueError("initial_weight_version must be non-negative")
         self.args = args
         self.model = model
         self.model_name = model_name
         self.quantization_config = quantization_config
-        self.weight_version = 0
+        self.weight_version = initial_weight_version
         self.rollout_engines: Sequence[ActorHandle] | None = None
         self._connection_stale: bool = False
         self.delta_dir = args.update_weight_disk_dir
@@ -138,20 +141,27 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         self._record_metrics()
 
     def _capture_baseline(self) -> None:
-        """Capture the baseline snapshot the first delta diffs against (no publish), and clear any
-        stale stream from a prior run. Seeds from hf_checkpoint — what each host materializes its
+        """Capture the baseline snapshot the first delta diffs against (no publish). Seeds from
+        hf_checkpoint — what each host materializes its
         base from — so the invariant ``snapshot == engine base`` holds even where the megatron->HF
         round-trip trims vocab-padding rows (embed/lm_head). Every emitted tensor must have the same
-        name, dtype, and shape as that checkpoint. pull_weights(0) materializes each host's local
-        base while the trainer gathers its snapshot."""
-        # a prior run's versions would apply against the wrong base; start the dir clean
+        name, dtype, and shape as that checkpoint. For Miles-managed engines,
+        ``pull_weights(weight_version)`` materializes each host's local base while
+        the trainer gathers its snapshot."""
         pulls = []
         if dist.get_rank() == 0:
-            shutil.rmtree(self.delta_dir, ignore_errors=True)
+            # A fresh run owns a new stream. A resume keeps its immutable
+            # history and replaces only an abandoned future target when that
+            # version is published again.
+            if self.weight_version == 0:
+                shutil.rmtree(self.delta_dir, ignore_errors=True)
             os.makedirs(self.delta_dir, exist_ok=True)
             if self._post_write_hook is not None:
                 self._post_write_hook(self.args, self.delta_dir, list(self.rollout_engines))
-            pulls = [engine.pull_weights.remote(target_version=0) for engine in self.rollout_engines]
+            pulls = [
+                engine.pull_weights.remote(target_version=self.weight_version)
+                for engine in self.rollout_engines
+            ]
         dist.barrier(group=get_gloo_group())
 
         read_hf = make_tensor_reader(self.args.hf_checkpoint)  # index the HF headers once
@@ -310,6 +320,9 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         each bucket callback copies one tensor at a time to a pinned buffer and submits it; pool
         workers diff and compress in parallel (each is a few big GIL-releasing numpy/zstd calls)."""
         self._version_dir = os.path.join(self.delta_dir, f"weight_v{self.weight_version:06d}")
+        if dist.get_rank() == 0:
+            shutil.rmtree(self._version_dir, ignore_errors=True)
+        dist.barrier(group=get_gloo_group())
         if self._is_source:
             os.makedirs(self._version_dir, exist_ok=True)
         snapshot = self._snapshot
