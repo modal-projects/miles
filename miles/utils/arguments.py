@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from sglang_router.launch_router import RouterArgs
@@ -841,14 +842,39 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Address and ports of the external engines.",
             )
             parser.add_argument(
+                "--rollout-endpoint-url",
+                type=str,
+                default=None,
+                help=(
+                    "Base URL of an opaque rollout fleet. Miles launches no rollout "
+                    "engines and routes inference requests to this endpoint."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-request-timeout-secs",
+                type=float,
+                default=None,
+                help="Optional read timeout for one request to the rollout endpoint.",
+            )
+            parser.add_argument(
+                "--custom-rollout-request-hook-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a hook that may modify each outgoing rollout request. "
+                    "The hook receives (args, context, request), where request contains "
+                    "url, payload, headers, max_retries, and retry_sleep."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-transfer-mode",
                 choices=["broadcast", "p2p", "disk-delta"],
                 default="broadcast",
                 help=(
                     "The method to transfer weights to remote rollout engines during update weight. "
                     "'disk-delta' diffs each sync against a CPU snapshot of the previous one and publishes "
-                    "only the changed bytes to --update-weight-disk-dir; each engine's /pull_weights applies "
-                    "them into a host-local checkpoint that the engine reloads from."
+                    "only the changed bytes to --update-weight-disk-dir. Miles-managed engines apply "
+                    "the artifact locally; an opaque rollout fleet consumes it through the post-write hook."
                 ),
             )
             parser.add_argument(
@@ -868,9 +894,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Rollout-host-local directory (e.g. NVMe) holding a full HF checkpoint kept in "
                     "sync by each engine's /pull_weights: every host seeds it from the engine's model "
-                    "path and patches published deltas in place, and the engines reload from it. "
-                    "Required for --update-weight-transfer-mode=disk-delta. The read-side counterpart "
-                    "of --custom-update-weight-post-write-path is the engine's "
+                    "path and patches published deltas in place, and the engines reload from it. Miles-managed "
+                    "engines require this path; an opaque rollout fleet owns its local checkpoint path. The "
+                    "read-side counterpart of --custom-update-weight-post-write-path is the engine's "
                     "--sglang-custom-pull-weights-pre-read-hook."
                 ),
             )
@@ -2873,6 +2899,14 @@ def _validate_rematerialize_param_from_master_weight(args):
         args.check_rematerialize_param_from_master_weight = True
 
 
+def _normalize_rollout_endpoint_url(url: str) -> str:
+    url = url.rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"Invalid --rollout-endpoint-url {url!r}; expected an absolute HTTP URL.")
+    return url
+
+
 def _resolve_checkpoint_load(args) -> None:
     """Resolve fresh-start versus resume semantics before backend initialization."""
     has_checkpoint = (
@@ -3298,6 +3332,21 @@ def miles_validate_args(args):
         args.offload_rollout = True
     del args.offload
 
+    if args.rollout_endpoint_url is not None:
+        args.rollout_endpoint_url = _normalize_rollout_endpoint_url(args.rollout_endpoint_url)
+        assert not args.rollout_external, "--rollout-endpoint-url and --rollout-external are mutually exclusive."
+        assert (
+            args.update_weight_transfer_mode == "disk-delta"
+        ), "--rollout-endpoint-url requires --update-weight-transfer-mode=disk-delta."
+        assert (
+            args.custom_update_weight_post_write_path
+        ), "--rollout-endpoint-url requires --custom-update-weight-post-write-path to publish each weight version."
+        args.rollout_num_gpus = 0
+        if args.rollout_request_timeout_secs is None:
+            args.rollout_request_timeout_secs = 600.0
+    if args.rollout_request_timeout_secs is not None:
+        assert args.rollout_request_timeout_secs > 0, "--rollout-request-timeout-secs must be positive."
+
     if args.debug_rollout_only:
         if args.colocate and (not args.rollout_num_gpus):
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
@@ -3347,7 +3396,7 @@ def miles_validate_args(args):
             "--update-weight-transfer-mode=disk-delta requires --update-weight-disk-dir to point at "
             "a filesystem shared between the trainer and the rollout engines."
         )
-        assert args.update_weight_local_checkpoint_dir, (
+        assert args.update_weight_local_checkpoint_dir or args.rollout_endpoint_url, (
             "--update-weight-transfer-mode=disk-delta requires --update-weight-local-checkpoint-dir "
             "(a rollout-host-local directory, e.g. NVMe)."
         )

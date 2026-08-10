@@ -69,7 +69,10 @@ class RolloutManager:
         # set by the training actor after each weight update
         self.weight_version: int | None = None
         # TODO make args immutable
-        init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+        router_addr = getattr(args, "rollout_endpoint_url", None) or (
+            f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+        )
+        init_tracking(args, primary=False, router_addr=router_addr)
         object_store.init_instance(args, contribute_segment=False)
 
         data_source_cls = load_function(self.args.data_source_path)
