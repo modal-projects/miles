@@ -11,6 +11,7 @@ from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_
 from miles.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 from miles.dashboard.args import add_dashboard_arguments, validate_dashboard_args
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
+from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.environ import enable_experimental_ft_trainer, use_legacy_rollout_v1
 from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
@@ -508,7 +509,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="the temperature for the inference engine during rollout.",
             )
             parser.add_argument(
-                "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
+                "--rollout-top-p",
+                type=float,
+                default=1.0,
+                help=(
+                    "the top-p for the inference engine during rollout. Values below 1, or a positive top-k, "
+                    "automatically enable rollout sampling-support replay during training."
+                ),
             )
             parser.add_argument(
                 "--rollout-top-k", type=int, default=-1, help="the top-k for the inference engine during rollout."
@@ -2467,6 +2474,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Number of prefill servers for disaggregation.",
             )
+            parser.add_argument(
+                "--sglang-disaggregation-sampling-mask-max-tokens",
+                type=int,
+                default=4096,
+                help=(
+                    "Maximum rollout sampling-support size carried per token between SGLang prefill and decode "
+                    "servers. Increase this if truncated sampling support exceeds the configured capacity."
+                ),
+            )
             return parser
 
         def add_ci_arguments(parser):
@@ -2940,6 +2956,24 @@ def miles_validate_args(args):
     assert not (
         args.use_session_server and args.pause_generation_mode == "abort"
     ), "--use-session-server is incompatible with --pause-generation-mode=abort"
+
+    if not 0.0 < args.rollout_top_p <= 1.0:
+        raise ValueError(f"--rollout-top-p must be in (0, 1], got {args.rollout_top_p}")
+    if sampling_mask_replay_enabled(args):
+        if args.recompute_logprobs_via_prefill:
+            raise ValueError(
+                "truncated rollout sampling cannot be combined with --recompute-logprobs-via-prefill; "
+                "prefill scoring does not preserve the rollout sampling support"
+            )
+        if getattr(args, "sglang_speculative_algorithm", None):
+            raise ValueError(
+                "rollout sampling-mask replay cannot be combined with speculative decoding; "
+                "current SGLang workers do not return one aligned sampling support per accepted token"
+            )
+        if args.sglang_disaggregation_sampling_mask_max_tokens <= 0:
+            raise ValueError(
+                "--sglang-disaggregation-sampling-mask-max-tokens must be positive with truncated sampling"
+            )
 
     if not args.use_session_server and args.tito_model != TITOTokenizerType.DEFAULT.value:
         raise ValueError(
