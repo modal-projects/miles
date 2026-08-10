@@ -644,7 +644,14 @@ class SGLangEngine(RayActor):
     def update_weight_version(self, weight_version: str):
         return self._make_request(
             "update_weight_version",
-            {"new_version": weight_version},
+            {
+                "new_version": weight_version,
+                # SGLang defaults this field to true. Weight-version metadata is
+                # updated while generation is paused for the in-place weight
+                # update, so aborting the preserved requests here would defeat
+                # the in-place lifecycle and discard the fully-async pool.
+                "abort_all_requests": False,
+            },
         )
 
     def start_profile(
