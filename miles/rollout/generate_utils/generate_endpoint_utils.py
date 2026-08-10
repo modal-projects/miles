@@ -17,6 +17,12 @@ from miles.utils.processing_utils import encode_image_for_rollout_engine, extrac
 from miles.utils.types import Sample
 
 
+def get_rollout_concurrency(args) -> int:
+    if getattr(args, "rollout_endpoint_url", None):
+        return args.sglang_server_concurrency
+    return args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+
+
 # Make this an isolated function because users may want to compute their own
 def compute_prompt_ids_from_sample(state, sample, tools=None):
     prompt = sample.prompt

@@ -311,10 +311,13 @@ def register_router(args) -> None:
     handle = backend.current_collector()
     if handle is None:
         return
-    # a None ip here is a wiring-order bug, not runtime flakiness: fail loud
-    assert args.sglang_router_ip is not None, "register_router must run after start_rollout_servers"
+    router_url = getattr(args, "rollout_endpoint_url", None)
+    if router_url is None:
+        # a None ip here is a wiring-order bug, not runtime flakiness: fail loud
+        assert args.sglang_router_ip is not None, "register_router must run after start_rollout_servers"
+        router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
     try:
-        handle.set_router.remote(f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+        handle.set_router.remote(router_url)
     except Exception:
         _warner.warn("dashboard router registration failed; engine metrics will be missing")
 
