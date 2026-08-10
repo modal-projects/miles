@@ -164,8 +164,9 @@ def start_session_server(args):
     if not hf_checkpoint:
         raise ValueError("--use-session-server requires --hf-checkpoint to be set.")
 
+    rollout_endpoint_url = getattr(args, "rollout_endpoint_url", None)
     if getattr(args, "session_server_ip", None) is None:
-        args.session_server_ip = args.sglang_router_ip
+        args.session_server_ip = _wrap_ipv6(get_host_info()[1]) if rollout_endpoint_url else args.sglang_router_ip
 
     ip = args.session_server_ip
     ports = _resolve_session_server_ports(getattr(args, "session_server_port", None))
@@ -178,7 +179,7 @@ def start_session_server(args):
     # The canonical driver-side value; rollout code picks from this list.
     args.session_server_ports = ports
 
-    router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    backend_url = rollout_endpoint_url or (f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
 
     # Spawn all children before waiting on any: each child pays the ~10s
     # transformers import, so N servers start in ~one import of wall-time.
@@ -191,7 +192,7 @@ def start_session_server(args):
         child_args.session_server_instance_id = uuid.uuid4().hex
         instance_ids[port] = child_args.session_server_instance_id
         process = multiprocessing.get_context("spawn").Process(
-            target=run_session_server, args=(child_args, router_url)
+            target=run_session_server, args=(child_args, backend_url)
         )
         process.daemon = True
         process.start()

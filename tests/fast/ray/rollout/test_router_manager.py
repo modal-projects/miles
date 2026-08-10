@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from tests.fast.ray.rollout.conftest import make_args
@@ -70,6 +70,44 @@ class TestStartSessionServer:
         with patch("miles.ray.rollout.router_manager.is_port_available", return_value=False):
             with pytest.raises(RuntimeError, match="already in use"):
                 start_session_server(args)
+
+    def test_opaque_endpoint_is_session_backend(self):
+        args = make_args(
+            use_session_server=True,
+            hf_checkpoint="/fake/model",
+            rollout_endpoint_url="https://rollout.example",
+            session_server_ip=None,
+            session_server_port=[20001],
+            session_server_startup_timeout_seconds=30,
+        )
+        process = MagicMock()
+        process.is_alive.return_value = True
+        context = MagicMock()
+        context.Process.return_value = process
+        with (
+            patch(
+                "miles.ray.rollout.router_manager.get_host_info",
+                return_value=("host", "10.0.0.2"),
+            ),
+            patch(
+                "miles.ray.rollout.router_manager.is_port_available",
+                return_value=True,
+            ),
+            patch(
+                "miles.ray.rollout.router_manager.multiprocessing.get_context",
+                return_value=context,
+            ),
+            patch(
+                "miles.ray.rollout.router_manager._wait_for_session_server_pool_ready",
+                return_value={20001: 1.0},
+            ),
+        ):
+            start_session_server(args)
+
+        assert args.session_server_ip == "10.0.0.2"
+        child_args, backend_url = context.Process.call_args.kwargs["args"]
+        assert child_args.session_server_port == 20001
+        assert backend_url == "https://rollout.example"
 
 
 class TestResolveSessionServerPorts:
