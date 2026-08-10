@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -28,7 +29,11 @@ from miles.rollout.base_types import (
     call_rollout_fn,
 )
 from miles.rollout.checkpoint_eval import CheckpointEvalFn, EvalSkip
-from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
+from miles.rollout.inference_rollout.compatibility import (
+    call_rollout_function,
+    close_rollout_function,
+    load_rollout_function,
+)
 from miles.utils import object_store
 from miles.utils.audit_utils.event_analyzer import analyzer as event_analyzer
 from miles.utils.audit_utils.event_logger import checkpoint as event_logger_checkpoint
@@ -41,7 +46,7 @@ from miles.utils.logging_utils import configure_logger
 from miles.utils.metric_checker import MetricChecker
 from miles.utils.misc import load_function
 from miles.utils.timer import timer
-from miles.utils.tracking_utils.tracking import init_tracking
+from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -121,9 +126,25 @@ class RolloutManager:
     def get_router_address(self) -> tuple[str, int]:
         return self.args.sglang_router_ip, self.args.sglang_router_port
 
-    def dispose(self):
+    async def dispose(self):
+        rollout_functions = (self.generate_rollout, self.eval_generate_rollout)
+        for index, rollout_function in enumerate(rollout_functions):
+            if any(rollout_function is previous for previous in rollout_functions[:index]):
+                continue
+            if self.use_experimental_refactor:
+                # Coroutine-based rollout functions run on async_utils' background
+                # loop (via call_rollout_function). Close persistent tasks on that
+                # same loop instead of the Ray actor's event loop.
+                await asyncio.to_thread(close_rollout_function, rollout_function)
+            elif (close := getattr(rollout_function, "close", None)) is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+
         if (close := getattr(self.data_source, "close", None)) is not None:
-            close()
+            result = close()
+            if inspect.isawaitable(result):
+                await result
         event_analyzer.run_analysis_from_args(self.args)
         if self._metric_checker is not None:
             self._metric_checker.dispose()
@@ -131,7 +152,7 @@ class RolloutManager:
             self.eval_generate_rollout.dispose()
         for monitor in self._health_monitors:
             monitor.stop()
-
+        finish_tracking()
     # -------------------------- data generation -----------------------------
 
     async def generate(self, rollout_id):
@@ -392,6 +413,9 @@ class RolloutManager:
     def health_monitoring_pause(self) -> None:
         for monitor in self._health_monitors:
             monitor.pause()
+
+    def health_monitoring_resume(self) -> None:
+        self._health_monitoring_resume()
 
     def _health_monitoring_resume(self) -> None:
         for monitor in self._health_monitors:

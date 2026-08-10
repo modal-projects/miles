@@ -67,7 +67,10 @@ def _get_gpu_uuids(gpu_ids: list[int]) -> list[str | None]:
         return [None] * len(gpu_ids)
 
 
-def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
+def launch_server_process(
+    server_args: ServerArgs,
+    request_timeout_seconds: float = 30.0,
+) -> multiprocessing.Process:
     from sglang.srt.entrypoints.http_server import launch_server
 
     multiprocessing.set_start_method("spawn", force=True)
@@ -82,12 +85,13 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
         base_url=server_args.url(),
         api_key=server_args.api_key,
         is_process_alive=lambda: p.is_alive(),
+        request_timeout_seconds=request_timeout_seconds,
     )
 
     return p
 
 
-def _wait_server_healthy(base_url, api_key, is_process_alive):
+def _wait_server_healthy(base_url, api_key, is_process_alive, request_timeout_seconds=30.0):
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Authorization": f"Bearer {api_key}",
@@ -96,9 +100,19 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
     with requests.Session() as session:
         while True:
             try:
-                response = session.get(f"{base_url}/health_generate", headers=headers)
+                response = session.get(
+                    f"{base_url}/health_generate",
+                    headers=headers,
+                    timeout=request_timeout_seconds,
+                )
                 if response.status_code == 200:
                     break
+            except requests.Timeout:
+                logger.warning(
+                    "Timed out after %.1fs waiting for %s/health_generate; retrying",
+                    request_timeout_seconds,
+                    base_url,
+                )
             except requests.RequestException:
                 pass
 
@@ -110,10 +124,20 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
         # use flush_cache to make sure the working queue is empty, so that we can do offload
         while True:
             try:
-                response = session.get(f"{base_url}/flush_cache", headers=headers)
+                response = session.get(
+                    f"{base_url}/flush_cache",
+                    headers=headers,
+                    timeout=request_timeout_seconds,
+                )
                 if response.status_code == 200:
                     break
 
+            except requests.Timeout:
+                logger.warning(
+                    "Timed out after %.1fs waiting for %s/flush_cache; retrying",
+                    request_timeout_seconds,
+                    base_url,
+                )
             except requests.RequestException:
                 pass
 
@@ -245,7 +269,10 @@ class SGLangEngine(RayActor):
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
-        self.process = launch_server_process(ServerArgs(**server_args_dict))
+        self.process = launch_server_process(
+            ServerArgs(**server_args_dict),
+            request_timeout_seconds=self.args.rollout_health_check_timeout,
+        )
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
             if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
@@ -253,7 +280,8 @@ class SGLangEngine(RayActor):
                     self.worker_type == "regular"
                 ), "pd disaggregation is not supported in old router or miles router."
                 response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/add_worker?url=http://{self.server_host}:{self.server_port}"
+                    f"http://{self.router_ip}:{self.router_port}/add_worker?url=http://{self.server_host}:{self.server_port}",
+                    timeout=self.args.rollout_health_check_timeout,
                 )
             else:
                 payload = {
@@ -265,6 +293,7 @@ class SGLangEngine(RayActor):
                 response = requests.post(
                     f"http://{self.router_ip}:{self.router_port}/workers",
                     json=payload,
+                    timeout=self.args.rollout_health_check_timeout,
                 )
             response.raise_for_status()
 

@@ -16,6 +16,7 @@ from miles.rollout.inference_rollout.compatibility import (
     LegacyGenerateFnAdapter,
     LegacyRolloutFnAdapter,
     call_rollout_function,
+    close_rollout_function,
     load_generate_function,
     load_rollout_function,
 )
@@ -132,6 +133,32 @@ class TestSupportedRolloutFormats:
             assert isinstance(fn, AsyncRolloutFn)
             expected_type = RolloutFnEvalOutput if evaluation else RolloutFnTrainOutput
             assert isinstance(result, expected_type)
+
+    def test_async_close_uses_the_rollout_call_event_loop(self):
+        class PersistentAsyncRollout:
+            def __init__(self):
+                self.loop = None
+                self.worker = None
+                self.closed = False
+
+            async def __call__(self, input):
+                self.loop = asyncio.get_running_loop()
+                self.worker = asyncio.create_task(asyncio.Event().wait())
+                return RolloutFnTrainOutput(samples=[[{"index": input.rollout_id}]])
+
+            async def close(self):
+                assert asyncio.get_running_loop() is self.loop
+                self.worker.cancel()
+                await asyncio.gather(self.worker, return_exceptions=True)
+                self.closed = True
+
+        fn = PersistentAsyncRollout()
+
+        result = call_rollout_function(fn, RolloutFnTrainInput(rollout_id=7))
+        close_rollout_function(fn)
+
+        assert result.samples == [[{"index": 7}]]
+        assert fn.closed
 
 
 class TestSupportedGenerateFormats:
