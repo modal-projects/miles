@@ -2,7 +2,9 @@
 
 HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each request into primitives and calls these methods. Owns one ``SessionRegistry`` (per-session TITO/trajectory state) and one proxy ``backend``.
 
-- ``chat_completions`` strips the R3 replay payloads (``routed_experts`` / ``indexer_topk``) from the client reply copy-on-write; the ``SessionRecord`` keeps the full response for the training path (``GET /sessions/{id}``).
+- ``chat_completions`` strips training-only replay payloads from the client
+  response copy-on-write; the ``SessionRecord`` keeps the full response for
+  server-side training-sample assembly.
 - ``chat_completions`` holds the per-session lock for prep and state update but not across the proxy call; ``closing`` re-checks and the ``num_assistant`` check gate concurrent DELETE/chat.
 - ``stream: true`` is served as fake streaming: the backend call stays non-streaming (TITO needs the complete message + meta_info) and the full response is re-rendered as a single SSE chunk plus ``data: [DONE]``. Errors all happen before the SSE body is built, so they keep their real status codes as JSON.
 - ``collect_samples`` assembles training Samples from the session's records on the server (compute -> truncate -> merge, synchronously on the loop like the lock-free ``get_session``); deterministic assembly failures return 422 with the assertion text.
@@ -16,6 +18,7 @@ from dataclasses import dataclass
 from starlette.responses import Response
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
+from miles.rollout.generate_utils.sampling_mask import should_return_sampling_mask
 from miles.rollout.session.errors import (
     MessageValidationError,
     SessionNotFoundError,
@@ -71,7 +74,53 @@ def _samples_response(payload: bytes) -> Response:
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
 
 
-_CLIENT_STRIPPED_META_KEYS = ("routed_experts", "indexer_topk")
+def _configure_sampling_replay_request(
+    request_body: dict, *, top_p: float, top_k: int, temperature: float
+) -> None:
+    """Request exact sampling support without changing replayable filters."""
+    actual_temperature = request_body.get("temperature", temperature)
+    if actual_temperature != temperature:
+        raise MessageValidationError(
+            f"temperature={actual_temperature} does not match Miles rollout setting {temperature}; "
+            "the trainer cannot replay a different temperature"
+        )
+    request_body["temperature"] = temperature
+    request_body.setdefault("top_p", top_p)
+    request_body.setdefault("top_k", top_k)
+
+    unsupported = {
+        "frequency_penalty": (0, 0.0, None),
+        "presence_penalty": (0, 0.0, None),
+        "repetition_penalty": (1, 1.0, None),
+        "logit_bias": ({}, None),
+        "custom_logit_processor": (None,),
+    }
+    for key, allowed in unsupported.items():
+        if request_body.get(key) not in allowed:
+            raise MessageValidationError(
+                f"{key} is not supported with Miles top-p log-prob replay because the trainer cannot replay it"
+            )
+
+    custom_params = request_body.get("custom_params")
+    if custom_params is not None and not isinstance(custom_params, dict):
+        raise MessageValidationError("custom_params must be an object")
+    # The deployed Rust router preserves custom_params but drops newer unknown
+    # top-level request fields. Keep the native field for direct/new-router
+    # deployments and carry the same intent through typed older routers here.
+    request_body["custom_params"] = {
+        **(custom_params or {}),
+        "miles_return_sampling_mask": True,
+    }
+
+
+_CLIENT_STRIPPED_META_KEYS = (
+    "routed_experts",
+    "routed_experts_start_len",
+    "indexer_topk",
+    "output_token_sampling_mask",
+    "output_token_sampling_logprobs",
+    "output_token_sampling_mask_length",
+)
 
 
 def _strip_replay_payloads(response: dict) -> dict:
@@ -179,6 +228,14 @@ def prepare_chat_request(body: bytes, args, tito_tokenizer) -> tuple:
     # setdefault) so agent-side overrides cannot break token accumulation.
     request_body["logprobs"] = True
     request_body["return_meta_info"] = True
+    if should_return_sampling_mask(args, request_body):
+        request_body["return_sampling_mask"] = True
+        _configure_sampling_replay_request(
+            request_body,
+            top_p=args.rollout_top_p,
+            top_k=getattr(args, "rollout_top_k", -1),
+            temperature=getattr(args, "rollout_temperature", 1.0),
+        )
     if getattr(args, "use_rollout_routing_replay", False):
         request_body["return_routed_experts"] = True
     if getattr(args, "use_rollout_indexer_replay", False):

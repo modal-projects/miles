@@ -17,6 +17,7 @@ from miles.ray.rollout.addr_allocator import (
 from miles.ray.rollout.server_engine import ServerEngine
 from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 from miles.utils import dumper_utils
+from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,10 @@ class ServerGroup:
                 }.items()
             }
             env_vars.update(dumper_utils.get_sglang_env(self.args))
+            if sampling_mask_replay_enabled(self.args):
+                env_vars["SGLANG_DISAGGREGATION_SAMPLING_MASK_MAX_TOKENS"] = str(
+                    self.args.sglang_disaggregation_sampling_mask_max_tokens
+                )
 
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
