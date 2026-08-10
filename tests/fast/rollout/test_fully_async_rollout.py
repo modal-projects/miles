@@ -253,6 +253,29 @@ async def test_worker_error_propagates(monkeypatch):
         await fn(RolloutFnTrainInput(rollout_id=0))
 
 
+async def test_close_cancels_worker_and_in_flight_groups(monkeypatch):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource(), generate=blocking_generate)
+    drain = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+    await started.wait()
+
+    await fn.close()
+
+    await cancelled.wait()
+    assert fn._worker is None
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+
 async def test_worker_bounds_in_flight_groups(monkeypatch):
     release = asyncio.Event()
 

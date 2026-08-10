@@ -48,6 +48,21 @@ def call_rollout_function(fn, input: RolloutFnInput) -> RolloutFnOutput:
     return output
 
 
+def close_rollout_function(fn) -> None:
+    """Close a rollout function on the loop used for its async calls.
+
+    ``call_rollout_function`` runs coroutine-based rollout functions on the
+    process-wide background loop. Persistent implementations may own tasks
+    created on that loop, so their async lifecycle hook must run there too.
+    """
+    close = getattr(fn, "close", None)
+    if close is None:
+        return
+    output = close()
+    if inspect.isawaitable(output):
+        run(output)
+
+
 class LegacyGenerateFnAdapter:
     def __init__(self, fn: Callable):
         self.fn = fn
