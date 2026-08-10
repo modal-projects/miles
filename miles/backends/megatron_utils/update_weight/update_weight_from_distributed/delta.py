@@ -67,6 +67,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         *,
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
+        initial_weight_version: int = 0,
         is_lora: bool = False,
     ) -> None:
         assert not is_lora, "LoRA weight sync is not supported for disk-delta weight transfer."
@@ -74,7 +75,7 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
         self.model = model
         self.model_name = model_name
         self.quantization_config = quantization_config
-        self.weight_version = 0
+        self.weight_version = initial_weight_version
         self.rollout_engines: Sequence[ActorHandle] | None = None
         self._connection_stale: bool = False
         self.delta_dir = args.update_weight_disk_dir
