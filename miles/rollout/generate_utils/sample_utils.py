@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import fields
 
+from miles.rollout.generate_utils.sampling_mask import merge_sampling_masks
 from miles.utils.types import Sample
 
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
@@ -27,6 +28,16 @@ def merge_samples_with_terminal_index(samples: list[Sample], tokenizer, *, stop_
         # intermediate turn truncated, the trajectory ends there.
         # TODO (shi.dong): figure out how in-turn truncation should be handled.
         if acc.status != Sample.Status.COMPLETED:
+            break
+        # An infrastructure-aborted turn is not part of the behavior-policy
+        # trajectory. Preserve the valid prefix only for diagnostics, but mark
+        # the complete execution aborted so it can never receive a policy
+        # reward or enter training. This also avoids fabricating top-p/routing
+        # metadata that the aborted request never produced.
+        if sample.status == Sample.Status.ABORTED:
+            acc = deepcopy(acc)
+            acc.status = Sample.Status.ABORTED
+            acc.reward = None
             break
         # An aborted/truncated turn omits the routing-replay payloads
         # (routed_experts / indexer_topk). Replay requires every training sample
@@ -148,6 +159,7 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
         assert _startswith(short=a.prompt, long=b.prompt), "b.prompt must start with a.prompt"
         assert _startswith(short=a.tokens, long=b.tokens), "b.tokens must start with a.tokens"
         assert obs_len > 0, f"obs_len must be > 0, got {obs_len}"
+        sampling_mask_ids, sampling_mask_offsets = merge_sampling_masks(a, obs_tokens, b)
         if a.rollout_routed_experts is not None:
             assert b.rollout_routed_experts is not None, "cannot merge: a has rollout_routed_experts but b does not"
             assert a.rollout_routed_experts.shape[0] <= b.rollout_routed_experts.shape[0]
@@ -172,6 +184,8 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             loss_mask=a.loss_mask + [0] * obs_len + b.loss_mask,
             weight_versions=a.weight_versions + b.weight_versions,
             rollout_log_probs=a.rollout_log_probs + [0.0] * obs_len + b.rollout_log_probs,
+            rollout_sampling_mask_ids=sampling_mask_ids,
+            rollout_sampling_mask_offsets=sampling_mask_offsets,
             teacher_log_probs=_merge_optional_per_token("teacher_log_probs"),
             opd_reverse_kl=_merge_optional_per_token("opd_reverse_kl"),
             rollout_routed_experts=b.rollout_routed_experts,

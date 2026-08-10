@@ -21,6 +21,8 @@ from miles.backends.training_utils.log_utils import (
 )
 from miles.backends.training_utils.loss import compute_advantages_and_returns, get_log_probs_and_entropy, loss_function
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
+from miles.backends.training_utils.sampling_mask import get_rollout_sampling_mask
+from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 from miles.ray.train_actor import TrainRayActor
 from miles.utils import train_dump_utils, train_metric_utils
 from miles.utils.context_utils import with_defer
@@ -345,6 +347,7 @@ class FSDPTrainRayActor(TrainRayActor):
             active_model.eval()
         else:
             active_model = self.model
+        use_rollout_sampling_mask = model_tag == "actor" and sampling_mask_replay_enabled(self.args)
 
         try:
             forward_data_store = []
@@ -368,6 +371,8 @@ class FSDPTrainRayActor(TrainRayActor):
                             "response_lengths",
                             "max_seq_lens",
                         ]
+                        if use_rollout_sampling_mask:
+                            forward_only_keys.extend(["rollout_sampling_mask_ids", "rollout_sampling_mask_offsets"])
                         batch = get_batch(
                             data_iterator,
                             forward_only_keys,
@@ -375,6 +380,9 @@ class FSDPTrainRayActor(TrainRayActor):
                             self.args.qkv_format,
                             get_position_ids=True,
                         )
+                        sampling_mask_ids = sampling_mask_offsets = None
+                        if use_rollout_sampling_mask:
+                            sampling_mask_ids, sampling_mask_offsets = get_rollout_sampling_mask(batch)
 
                         model_args = self._get_model_inputs_args(batch)
                         # keep logits in native bf16 (chunks upcast to fp32 downstream); avoids a full-vocab fp32 tensor (~5GB)
@@ -389,6 +397,8 @@ class FSDPTrainRayActor(TrainRayActor):
                             response_lengths=batch["response_lengths"],
                             with_entropy=(store_prefix == ""),
                             max_seq_lens=batch.get("max_seq_lens", None),
+                            rollout_sampling_mask_ids=sampling_mask_ids,
+                            rollout_sampling_mask_offsets=sampling_mask_offsets,
                         )
 
                         batch_result = {
@@ -494,6 +504,8 @@ class FSDPTrainRayActor(TrainRayActor):
                             "returns",
                             "ref_log_probs",
                             "rollout_log_probs",
+                            "rollout_sampling_mask_ids",
+                            "rollout_sampling_mask_offsets",
                         ],
                         self.args.data_pad_size_multiplier,
                         self.args.qkv_format,

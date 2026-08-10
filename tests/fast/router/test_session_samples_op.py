@@ -25,7 +25,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from tests.fast.rollout.session.test_samples import _make_record
 
-from miles.rollout.session.core import SessionCore
+from miles.rollout.session.core import SessionCore, _configure_sampling_replay_request
+from miles.rollout.session.errors import MessageValidationError
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.samples.codec import decode_samples_and_merge_input_sample
 from miles.rollout.session.sessions import setup_session_routes
@@ -71,6 +72,83 @@ def _build_core(use_addition_r3: bool = False) -> SessionCore:
     return SessionCore(
         _UnusedBackend(), registry, _ARGS, _ARGS.session_server_instance_id, use_addition_r3=use_addition_r3
     )
+
+
+def test_sampling_replay_request_preserves_support_filters():
+    request_body = {"top_p": 0.8, "top_k": 32, "custom_params": {"caller_option": "kept"}}
+
+    _configure_sampling_replay_request(
+        request_body,
+        temperature=0.7,
+        top_p=0.95,
+        top_k=8192,
+    )
+
+    assert request_body == {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 32,
+        "custom_params": {
+            "caller_option": "kept",
+            "miles_return_sampling_mask": True,
+        },
+    }
+
+
+def test_sampling_replay_request_injects_default_support_filters():
+    request_body = {}
+
+    _configure_sampling_replay_request(
+        request_body,
+        temperature=0.7,
+        top_p=0.95,
+        top_k=8192,
+    )
+
+    assert request_body["top_p"] == 0.95
+    assert request_body["top_k"] == 8192
+
+
+def test_sampling_replay_request_rejects_mismatched_temperature():
+    with pytest.raises(MessageValidationError, match="temperature"):
+        _configure_sampling_replay_request(
+            {"temperature": 0.8},
+            temperature=0.7,
+            top_p=0.95,
+            top_k=8192,
+        )
+
+
+def test_sampling_replay_request_rejects_non_object_custom_params():
+    with pytest.raises(MessageValidationError, match="custom_params must be an object"):
+        _configure_sampling_replay_request(
+            {"custom_params": "not-an-object"},
+            temperature=1.0,
+            top_p=0.95,
+            top_k=8192,
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("frequency_penalty", 0.1),
+        ("presence_penalty", 0.1),
+        ("repetition_penalty", 1.1),
+        ("logit_bias", {"7": 1.0}),
+        ("custom_logit_processor", "serialized-processor"),
+    ],
+)
+def test_sampling_replay_request_rejects_logits_the_trainer_cannot_replay(key, value):
+    request_body = {key: value}
+
+    with pytest.raises(MessageValidationError, match=key):
+        _configure_sampling_replay_request(
+            request_body,
+            temperature=1.0,
+            top_p=0.95,
+            top_k=8192,
+        )
 
 
 @pytest.fixture(scope="module")

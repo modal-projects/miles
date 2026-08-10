@@ -17,6 +17,7 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
     get_routed_experts_from_response,
 )
 from miles.rollout.generate_utils.sample_utils import merge_samples_with_terminal_index
+from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
 from miles.utils.types import Sample
@@ -103,6 +104,7 @@ def _compute_sample_from_openai_record(
     args: Namespace, record: SessionRecord, tokenizer, trim_count: int = 0, *, use_addition_r3: bool = False
 ) -> Sample:
     choice = record.response["choices"][0]
+    finish_reason = choice.get("finish_reason")
 
     prompt_token_ids = record.request.get("input_ids")
     if prompt_token_ids is None:
@@ -112,6 +114,24 @@ def _compute_sample_from_openai_record(
     output_log_probs = [item[0] for item in choice["meta_info"]["output_token_logprobs"]]
 
     sample = Sample()
+    # Production session records intentionally compact the request down to an
+    # empty dict unless trajectory debugging is enabled.  The configured
+    # rollout contract is therefore authoritative; the request flag remains a
+    # compatibility path for older/debug records and focused tests.
+    if getattr(args, "rollout_top_p", 1.0) < 1.0 or record.request.get("return_sampling_mask", False):
+        has_sampling_metadata = (
+            choice["meta_info"].get("output_token_sampling_mask") is not None
+            and choice["meta_info"].get("output_token_sampling_logprobs") is not None
+        )
+        # SGLang aborts are infrastructure outcomes, not samples from the
+        # configured top-p distribution. In particular, a request cancelled
+        # before scheduler dispatch has no sampled-token support to return.
+        # Keep the trajectory explicitly ABORTED and let the rollout buffer
+        # discard it; successful and policy-truncated generations remain
+        # strict because training either without their exact behavior policy
+        # would be incorrect.
+        if finish_reason != "abort" or has_sampling_metadata:
+            output_log_probs = append_sampling_metadata(sample, output_token_ids, choice["meta_info"])
     sample.tokens = prompt_token_ids + output_token_ids
     sample.rollout_log_probs = output_log_probs
     sample.response = tokenizer.decode(output_token_ids)
@@ -126,7 +146,7 @@ def _compute_sample_from_openai_record(
         sample.strip_last_output_tokens(trim_count, tokenizer)
 
     # TODO unify with Sample.update_from_meta_info
-    match choice["finish_reason"]:
+    match finish_reason:
         case "stop" | "tool_calls":
             sample.status = Sample.Status.COMPLETED
         case "length":
