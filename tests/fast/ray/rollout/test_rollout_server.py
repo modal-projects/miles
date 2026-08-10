@@ -10,10 +10,20 @@ from miles.ray.rollout.rollout_server import (
     _compute_megatron_num_gpus,
     _compute_rollout_offset,
     _resolve_sglang_config,
+    start_rollout_servers,
 )
 
 
 class TestRolloutServerPureFunctions:
+    def test_opaque_endpoint_launches_no_local_engines(self):
+        servers = start_rollout_servers(
+            make_args(rollout_endpoint_url="https://rollout.example"),
+            pg=None,
+        )
+
+        assert list(servers) == ["default"]
+        assert servers["default"].engines == []
+
     def test_resolve_sglang_config_yaml_gpu_mismatch_asserts(self, tmp_path):
         cfg_path = tmp_path / "cfg.yaml"
         cfg_path.write_text(

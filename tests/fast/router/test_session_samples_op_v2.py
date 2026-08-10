@@ -169,6 +169,38 @@ async def _collect_via_op(core, sid, *, max_seq_len=None, agent_metadata=None):
     return response.status_code, response.body
 
 
+async def test_chat_proxy_preserves_session_context(core):
+    class RejectingBackend:
+        request = None
+
+        async def do_proxy(self, request, *args, **kwargs):
+            self.request = request
+            return {
+                "status_code": 503,
+                "response_body": b'{"error":"busy"}',
+                "headers": {"content-type": "application/json"},
+            }
+
+    backend = RejectingBackend()
+    original_backend = core.backend
+    core.backend = backend
+    try:
+        response = await core.create_session()
+        session_id = json.loads(response.body)["session_id"]
+        response = await core.chat_completions(
+            session_id,
+            method="POST",
+            query="",
+            headers={},
+            body=b'{"messages":[{"role":"user","content":"hi"}]}',
+        )
+    finally:
+        core.backend = original_backend
+
+    assert response.status_code == 503
+    assert backend.request.session_id == session_id
+
+
 def _new_pipeline(payload, input_sample):
     """What the driver does with the reply: decode only — per-sample metadata
     and rewards arrive already applied by the server-side post-process."""
