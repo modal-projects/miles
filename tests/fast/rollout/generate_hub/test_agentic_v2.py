@@ -19,8 +19,10 @@ class _Tracer:
         self.reply = reply
         self.error = error
         self.agent_metadata = None
+        self.collect_count = 0
 
     async def collect_samples(self, input_sample, *, max_seq_len, agent_metadata=None):
+        self.collect_count += 1
         self.agent_metadata = agent_metadata
         if self.error is not None:
             raise self.error
@@ -128,3 +130,24 @@ async def test_collection_error_propagates(monkeypatch):
 
     with pytest.raises(RuntimeError, match="samples unavailable"):
         await agentic_tool_call.generate(_generate_input())
+
+
+@pytest.mark.asyncio
+async def test_agent_error_retires_session_without_returning_partial_samples(monkeypatch):
+    sample = Sample(status=Sample.Status.COMPLETED, response="partial", response_length=1, tokens=[1])
+    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
+
+    async def failing_agent(**kwargs):
+        raise RuntimeError("deterministic request failure")
+
+    _patch_agent(monkeypatch, tracer)
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: failing_agent)
+
+    output = await agentic_tool_call.generate(_generate_input())
+
+    assert tracer.collect_count == 1
+    assert isinstance(output.samples, list)
+    assert len(output.samples) == 1
+    assert output.samples[0] is not sample
+    assert output.samples[0].status == Sample.Status.ABORTED
+    assert output.samples[0].response != "partial"

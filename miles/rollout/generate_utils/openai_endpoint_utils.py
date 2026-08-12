@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from argparse import Namespace
+from urllib.parse import urlparse
 
 import httpx
 
@@ -26,6 +27,21 @@ _PENDING_DELETES: set[asyncio.Task] = set()
 _SESSION_SERVER_ROUND_ROBIN = itertools.count()
 
 
+class SessionInfrastructureError(RuntimeError):
+    """A session request failed for a reason local to the serving infrastructure."""
+
+
+def _is_transient_session_status(url: str, status_code: int) -> bool:
+    if status_code in {408, 425, 429, 499} or status_code >= 500:
+        return True
+
+    # A missing existing session normally means its owning server restarted.
+    # A missing /sessions creation endpoint is a deterministic deployment or
+    # protocol mismatch and must remain visible to the caller.
+    path_parts = [part for part in urlparse(url).path.split("/") if part]
+    return status_code == 404 and len(path_parts) >= 2 and path_parts[0] == "sessions"
+
+
 def _new_session_client() -> httpx.AsyncClient:
     """Create a session-control client whose socket cannot leak into a pool."""
     return httpx.AsyncClient(
@@ -43,13 +59,20 @@ async def _request_bytes(
     timeout: float,
 ) -> bytes:
     """Run one bounded control request and always close its response stream."""
-    async with asyncio.timeout(timeout):
-        async with client.stream(method, url, json=payload) as response:
-            content = await response.aread()
-            if not response.is_success:
-                detail = content.decode(errors="replace")[:1000]
-                raise RuntimeError(f"{method} {url} failed with {response.status_code}: {detail}")
-            return content
+    try:
+        async with asyncio.timeout(timeout):
+            async with client.stream(method, url, json=payload) as response:
+                content = await response.aread()
+    except (TimeoutError, httpx.TransportError) as error:
+        raise SessionInfrastructureError(f"{method} {url} failed: {error!r}") from error
+
+    if not response.is_success:
+        detail = content.decode(errors="replace")[:1000]
+        message = f"{method} {url} failed with {response.status_code}: {detail}"
+        if _is_transient_session_status(url, response.status_code):
+            raise SessionInfrastructureError(message)
+        raise RuntimeError(message)
+    return content
 
 
 class OpenAIEndpointTracer:

@@ -1,17 +1,18 @@
 import asyncio
 import logging
 import re
+from concurrent.futures import CancelledError as FutureCancelledError
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from itertools import groupby
 
-import httpx
 import numpy as np
 import pybase64
 import pytest
 from tests.ci.ci_register import register_cpu_ci
 from tests.fast.fixtures.generation_fixtures import GenerateEnv, generation_env, listify, make_sample, run_generate
 
+from miles.rollout.generate_utils.openai_endpoint_utils import SessionInfrastructureError
 from miles.utils.chat_template_utils import TITOTokenizerType, get_tito_tokenizer
 from miles.utils.processing_utils import load_tokenizer
 from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
@@ -684,11 +685,11 @@ class TestAgentCollectionFailure:
     @pytest.mark.parametrize(
         "collect_error",
         [
-            pytest.param(asyncio.TimeoutError(), id="timeout"),
+            pytest.param(SessionInfrastructureError("request timed out"), id="timeout"),
             # A broken connection to the session server is one sample's problem: in-place
             # weight updates pause generation under in-flight requests, so letting it
             # propagate takes the whole run down over a routine event.
-            pytest.param(httpx.ReadError("connection closed"), id="transport"),
+            pytest.param(SessionInfrastructureError("connection closed"), id="transport"),
         ],
     )
     def test_collect_transient_failure_aborts_sample_but_other_errors_propagate(
@@ -712,6 +713,54 @@ class TestAgentCollectionFailure:
 
         collect_error = RuntimeError("assembly failed")
         with pytest.raises(RuntimeError, match="assembly failed"):
+            _run_generate(variant, generation_env, make_sample(prompt=TwoTurnStub.PROMPT))
+
+    def test_session_create_failure_aborts_sample(self, variant, generation_env, monkeypatch, caplog):
+        async def fail_create(_args):
+            raise SessionInfrastructureError("request timed out")
+
+        monkeypatch.setattr(
+            "miles.rollout.generate_utils.openai_endpoint_utils.OpenAIEndpointTracer.create",
+            fail_create,
+        )
+        input_sample = make_sample(prompt=TwoTurnStub.PROMPT)
+        with caplog.at_level(logging.WARNING):
+            result = _run_generate(variant, generation_env, input_sample)
+
+        [sample] = listify(result.sample)
+        assert sample.status == Sample.Status.ABORTED
+        assert input_sample.status == Sample.Status.PENDING
+        assert "Failed to create agent session" in caplog.text
+
+    def test_session_create_protocol_failure_is_not_hidden(self, variant, generation_env, monkeypatch):
+        async def fail_create(_args):
+            raise RuntimeError("malformed session response")
+
+        monkeypatch.setattr(
+            "miles.rollout.generate_utils.openai_endpoint_utils.OpenAIEndpointTracer.create",
+            fail_create,
+        )
+
+        with pytest.raises(RuntimeError, match="malformed session response"):
+            _run_generate(variant, generation_env, make_sample(prompt=TwoTurnStub.PROMPT))
+
+    def test_cancellation_does_not_retire_live_session(self, variant, generation_env, monkeypatch):
+        async def cancel_agent(**_kwargs):
+            raise asyncio.CancelledError()
+
+        async def fail_collect(*_args, **_kwargs):
+            pytest.fail("a cancelled agent must not retire its live session")
+
+        monkeypatch.setattr(
+            "miles.rollout.generate_hub.agentic_tool_call.load_function",
+            lambda _path: cancel_agent,
+        )
+        monkeypatch.setattr(
+            "miles.rollout.generate_utils.openai_endpoint_utils.OpenAIEndpointTracer.collect_samples",
+            fail_collect,
+        )
+
+        with pytest.raises(FutureCancelledError):
             _run_generate(variant, generation_env, make_sample(prompt=TwoTurnStub.PROMPT))
 
 

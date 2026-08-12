@@ -4,11 +4,15 @@ import asyncio
 from collections import Counter
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import miles.utils.http_utils as http_utils
 from miles.rollout.generate_utils import openai_endpoint_utils
-from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
+from miles.rollout.generate_utils.openai_endpoint_utils import (
+    OpenAIEndpointTracer,
+    SessionInfrastructureError,
+)
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, COMPUTED_FIELDS_V2, encode_samples
 from miles.utils.http_utils import post_bytes_no_retry
 from miles.utils.types import Sample
@@ -25,6 +29,66 @@ class _SessionClient:
 
     async def aclose(self):
         self.is_closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [408, 429, 500, 503])
+async def test_request_bytes_classifies_transient_status_as_infrastructure(status_code):
+    transport = httpx.MockTransport(lambda _request: httpx.Response(status_code, content=b"unavailable"))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(SessionInfrastructureError, match=str(status_code)):
+            await openai_endpoint_utils._request_bytes(
+                client,
+                "POST",
+                "http://session-server/sessions/sid/samples",
+                payload={},
+                timeout=1,
+            )
+
+
+@pytest.mark.asyncio
+async def test_request_bytes_classifies_lost_existing_session_as_infrastructure():
+    transport = httpx.MockTransport(lambda _request: httpx.Response(404, content=b"missing"))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(SessionInfrastructureError, match="404"):
+            await openai_endpoint_utils._request_bytes(
+                client,
+                "POST",
+                "http://session-server/sessions/sid/samples",
+                payload={},
+                timeout=1,
+            )
+
+
+@pytest.mark.asyncio
+async def test_request_bytes_does_not_hide_protocol_failure():
+    transport = httpx.MockTransport(lambda _request: httpx.Response(422, content=b"bad sample cursor"))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(RuntimeError, match="422.*bad sample cursor"):
+            await openai_endpoint_utils._request_bytes(
+                client,
+                "POST",
+                "http://session-server/sessions/sid/samples",
+                payload={},
+                timeout=1,
+            )
+
+
+@pytest.mark.asyncio
+async def test_request_bytes_wraps_transport_failure():
+    def fail(_request):
+        raise httpx.ReadError("connection closed")
+
+    transport = httpx.MockTransport(fail)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(SessionInfrastructureError, match="connection closed"):
+            await openai_endpoint_utils._request_bytes(
+                client,
+                "POST",
+                "http://session-server/sessions/sid/samples",
+                payload={},
+                timeout=1,
+            )
 
 
 @pytest.mark.asyncio
