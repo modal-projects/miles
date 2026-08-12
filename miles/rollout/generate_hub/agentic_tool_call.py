@@ -31,6 +31,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
 
+import httpx
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
@@ -47,7 +48,13 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         "Pass --use-session-server to start the session server."
     )
     use_v2 = getattr(input.args, "use_session_server", None) == "v2"
-    tracer = await OpenAIEndpointTracer.create(input.args)
+    try:
+        tracer = await OpenAIEndpointTracer.create(input.args)
+    except (TimeoutError, httpx.TransportError) as error:
+        logger.warning("Failed to create agent session: %s", error, exc_info=True)
+        sample = deepcopy(input.sample)
+        sample.status = Sample.Status.ABORTED
+        return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
     custom_agent_function: Callable = load_function(input.args.custom_agent_function_path)
     assert (
@@ -82,22 +89,23 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     except Exception as e:
         logger.warning(f"{log_prefix} Agent function failed: {e}", exc_info=True)
 
-    finally:
-        # Collect even if the agent failed.
-        logger.debug(f"{log_prefix} Calling collect_samples...")
-        collect_kwargs = {"max_seq_len": max_seq_len}
-        if use_v2:
-            collect_kwargs["agent_metadata"] = agent_metadata
-        try:
-            result = await tracer.collect_samples(input.sample, **collect_kwargs)
-        except asyncio.TimeoutError:
-            collect_timed_out = True
-            logger.warning(f"{log_prefix} Timed out collecting samples", exc_info=True)
-        else:
-            logger.debug(
-                f"{log_prefix} collect_samples done: {len(result.samples)} samples, "
-                f"total_time={time.monotonic()-t_start:.1f}s"
-            )
+    # Collect after the agent finishes or fails. Cancellation is different: the
+    # caller may have stopped waiting while a shielded remote agent still uses
+    # this session, so retiring it here would break that in-flight episode.
+    logger.debug(f"{log_prefix} Calling collect_samples...")
+    collect_kwargs = {"max_seq_len": max_seq_len}
+    if use_v2:
+        collect_kwargs["agent_metadata"] = agent_metadata
+    try:
+        result = await tracer.collect_samples(input.sample, **collect_kwargs)
+    except asyncio.TimeoutError:
+        collect_timed_out = True
+        logger.warning(f"{log_prefix} Timed out collecting samples", exc_info=True)
+    else:
+        logger.debug(
+            f"{log_prefix} collect_samples done: {len(result.samples)} samples, "
+            f"total_time={time.monotonic()-t_start:.1f}s"
+        )
 
     if collect_timed_out:
         sample = deepcopy(input.sample)
