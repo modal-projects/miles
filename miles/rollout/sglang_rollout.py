@@ -37,9 +37,12 @@ from miles.utils.types import Sample
 from .generate_utils.generate_endpoint_utils import (
     compute_routing_headers,
     get_indexer_topk_from_response,
+    get_rollout_concurrency,
+    get_rollout_endpoint_url,
     policy_uses_routing_key,
 )
 from .generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
+from .generate_utils.rollout_request import RolloutRequestContext, prepare_rollout_request
 from .generate_utils.sampling_mask import append_sampling_metadata, should_return_sampling_mask
 from .rm_hub import async_rm, batched_async_rm
 
@@ -105,6 +108,8 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
     Falls back to the default router if *model_name* is not found or
     ``sglang_model_routers`` is not set.
     """
+    if getattr(args, "rollout_endpoint_url", None):
+        return get_rollout_endpoint_url(args, endpoint)
     routers = getattr(args, "sglang_model_routers", None)
     if routers and model_name in routers:
         ip, port = routers[model_name]
@@ -125,9 +130,7 @@ class GenerateState(metaclass=SingletonMeta):
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-        )
+        self.semaphore = asyncio.Semaphore(get_rollout_concurrency(args))
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,
@@ -189,7 +192,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = get_model_url(args, "default", "/generate")
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -272,7 +275,25 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     headers = compute_routing_headers(args, sample)
 
-    output = await post(url, payload, headers=headers)
+    if getattr(args, "custom_rollout_request_hook_path", None):
+        group_index = getattr(sample, "group_index", None)
+        session_id = f"group-{group_index}" if group_index is not None else (sample.routing_key or sample.session_id)
+        request = await prepare_rollout_request(
+            args,
+            RolloutRequestContext(session_id=session_id),
+            url=url,
+            payload=payload,
+            headers=headers,
+        )
+        output = await post(
+            request["url"],
+            request["payload"],
+            headers=request["headers"],
+            max_retries=request["max_retries"],
+            retry_sleep=request["retry_sleep"],
+        )
+    else:
+        output = await post(url, payload, headers=headers)
     if getattr(args, "use_opd", False) and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":
         output_top_logprobs = output.get("meta_info", {}).get("output_top_logprobs")
         if output_top_logprobs is not None:
@@ -446,20 +467,29 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     assert not state.aborted
     state.aborted = True
 
-    if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_miles_router:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
-        urls = response["urls"]
+    if getattr(args, "rollout_endpoint_url", None):
+        if not args.partial_rollout:
+            # The external fleet is opaque. Cancelling its client requests makes
+            # the rollout service abort the corresponding engine requests.
+            for task in state.pendings:
+                task.cancel()
+            await asyncio.gather(*state.pendings, return_exceptions=True)
+            state.pendings.clear()
     else:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
-        urls = [worker["url"] for worker in response["workers"]]
-    urls = router_worker_base_urls(urls)
+        if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_miles_router:
+            response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
+            urls = response["urls"]
+        else:
+            response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
+            urls = [worker["url"] for worker in response["workers"]]
+        urls = router_worker_base_urls(urls)
 
-    logger.info(f"Abort request for {urls}")
-    abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
-    abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
-    for url, result in zip(urls, abort_results, strict=False):
-        if isinstance(result, Exception):
-            logger.warning(f"Failed to abort worker at {url}: {result}")
+        logger.info(f"Abort request for {urls}")
+        abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
+        abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
+        for url, result in zip(urls, abort_results, strict=False):
+            if isinstance(result, Exception):
+                logger.warning(f"Failed to abort worker at {url}: {result}")
 
     # Let the agent integration tear down its in-flight trials so they stop hitting
     # SGLang, instead of running on until their own max_seq_len / timeout.

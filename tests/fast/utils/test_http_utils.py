@@ -25,11 +25,29 @@ import multiprocessing
 import socket
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
+from miles.utils import http_utils
 from miles.utils.http_utils import wait_for_server_ready
+
+
+@pytest.mark.asyncio
+async def test_post_uses_configured_retry_sleep(monkeypatch) -> None:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"ok": True}
+    client = AsyncMock()
+    client.post.side_effect = [httpx.ConnectError("unavailable"), response]
+    monkeypatch.setattr(http_utils, "_http_client", client)
+    monkeypatch.setattr(http_utils, "_distributed_post_enabled", False)
+
+    with patch("miles.utils.http_utils.asyncio.sleep", new=AsyncMock()) as sleep:
+        assert await http_utils.post("https://rollout.example/generate", {}, retry_sleep=0.25) == {"ok": True}
+
+    sleep.assert_awaited_once_with(0.25)
 
 
 def _find_free_port() -> int:
