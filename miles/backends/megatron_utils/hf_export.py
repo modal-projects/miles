@@ -135,8 +135,10 @@ def save_hf_model(
         if should_log:
             logger.info(f"Saving model in HuggingFace format to {path}")
 
-        if args.megatron_to_hf_mode == "raw" and not is_lora_model(model):
-            # LoRA keeps the bridge (adapter merging).
+        if not is_lora_model(model):
+            # Full-model export uses the same conversion path as weight sync. The
+            # checkpoint loading mode is independent: a model loaded through
+            # Megatron Bridge can still require Miles' converter for export.
             hf_config = load_hf_config(args.hf_checkpoint)
             export_hf_model_direct(
                 args,
