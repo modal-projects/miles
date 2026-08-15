@@ -2795,10 +2795,11 @@ def miles_validate_args(args):
                 "--rollout-top-p < 1 cannot be combined with --recompute-logprobs-via-prefill; "
                 "prefill scoring does not preserve the rollout sampling support"
             )
-        if getattr(args, "sglang_speculative_algorithm", None):
+        speculative_algorithm = getattr(args, "sglang_speculative_algorithm", None)
+        if speculative_algorithm and speculative_algorithm.upper() != "DFLASH":
             raise ValueError(
                 "--rollout-top-p < 1 exact sampling-mask replay cannot be combined with speculative decoding; "
-                "current SGLang workers do not return one aligned sampling support per accepted token"
+                "only DFLASH returns one aligned sampling support per accepted token"
             )
         if args.sglang_disaggregation_sampling_mask_max_tokens <= 0:
             raise ValueError("--sglang-disaggregation-sampling-mask-max-tokens must be positive with top-p masking")
