@@ -4,6 +4,44 @@ import pytest
 import requests
 
 
+def test_wait_server_healthy_bounds_each_request(monkeypatch):
+    pytest.importorskip("sglang")
+    from miles.backends.sglang_utils import sglang_engine
+
+    calls = []
+    outcomes = [requests.Timeout(), 200, 200]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, url, *, headers, timeout):
+            calls.append((url, timeout))
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return type("Response", (), {"status_code": outcome})()
+
+    monkeypatch.setattr(sglang_engine.requests, "Session", FakeSession)
+    monkeypatch.setattr(sglang_engine.time, "sleep", lambda _seconds: None)
+
+    sglang_engine._wait_server_healthy(
+        base_url="http://engine",
+        api_key=None,
+        is_process_alive=lambda: True,
+        request_timeout_seconds=7,
+    )
+
+    assert calls == [
+        ("http://engine/health_generate", 7),
+        ("http://engine/health_generate", 7),
+        ("http://engine/flush_cache", 7),
+    ]
+
+
 def test_flush_cache_sleeps_between_pending_request_retries(monkeypatch):
     """Regression test for the fully_async weight-update crash: sglang
     returns 400 (not an exception) while requests are still pending, so the
