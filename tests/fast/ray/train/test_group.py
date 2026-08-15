@@ -1068,3 +1068,18 @@ class TestMaybeLogInferenceEngineWeightChecksums:
         mock_logger.log.assert_called_once()
         logged = mock_logger.log.call_args.args[1]
         assert logged == dict(rollout_id=3, engine_checksums=[{"rank0/w": "e0"}, {"rank0/w": "e1"}])
+
+
+async def test_update_weights_resumes_health_monitor_after_failure():
+    rollout_mgr = MagicMock()
+    rollout_mgr.get_updatable_engines_and_lock.remote = AsyncMock(return_value={"engine": "info"})
+    rollout_mgr.health_monitoring_pause.remote = AsyncMock()
+    rollout_mgr.health_monitoring_resume.remote = AsyncMock()
+    group = _make_group(num_cells=1, rollout_manager=rollout_mgr)
+    group._execute_first_alive = AsyncMock(side_effect=RuntimeError("weight sync failed"))
+
+    with pytest.raises(RuntimeError, match="weight sync failed"):
+        await group.update_weights(rollout_id=3)
+
+    rollout_mgr.health_monitoring_pause.remote.assert_awaited_once_with()
+    rollout_mgr.health_monitoring_resume.remote.assert_awaited_once_with()

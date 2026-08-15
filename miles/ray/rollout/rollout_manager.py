@@ -393,6 +393,9 @@ class RolloutManager:
         for monitor in self._health_monitors:
             monitor.pause()
 
+    def health_monitoring_resume(self) -> None:
+        self._health_monitoring_resume()
+
     def _health_monitoring_resume(self) -> None:
         for monitor in self._health_monitors:
             monitor.resume()

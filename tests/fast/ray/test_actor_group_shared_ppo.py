@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+
 class _RemoteTrain:
     def __init__(self, rank, calls):
         self.rank = rank
@@ -59,3 +63,23 @@ async def test_train_rejects_wrong_number_of_rank_payloads():
 
     with pytest.raises(ValueError, match="one payload per train worker"):
         await group.train(5, {"data_ref": "rollout"}, external_data=[{"values": []}])
+
+
+async def test_update_weights_resumes_health_monitor_after_failure():
+    import pytest
+
+    from miles.ray.actor_group import RayTrainGroup
+
+    group = object.__new__(RayTrainGroup)
+    group.args = SimpleNamespace(debug_train_only=False, debug_rollout_only=False, use_fault_tolerance=False)
+    group.rollout_manager = MagicMock()
+    group.rollout_manager.get_updatable_engines_and_lock.remote = AsyncMock(return_value={"engine": "info"})
+    group.rollout_manager.health_monitoring_pause.remote = AsyncMock()
+    group.rollout_manager.health_monitoring_resume.remote = AsyncMock()
+    group._broadcast = AsyncMock(side_effect=RuntimeError("weight sync failed"))
+
+    with pytest.raises(RuntimeError, match="weight sync failed"):
+        await group.update_weights(rollout_id=3)
+
+    group.rollout_manager.health_monitoring_pause.remote.assert_awaited_once_with()
+    group.rollout_manager.health_monitoring_resume.remote.assert_awaited_once_with()
