@@ -2,6 +2,7 @@ from tests.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=60, suite="stage-a-cpu", labels=[])
 
+import pytest
 import torch
 
 from miles.utils.replay_base import BaseReplayManager
@@ -51,3 +52,27 @@ def test_get_topk_fn_preserves_partial_padding():
     topk_fn = manager.get_topk_fn(_topk, return_probs=False)
 
     torch.testing.assert_close(topk_fn(scores, 3), replayed_top_indices)
+
+
+def test_registration_budget_excludes_auxiliary_modules():
+    manager = BaseReplayManager()
+    manager.enabled = True
+    decoder_modules = [torch.nn.Identity(), torch.nn.Identity()]
+    auxiliary_module = torch.nn.Identity()
+
+    with manager.registration_budget(len(decoder_modules)):
+        for module in [*decoder_modules, auxiliary_module]:
+            manager.register_to_module(module, "routing_replay")
+
+    assert len(manager.replays) == len(decoder_modules)
+    assert all(hasattr(module, "routing_replay") for module in decoder_modules)
+    assert not hasattr(auxiliary_module, "routing_replay")
+
+
+def test_registration_budget_rejects_missing_decoder_registration():
+    manager = BaseReplayManager()
+    manager.enabled = True
+
+    with pytest.raises(RuntimeError, match="Expected 2 replay registrations, got 1"):
+        with manager.registration_budget(2):
+            manager.register_to_module(torch.nn.Identity(), "routing_replay")

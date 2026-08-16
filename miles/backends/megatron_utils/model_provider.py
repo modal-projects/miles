@@ -17,6 +17,7 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
+from miles.backends.megatron_utils.replay_utils import get_moe_layer_indices
 from miles.utils.audit_utils.witness.module import install_witness
 from miles.utils.misc import load_function
 from miles.utils.replay_base import routing_replay_manager
@@ -303,21 +304,15 @@ def get_model_provider_func(
             if vp_stage is not None:
                 mtp_kwargs["vp_stage"] = vp_stage
 
-            # hard code here to skip r3 registration for mtp layers
-            # getattr is required to avoid ckpt conversion errors
-            if getattr(args, "use_rollout_routing_replay", False):
-                prev_routing_replay_enabled = routing_replay_manager.enabled
-                routing_replay_manager.enabled = False
-                logger.warning(
-                    "Rollout routing replay is not applicable for MTP modules, so skipped replay registration"
-                )
             mtp_block_spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, **mtp_kwargs)
             kwargs["mtp_block_spec"] = mtp_block_spec
-            if getattr(args, "use_rollout_routing_replay", False):
-                # restore instead of forcing True: the critic role keeps the manager disabled
-                routing_replay_manager.enabled = prev_routing_replay_enabled
 
-        with build_model_context(**build_model_context_args):
+        routing_replay_context = nullcontext()
+        if routing_replay_manager.enabled:
+            decoder_replay_count = len(get_moe_layer_indices(config, vp_stage=vp_stage))
+            routing_replay_context = routing_replay_manager.registration_budget(decoder_replay_count)
+
+        with build_model_context(**build_model_context_args), routing_replay_context:
             model = GPTModel(**kwargs)
 
         if post_process and role == "critic":

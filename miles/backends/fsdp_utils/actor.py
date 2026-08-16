@@ -463,8 +463,9 @@ class FSDPTrainRayActor(TrainRayActor):
             self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"), ExitStack() as stack:
-            rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref, witness_info=None)
-            stack.enter_context(store_get_result)
+            rollout_data, store_get_results = get_rollout_data(self.args, rollout_data_ref, witness_info=None)
+            for store_get_result in store_get_results:
+                stack.enter_context(store_get_result)
             if self.args.debug_rollout_only:
                 return
             self._train_core(rollout_id=rollout_id, rollout_data=rollout_data)

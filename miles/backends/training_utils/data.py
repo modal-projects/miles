@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from miles.utils import object_store
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.data import get_minimum_num_micro_batch_size
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
@@ -33,10 +34,26 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
 
 def get_rollout_data(
     args: Namespace,
-    rollout_data_ref: Box,
+    rollout_data_ref: Box | dict[str, list[Box]],
     witness_info: WitnessInfo | None = None,
-) -> tuple[RolloutBatch, ObjectStoreGetResult]:
+    routing_replay_rank: int | None = None,
+) -> tuple[RolloutBatch, list[ObjectStoreGetResult]]:
     parallel_state = get_parallel_state()
+    routing_replay_ref = None
+    if isinstance(rollout_data_ref, dict):
+        dp_refs = rollout_data_ref.get("dp")
+        routing_refs = rollout_data_ref.get("routing")
+        if not isinstance(dp_refs, list) or not isinstance(routing_refs, list):
+            raise ValueError("PP-local rollout data refs must contain 'dp' and 'routing' lists")
+        rollout_data_ref = dp_refs
+        if routing_replay_rank is not None:
+            if routing_replay_rank >= len(routing_refs):
+                raise ValueError(
+                    f"PP-local routing refs contain {len(routing_refs)} trainer ranks, "
+                    f"but local rank is {routing_replay_rank}"
+                )
+            routing_replay_ref = routing_refs[routing_replay_rank]
+
     # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
     # Both first pp stage and the last pp stage will receive the data.
     rollout_data, store_get_result = process_rollout_data(
@@ -46,6 +63,15 @@ def get_rollout_data(
         parallel_state.effective_dp.size,
         witness_info=witness_info,
     )
+    store_get_results = [store_get_result]
+    if routing_replay_ref is not None:
+        routing_get_result = object_store.get_instance().get(routing_replay_ref)
+        routing_data = dict(routing_get_result.value)
+        duplicate_keys = rollout_data.keys() & routing_data.keys()
+        if duplicate_keys:
+            raise ValueError(f"Routing replay shard duplicates rollout fields: {sorted(duplicate_keys)}")
+        rollout_data.update(routing_data)
+        store_get_results.append(routing_get_result)
     # move tokens to GPU in advance
     rollout_data["tokens"] = [
         torch.tensor(t, dtype=torch.long, device=torch.cuda.current_device()) for t in rollout_data["tokens"]
@@ -120,7 +146,7 @@ def get_rollout_data(
         ]
     if "rollout_indexer_topk" in rollout_data:
         rollout_data["rollout_indexer_topk"] = [torch.from_numpy(r) for r in rollout_data["rollout_indexer_topk"]]
-    return rollout_data, store_get_result
+    return rollout_data, store_get_results
 
 
 def get_batch(

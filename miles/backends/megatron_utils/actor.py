@@ -56,7 +56,7 @@ from .initialize import init, is_first_replica_megatron_main_rank
 from .lora_utils import is_lora_enabled, lora_rollout_enabled
 from .model import TrainStepOutcome, forward_only, initialize_model_and_optimizer, save, train
 from .parallel import verify_megatron_parallel_state
-from .replay_utils import register_replay_list_moe
+from .replay_utils import get_local_moe_layer_indices, register_replay_list_moe
 from .update_weight.common import named_params_and_buffers
 from .update_weight.update_weight_from_distributed.broadcast import UpdateWeightFromDistributed
 from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
@@ -207,6 +207,21 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
 
         verify_megatron_parallel_state(self.model)
+
+        if (
+            role == "actor"
+            and args.use_rollout_routing_replay
+            and not args.indep_dp
+            and parallel_state.pp.size > 1
+        ):
+            local_routing_spec = {
+                "rank": dist.get_rank(),
+                "dp_rank": parallel_state.intra_dp.rank,
+                "layer_indices": get_local_moe_layer_indices(self.model),
+            }
+            routing_specs = [None] * dist.get_world_size()
+            dist.all_gather_object(routing_specs, local_routing_spec, group=get_gloo_group())
+            self.train_parallel_config["routing_replay_specs"] = routing_specs
 
         start_rollout_id = loaded_rollout_id + 1
         self._asleep = False
@@ -402,10 +417,14 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with ExitStack() as stack:
             with timer("data_preprocess"):
-                rollout_data, store_get_result = get_rollout_data(
-                    self.args, rollout_data_ref, witness_info=witness_info
+                rollout_data, store_get_results = get_rollout_data(
+                    self.args,
+                    rollout_data_ref,
+                    witness_info=witness_info,
+                    routing_replay_rank=dist.get_rank() if self.role == "actor" else None,
                 )
-                stack.enter_context(store_get_result)
+                for store_get_result in store_get_results:
+                    stack.enter_context(store_get_result)
                 if self.args.debug_rollout_only:
                     log_rollout_data(rollout_id, self.args, rollout_data)
                     return TrainStepOutcome.NORMAL
@@ -496,6 +515,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     register_replay_list_func=m.register_replay_list_func,
                     if_sp_region=m.if_sp_region,
                     indices_are_token_positions=m.replay_indices_are_token_positions,
+                    stream_indices_key=m.stream_indices_key,
                 )
 
         with inverse_timer("train_wait"), timer("train"):

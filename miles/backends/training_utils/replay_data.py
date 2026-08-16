@@ -39,6 +39,7 @@ def fill_replay_data(
     register_replay_list_func: RegisterReplayListFunc,
     if_sp_region=True,
     indices_are_token_positions=False,
+    stream_indices_key: str | None = None,
 ):
     """Load rollout replay tensors into module replay queues.
 
@@ -51,6 +52,7 @@ def fill_replay_data(
     """
     if data_key not in rollout_data:
         raise ValueError(f"{data_key} is required in rollout_data for replay.")
+    global_stream_indices = rollout_data.pop(stream_indices_key, None) if stream_indices_key is not None else None
 
     for iterator in data_iterator:
         iterator.reset()
@@ -126,7 +128,12 @@ def fill_replay_data(
             start, end = seqlen // tp_size * tp_rank, seqlen // tp_size * (tp_rank + 1)
             replay_data = replay_data[start:end]
 
-        register_replay_list_func(replay_list, replay_data, models=models)
+        register_replay_list_func(
+            replay_list,
+            replay_data,
+            models=models,
+            global_layer_indices=global_stream_indices,
+        )
 
     del rollout_data[data_key]
 

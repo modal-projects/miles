@@ -77,7 +77,7 @@ def test_critic_train_wakes_and_leaves_offload_to_driver(actor_module, monkeypat
     worker = _worker(actor_module, "critic")
     worker.train_critic = Mock(return_value={"values": ["cpu-value"]})
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
     phases = []
 
@@ -101,7 +101,7 @@ def test_actor_receives_critic_payload_and_leaves_offload_to_driver(actor_module
     worker = _worker(actor_module, "actor")
     worker.train_actor = Mock(return_value=None)
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
     values = {"values": ["cpu-value"]}
 
@@ -118,7 +118,7 @@ def test_train_keeps_model_resident(actor_module, monkeypatch):
     worker = _worker(actor_module, "actor", asleep=False)
     worker.train_actor = Mock(return_value=None)
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
 
     worker.train(5, object())

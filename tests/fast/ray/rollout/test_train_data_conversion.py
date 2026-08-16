@@ -16,11 +16,13 @@ from miles.ray.rollout.train_data_conversion import (
     can_schedule_on_rollout_side,
     compact_routing_replay_for_transport,
     convert_samples_to_train_data,
+    put_train_data,
     split_train_data_by_dp,
     split_train_data_by_dp_raw,
     split_train_data_by_dp_scheduled_raw,
 )
 from miles.utils import object_store
+from miles.utils.replay_base import ROUTING_REPLAY_LAYER_INDICES_KEY
 from miles.utils.types import Sample
 
 
@@ -806,6 +808,82 @@ class TestSplitTrainDataByDp:
         parts = [ray.get(r.inner) for r in refs]
         all_indices = sorted(i for p in parts for i in p["partition"])
         assert all_indices == list(range(n))
+
+
+class TestPutTrainData:
+    @pytest.fixture(autouse=True)
+    def _init_object_store(self):
+        object_store.init_instance(make_args())
+
+    @staticmethod
+    def _routing_data():
+        routed = [
+            np.arange(24, dtype=np.int32).reshape(2, 6, 2),
+            np.arange(24, 48, dtype=np.int32).reshape(2, 6, 2),
+            np.arange(48, 72, dtype=np.int32).reshape(2, 6, 2),
+            np.arange(72, 96, dtype=np.int32).reshape(2, 6, 2),
+        ]
+        return {
+            "tokens": [[1, 2, 3]] * 4,
+            "response_lengths": [2] * 4,
+            "loss_masks": [[0, 1, 1]] * 4,
+            "rollout_routed_experts": routed,
+        }
+
+    def test_pp_local_routing_uses_dp_and_layer_layout(self):
+        args = make_args(balance_data=False, moe_router_topk=2, num_experts=128)
+        config = {
+            "dp_size": 2,
+            "routing_replay_specs": [
+                {"rank": 0, "dp_rank": 0, "layer_indices": [0, 1, 2]},
+                {"rank": 1, "dp_rank": 0, "layer_indices": [3, 4, 5]},
+                {"rank": 2, "dp_rank": 1, "layer_indices": [0, 1, 2]},
+                {"rank": 3, "dp_rank": 1, "layer_indices": [3, 4, 5]},
+            ],
+        }
+        data = self._routing_data()
+
+        pack = put_train_data(args, data, config)
+
+        assert set(pack["data_ref"]) == {"dp", "routing"}
+        dp_shards = [ray.get(ref.inner) for ref in pack["data_ref"]["dp"]]
+        assert all("rollout_routed_experts" not in shard for shard in dp_shards)
+
+        routing_shards = [ray.get(ref.inner) for ref in pack["data_ref"]["routing"]]
+        np.testing.assert_array_equal(routing_shards[0][ROUTING_REPLAY_LAYER_INDICES_KEY], [0, 1, 2])
+        np.testing.assert_array_equal(routing_shards[1][ROUTING_REPLAY_LAYER_INDICES_KEY], [3, 4, 5])
+        assert routing_shards[0]["rollout_routed_experts"][0].dtype == np.uint8
+        np.testing.assert_array_equal(
+            routing_shards[0]["rollout_routed_experts"][0],
+            data["rollout_routed_experts"][0][:, :3, :],
+        )
+        np.testing.assert_array_equal(
+            routing_shards[2]["rollout_routed_experts"][0],
+            data["rollout_routed_experts"][1][:, :3, :],
+        )
+
+    def test_pp_local_routing_deduplicates_identical_rank_layouts(self):
+        args = make_args(balance_data=False, moe_router_topk=2, num_experts=128)
+        config = {
+            "dp_size": 1,
+            "routing_replay_specs": [
+                {"rank": 0, "dp_rank": 0, "layer_indices": [0, 1, 2]},
+                {"rank": 1, "dp_rank": 0, "layer_indices": [0, 1, 2]},
+            ],
+        }
+
+        pack = put_train_data(args, self._routing_data(), config)
+
+        routing_refs = pack["data_ref"]["routing"]
+        assert routing_refs[0] is routing_refs[1]
+
+    def test_without_topology_keeps_routing_in_dp_shards(self):
+        args = make_args(balance_data=False, moe_router_topk=2, num_experts=128)
+
+        pack = put_train_data(args, self._routing_data(), {"dp_size": 2})
+
+        assert isinstance(pack["data_ref"], list)
+        assert all("rollout_routed_experts" in ray.get(ref.inner) for ref in pack["data_ref"])
 
 
 class TestSplitTrainDataRaw:

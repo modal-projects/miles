@@ -1,10 +1,13 @@
 import logging
 import os
+from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
+
+ROUTING_REPLAY_LAYER_INDICES_KEY = "rollout_routed_experts_layer_indices"
 
 
 def _get_rank():
@@ -57,6 +60,7 @@ class BaseReplayManager:
     # True when replayed indices are token/KV positions (indexer): rebase the
     # per-sample 0-based rollout indices onto the packed training sequence.
     replay_indices_are_token_positions = False
+    stream_indices_key: str | None = None
 
     def __init__(self):
         self.replays: list[Replay] = []
@@ -64,6 +68,33 @@ class BaseReplayManager:
         self.enabled = False
         self.stage = "fallthrough"
         self.register_replay_list_func = None
+        self._registration_limit: int | None = None
+
+    @contextmanager
+    def registration_budget(self, expected_count: int):
+        """Register exactly the first ``expected_count`` replay-capable modules.
+
+        Megatron builds the decoder before auxiliary blocks such as MTP. Those
+        auxiliary blocks can reuse MoE layer specs, but they do not consume
+        rollout routing data and therefore must not join routing replay.
+        """
+        if expected_count < 0:
+            raise ValueError(f"expected_count must be non-negative, got {expected_count}")
+        if self._registration_limit is not None:
+            raise RuntimeError("Replay registration budgets cannot be nested")
+
+        start = len(self.replays)
+        self._registration_limit = start + expected_count
+        try:
+            yield
+        except BaseException:
+            raise
+        else:
+            actual_count = len(self.replays) - start
+            if actual_count != expected_count:
+                raise RuntimeError(f"Expected {expected_count} replay registrations, got {actual_count}")
+        finally:
+            self._registration_limit = None
 
     def create_replay(self, stream_idx: int | None = None) -> Replay:
         replay = Replay(stream_idx=stream_idx)
@@ -146,6 +177,8 @@ class BaseReplayManager:
     def register_to_module(self, module, attr_name: str, stream_idx: int | None = None):
         if not self.enabled:
             return
+        if self._registration_limit is not None and len(self.replays) >= self._registration_limit:
+            return
         replay = self.create_replay(stream_idx=stream_idx)
         setattr(module, attr_name, replay)
         manager = self
@@ -216,6 +249,7 @@ class RoutingReplayManager(BaseReplayManager):
     name = "routing"
     filename = "routing_replay.pt"
     data_key = "rollout_routed_experts"
+    stream_indices_key = ROUTING_REPLAY_LAYER_INDICES_KEY
     if_sp_region = True
     enable_check_replay_result = False
     replay_check_max_mismatch_fraction = 1e-2

@@ -9,6 +9,7 @@ from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enab
 from miles.utils.dp_schedule import build_dp_schedule, has_full_schedule_config
 from miles.utils.multi_lora import is_multi_lora_enabled
 from miles.utils.object_store import ValueSpec
+from miles.utils.replay_base import ROUTING_REPLAY_LAYER_INDICES_KEY
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
@@ -48,6 +49,11 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "num_microbatches": ValueSpec(codec="auto"),
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
+}
+
+ROUTING_REPLAY_VALUE_SPEC: dict[str, ValueSpec] = {
+    "rollout_routed_experts": ValueSpec(codec="typed_ragged"),
+    ROUTING_REPLAY_LAYER_INDICES_KEY: ValueSpec(codec="ndarray", dtype="int64"),
 }
 
 
@@ -367,12 +373,93 @@ def split_train_data_by_dp(args, data: dict[str, Any], train_parallel_config: di
     When the training backend can consume a rollout-side schedule, the shards
     also carry the precomputed micro-batch layout; otherwise this falls back to
     the legacy split (the training side schedules locally)."""
-    if can_schedule_on_rollout_side(args, data, train_parallel_config):
-        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
-    else:
-        shards = split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config["dp_size"])
+    shards = _make_train_data_shards(args, data, train_parallel_config)
     store = object_store.get_instance()
     return [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
+
+
+def put_train_data(args, data: dict[str, Any], train_parallel_config: dict | None) -> dict[str, Any]:
+    """Store rollout data using the most specific trainer topology available."""
+    store = object_store.get_instance()
+    data = compact_routing_replay_for_transport(args, data)
+    if args.delay_split_train_data_by_dp:
+        return {"data_ref": store.put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)}
+    if train_parallel_config is None:
+        raise ValueError("Trainer parallel config is required for rollout-side data splitting")
+
+    shards = _make_train_data_shards(args, data, train_parallel_config)
+    routing_specs = train_parallel_config.get("routing_replay_specs")
+    if routing_specs is None or "rollout_routed_experts" not in data:
+        return {
+            "data_ref": [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
+        }
+
+    routing_by_dp = [shard.pop("rollout_routed_experts") for shard in shards]
+    data_refs = [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
+    routing_refs = _put_routing_replay_shards(
+        routing_by_dp=routing_by_dp,
+        routing_specs=routing_specs,
+        dp_size=train_parallel_config["dp_size"],
+    )
+    return {"data_ref": {"dp": data_refs, "routing": routing_refs}}
+
+
+def _make_train_data_shards(args, data: dict[str, Any], train_parallel_config: dict | None):
+    if can_schedule_on_rollout_side(args, data, train_parallel_config):
+        return split_train_data_by_dp_scheduled_raw(
+            args,
+            data,
+            train_parallel_config=train_parallel_config,
+        )
+    return split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config["dp_size"])
+
+
+def _put_routing_replay_shards(*, routing_by_dp, routing_specs, dp_size: int):
+    store = object_store.get_instance()
+    refs_by_layout = {}
+    refs_by_rank = []
+
+    for rank, spec in enumerate(routing_specs):
+        if spec["rank"] != rank:
+            raise ValueError(
+                "Routing replay specs must be ordered by trainer rank; "
+                f"position={rank}, spec_rank={spec['rank']}"
+            )
+        dp_rank = int(spec["dp_rank"])
+        if not 0 <= dp_rank < dp_size:
+            raise ValueError(f"Trainer rank {rank} has invalid routing replay DP rank {dp_rank} for dp_size={dp_size}")
+
+        layer_indices = tuple(int(index) for index in spec["layer_indices"])
+        if len(set(layer_indices)) != len(layer_indices) or any(index < 0 for index in layer_indices):
+            raise ValueError(f"Trainer rank {rank} has invalid routing replay layers: {layer_indices}")
+
+        layout = (dp_rank, layer_indices)
+        if layout not in refs_by_layout:
+            local_routing = []
+            for sample in routing_by_dp[dp_rank]:
+                sample = np.asarray(sample)
+                if layer_indices and max(layer_indices) >= sample.shape[1]:
+                    raise ValueError(
+                        f"Routing replay layer {max(layer_indices)} is outside "
+                        f"the rollout tensor's {sample.shape[1]} layers"
+                    )
+                local_routing.append(np.ascontiguousarray(sample[:, layer_indices, :]))
+
+            refs_by_layout[layout] = store.put(
+                value={
+                    "rollout_routed_experts": local_routing,
+                    ROUTING_REPLAY_LAYER_INDICES_KEY: np.asarray(layer_indices, dtype=np.int64),
+                },
+                value_spec=ROUTING_REPLAY_VALUE_SPEC,
+            )
+        refs_by_rank.append(refs_by_layout[layout])
+
+    logger.info(
+        "Stored PP-local routing replay for %d trainer ranks as %d unique shards",
+        len(routing_specs),
+        len(refs_by_layout),
+    )
+    return refs_by_rank
 
 
 def can_schedule_on_rollout_side(args, data: dict[str, Any], train_parallel_config: dict | None) -> bool:
