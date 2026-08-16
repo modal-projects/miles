@@ -2974,11 +2974,21 @@ def miles_validate_args(args):
                 "truncated rollout sampling cannot be combined with --recompute-logprobs-via-prefill; "
                 "prefill scoring does not preserve the rollout sampling support"
             )
-        if getattr(args, "sglang_speculative_algorithm", None):
-            raise ValueError(
-                "rollout sampling-mask replay cannot be combined with speculative decoding; "
-                "current SGLang workers do not return one aligned sampling support per accepted token"
-            )
+        speculative_algorithm = getattr(args, "sglang_speculative_algorithm", None)
+        if speculative_algorithm:
+            if speculative_algorithm.upper() != "DFLASH":
+                raise ValueError(
+                    "rollout sampling-mask replay only supports DFlash speculative decoding; "
+                    "other speculative algorithms do not return one aligned sampling support per accepted token"
+                )
+            threshold_single = getattr(args, "sglang_speculative_accept_threshold_single", 1.0)
+            threshold_acc = getattr(args, "sglang_speculative_accept_threshold_acc", 1.0)
+            if threshold_single != 1.0 or threshold_acc != 1.0:
+                raise ValueError(
+                    "rollout sampling-mask replay with DFlash requires exact verification: "
+                    "--sglang-speculative-accept-threshold-single and "
+                    "--sglang-speculative-accept-threshold-acc must both be 1.0"
+                )
         if args.sglang_disaggregation_sampling_mask_max_tokens <= 0:
             raise ValueError(
                 "--sglang-disaggregation-sampling-mask-max-tokens must be positive with truncated sampling"

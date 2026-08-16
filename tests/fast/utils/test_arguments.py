@@ -392,6 +392,60 @@ class TestSessionServerV2Validation:
         assert str(exc_info.value) == (f"--use-session-server v2 does not support {flag}; v2 returns list[Sample]")
 
 
+class TestSamplingMaskSpeculativeValidation:
+    def _parse(self, extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        return parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+
+    def test_dflash_with_exact_verification_is_supported(self):
+        args = self._parse(
+            [
+                "--rollout-top-p",
+                "0.95",
+                "--sglang-speculative-algorithm",
+                "DFLASH",
+            ]
+        )
+
+        miles_validate_args(args)
+
+    def test_other_speculative_algorithms_are_rejected(self):
+        args = self._parse(
+            [
+                "--rollout-top-p",
+                "0.95",
+                "--sglang-speculative-algorithm",
+                "EAGLE",
+            ]
+        )
+
+        with pytest.raises(ValueError, match="only supports DFlash"):
+            miles_validate_args(args)
+
+    @pytest.mark.parametrize(
+        "threshold_flag",
+        [
+            "--sglang-speculative-accept-threshold-single",
+            "--sglang-speculative-accept-threshold-acc",
+        ],
+    )
+    def test_dflash_approximate_verification_is_rejected(self, threshold_flag):
+        args = self._parse(
+            [
+                "--rollout-top-p",
+                "0.95",
+                "--sglang-speculative-algorithm",
+                "DFLASH",
+                threshold_flag,
+                "0.9",
+            ]
+        )
+
+        with pytest.raises(ValueError, match="requires exact verification"):
+            miles_validate_args(args)
+
+
 class TestSessionMessageMatcherArgument:
     def _parse(self, extra):
         parser = argparse.ArgumentParser()
