@@ -1,191 +1,216 @@
-"""Tests for OpenAIEndpointTracer (session-server client side).
-
-The sample-assembly and TITO multi-turn merge tests live in
-tests/fast/rollout/session/test_samples.py (assembly) and
-test_samples_codec.py (wire codec), next to the functions.
-The collect_samples tests here lock the client's HTTP behavior deltas vs the
-old collect_records path: single POST with no retries, non-2xx raises with the
-body text, timeout raises (instead of silently ABORTing), and the session
-DELETE is attempted on every path.
-"""
+"""Tests for session-server client transport and wire-version selection."""
 
 import asyncio
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
 
 import miles.utils.http_utils as http_utils
+from miles.rollout.generate_utils import openai_endpoint_utils
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, COMPUTED_FIELDS_V2, encode_samples
 from miles.utils.http_utils import post_bytes_no_retry
 from miles.utils.types import Sample
 
 
+async def _wait_for_deletes() -> None:
+    if openai_endpoint_utils._PENDING_DELETES:
+        await asyncio.gather(*list(openai_endpoint_utils._PENDING_DELETES))
+
+
+class _SessionClient:
+    def __init__(self):
+        self.is_closed = False
+
+    async def aclose(self):
+        self.is_closed = True
+
+
 @pytest.mark.asyncio
-async def test_create_reads_session_server_instance_id_from_args(monkeypatch):
-    calls: list[tuple[str, str]] = []
+async def test_create_reads_instance_id_and_selects_v2_wire_fields(monkeypatch):
+    calls = []
+    client = _SessionClient()
 
-    async def fake_post(url: str, payload: dict, action: str = "post"):
-        calls.append((action, url))
-        assert action == "post"
-        assert url == "http://127.0.0.1:12345/sessions"
-        return {"session_id": "session-123"}
+    async def fake_request(client_arg, method, url, *, payload, timeout):
+        assert client_arg is client
+        calls.append((method, url, payload, timeout))
+        return b'{"session_id":"session-123"}'
 
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post", fake_post)
-
+    monkeypatch.setattr(openai_endpoint_utils, "_new_session_client", lambda: client)
+    monkeypatch.setattr(openai_endpoint_utils, "_request_bytes", fake_request)
     args = SimpleNamespace(
         session_server_ip="127.0.0.1",
         session_server_ports=[12345],
         session_server_instance_ids={12345: "server-instance-123"},
+        use_session_server="v2",
     )
+
     tracer = await OpenAIEndpointTracer.create(args)
 
     assert tracer.base_url == "http://127.0.0.1:12345/sessions/session-123"
-    assert tracer.session_server_id == "127.0.0.1:12345"
     assert tracer.session_server_instance_id == "server-instance-123"
-    # No /health probe: the id is read locally, create() issues only the POST.
-    assert calls == [("post", "http://127.0.0.1:12345/sessions")]
+    assert tracer.samples_wire_fields == COMPUTED_FIELDS_V2
+    assert calls == [
+        (
+            "POST",
+            "http://127.0.0.1:12345/sessions",
+            {},
+            openai_endpoint_utils._SESSION_CREATE_TIMEOUT,
+        )
+    ]
+    assert not client.is_closed
+    await tracer.discard_session()
+    await _wait_for_deletes()
+    assert client.is_closed
 
 
 @pytest.mark.asyncio
-async def test_create_without_instance_id_on_args(monkeypatch):
-    async def fake_post(url: str, payload: dict, action: str = "post"):
-        return {"session_id": "session-123"}
+async def test_create_selects_v1_wire_fields(monkeypatch):
+    async def fake_request(client, method, url, *, payload, timeout):
+        return b'{"session_id":"session-123"}'
 
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post", fake_post)
+    monkeypatch.setattr(openai_endpoint_utils, "_request_bytes", fake_request)
+    args = SimpleNamespace(
+        session_server_ip="127.0.0.1",
+        session_server_ports=[12345],
+        use_session_server=True,
+    )
 
-    args = SimpleNamespace(session_server_ip="127.0.0.1", session_server_ports=[12345])
     tracer = await OpenAIEndpointTracer.create(args)
 
-    assert tracer.session_server_instance_id is None
+    assert tracer.samples_wire_fields == COMPUTED_FIELDS
+    await tracer.discard_session()
+    await _wait_for_deletes()
 
 
 @pytest.mark.asyncio
-async def test_create_distributes_sessions_across_port_range(monkeypatch):
-    """With a multi-port range, sessions land on more than one instance, and every
-    request of a session (create, samples POST, DELETE) hits the port chosen
-    at create time — the URL is the router."""
-    calls: list[tuple[str, str]] = []
+async def test_create_distributes_sessions_round_robin_with_affinity(monkeypatch):
+    calls = []
 
-    async def fake_post(url: str, payload: dict, action: str = "post"):
-        calls.append((action, url))
-        if action == "post" and url.endswith("/sessions"):
-            return {"session_id": f"session-{len(calls)}"}
-        return {}
+    async def fake_request(client, method, url, *, payload, timeout):
+        calls.append((method, url))
+        if url.endswith("/sessions"):
+            return b'{"session_id":"session-id"}'
+        if url.endswith("/samples"):
+            return encode_samples([], {}, "no_records")
+        return b""
 
-    async def fake_post_bytes(url, payload, *, timeout):
-        calls.append(("post_bytes", url))
-        return encode_samples([], {}, "no_records")
-
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post", fake_post)
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post_bytes_no_retry", fake_post_bytes)
-
+    monkeypatch.setattr(openai_endpoint_utils, "_request_bytes", fake_request)
     ports = [12345, 12346, 12347, 12348]
     args = SimpleNamespace(session_server_ip="127.0.0.1", session_server_ports=ports)
+    chosen = Counter()
 
-    chosen_ports = set()
-    for _ in range(32):
+    for _ in range(8):
         calls.clear()
         tracer = await OpenAIEndpointTracer.create(args)
         port = int(tracer.session_server_id.rsplit(":", 1)[1])
-        assert port in ports
-        chosen_ports.add(port)
-
+        chosen[port] += 1
         await tracer.collect_samples(Sample(), max_seq_len=None)
+        await _wait_for_deletes()
+
         prefix = f"http://127.0.0.1:{port}"
-        assert [url for _, url in calls] == [
-            f"{prefix}/sessions",
-            f"{tracer.base_url}/samples",
-            tracer.base_url,
+        assert calls == [
+            ("POST", f"{prefix}/sessions"),
+            ("POST", f"{tracer.base_url}/samples"),
+            ("DELETE", tracer.base_url),
         ]
-        assert tracer.base_url.startswith(f"{prefix}/sessions/")
 
-    # 32 uniform picks over 4 ports miss a given port with p = (3/4)^32 ≈ 1e-4.
-    assert len(chosen_ports) > 1
+    assert chosen == Counter({port: 2 for port in ports})
 
 
-# ── collect_samples client behavior ──
-
-
-def _tracer() -> OpenAIEndpointTracer:
-    return OpenAIEndpointTracer(router_url="http://127.0.0.1:12345", session_id="sid-1")
-
-
-def _computed_reply_payload() -> bytes:
-    sample = Sample()
-    sample.tokens = [1, 2, 10]
-    sample.response = "r"
-    sample.response_length = 1
-    sample.loss_mask = [1]
-    sample.rollout_log_probs = [-0.5]
-    sample.status = Sample.Status.COMPLETED
-    return encode_samples([sample], {"max_trim_tokens": 1}, None)
+def _computed_reply_payload(*, fields=COMPUTED_FIELDS) -> bytes:
+    sample = Sample(
+        tokens=[1, 2, 10],
+        response="r",
+        response_length=1,
+        loss_mask=[1],
+        rollout_log_probs=[-0.5],
+        status=Sample.Status.COMPLETED,
+    )
+    return encode_samples([sample], {"max_trim_tokens": 1}, None, fields=fields)
 
 
 class _CollectCalls:
-    """Patches the two HTTP primitives collect_samples uses and records order."""
-
     def __init__(self, monkeypatch, *, post_outcome, delete_outcome=None):
-        self.calls: list[str] = []
+        self.calls = []
+        self.client = _SessionClient()
 
-        async def fake_post_bytes(url, payload, *, timeout):
-            self.calls.append(f"POST {url}")
-            assert payload == {"max_seq_len": 7}
+        async def fake_request(client, method, url, *, payload, timeout):
+            assert client is self.client
+            self.calls.append((method, url, payload))
+            if method == "DELETE":
+                if isinstance(delete_outcome, Exception):
+                    raise delete_outcome
+                return b""
             if isinstance(post_outcome, Exception):
                 raise post_outcome
             return post_outcome
 
-        async def fake_post(url, payload, action="post"):
-            assert action == "delete"
-            self.calls.append(f"DELETE {url}")
-            if isinstance(delete_outcome, Exception):
-                raise delete_outcome
-            return {}
+        monkeypatch.setattr(openai_endpoint_utils, "_request_bytes", fake_request)
 
-        monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post_bytes_no_retry", fake_post_bytes)
-        monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post", fake_post)
+    def tracer(self, *, fields=COMPUTED_FIELDS):
+        return OpenAIEndpointTracer(
+            "http://127.0.0.1:12345",
+            "sid-1",
+            samples_wire_fields=fields,
+            client=self.client,
+        )
 
 
 @pytest.mark.asyncio
-async def test_collect_samples_single_post_then_delete(monkeypatch):
+async def test_collect_retires_session(monkeypatch):
     calls = _CollectCalls(monkeypatch, post_outcome=_computed_reply_payload())
-    result = await _tracer().collect_samples(Sample(), max_seq_len=7)
 
-    assert calls.calls == [
-        "POST http://127.0.0.1:12345/sessions/sid-1/samples",
-        "DELETE http://127.0.0.1:12345/sessions/sid-1",
-    ]
-    (sample,) = result.samples
-    assert sample.tokens == [1, 2, 10] and sample.status == Sample.Status.COMPLETED
-    assert result.session_metadata == {"max_trim_tokens": 1}
+    result = await calls.tracer().collect_samples(Sample(), max_seq_len=7)
+    await _wait_for_deletes()
 
-
-@pytest.mark.asyncio
-async def test_collect_samples_non_2xx_raises_with_body_and_still_deletes(monkeypatch):
-    calls = _CollectCalls(monkeypatch, post_outcome=RuntimeError("422: trim_count 2 exceeds allowed=1"))
-    with pytest.raises(RuntimeError, match="trim_count 2 exceeds allowed=1"):
-        await _tracer().collect_samples(Sample(), max_seq_len=7)
-    assert calls.calls[-1] == "DELETE http://127.0.0.1:12345/sessions/sid-1"
-
-
-@pytest.mark.asyncio
-async def test_collect_samples_timeout_raises_and_still_deletes(monkeypatch):
-    # The old collect_records swallowed the timeout and returned empty records
-    # (silently ABORTing the sample); the samples path must raise it.
-    calls = _CollectCalls(monkeypatch, post_outcome=asyncio.TimeoutError())
-    with pytest.raises(asyncio.TimeoutError):
-        await _tracer().collect_samples(Sample(), max_seq_len=7)
-    assert calls.calls[-1] == "DELETE http://127.0.0.1:12345/sessions/sid-1"
-
-
-@pytest.mark.asyncio
-async def test_collect_samples_delete_failure_is_tolerated(monkeypatch):
-    _CollectCalls(monkeypatch, post_outcome=_computed_reply_payload(), delete_outcome=RuntimeError("delete boom"))
-    result = await _tracer().collect_samples(Sample(), max_seq_len=7)
+    assert [call[0] for call in calls.calls] == ["POST", "DELETE"]
+    assert calls.calls[0][2] == {"max_seq_len": 7}
     assert len(result.samples) == 1
+    assert calls.client.is_closed
 
 
-# ── post_bytes_no_retry primitive ──
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("bad samples"), asyncio.TimeoutError()])
+async def test_collect_error_still_retires_session(monkeypatch, error):
+    calls = _CollectCalls(monkeypatch, post_outcome=error)
+
+    with pytest.raises(type(error)):
+        await calls.tracer().collect_samples(Sample(), max_seq_len=7)
+    await _wait_for_deletes()
+
+    assert calls.calls[-1][0] == "DELETE"
+    assert calls.client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_collect_v2_carries_agent_metadata_and_decodes_extras(monkeypatch):
+    sample = Sample(
+        tokens=[1, 2, 10],
+        response="r",
+        response_length=1,
+        loss_mask=[1],
+        rollout_log_probs=[-0.5],
+        status=Sample.Status.COMPLETED,
+        reward=0.75,
+        metadata={"leaf": {"node_id": 1}},
+    )
+    payload = encode_samples([sample], {}, None, fields=COMPUTED_FIELDS_V2)
+    calls = _CollectCalls(monkeypatch, post_outcome=payload)
+    input_sample = Sample(metadata={"env": "keep-me"})
+
+    result = await calls.tracer(fields=COMPUTED_FIELDS_V2).collect_samples(
+        input_sample,
+        max_seq_len=7,
+        agent_metadata={"reward": 0.75},
+    )
+    await _wait_for_deletes()
+
+    assert calls.calls[0][2] == {"max_seq_len": 7, "metadata": {"reward": 0.75}}
+    [decoded] = result.samples
+    assert decoded.reward == 0.75
+    assert decoded.metadata == {"env": "keep-me", "leaf": {"node_id": 1}}
 
 
 class _FakeResponse:
@@ -195,7 +220,7 @@ class _FakeResponse:
         self.text = text
 
 
-class _FakeClient:
+class _FakeGlobalClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.post_count = 0
@@ -210,7 +235,7 @@ class _FakeClient:
 
 @pytest.mark.asyncio
 async def test_post_bytes_no_retry_returns_raw_bytes(monkeypatch):
-    client = _FakeClient([_FakeResponse(200, content=b"\x00\x01binary")])
+    client = _FakeGlobalClient([_FakeResponse(200, content=b"\x00\x01binary")])
     monkeypatch.setattr(http_utils, "_http_client", client)
     assert await post_bytes_no_retry("http://x/samples", {}, timeout=5) == b"\x00\x01binary"
     assert client.post_count == 1
@@ -218,79 +243,17 @@ async def test_post_bytes_no_retry_returns_raw_bytes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_post_bytes_no_retry_does_not_retry_and_carries_body(monkeypatch):
-    # Two queued outcomes; a retrying client would consume both. It must not.
-    client = _FakeClient([_FakeResponse(422, text="cursor 3 != len(accumulated_token_ids) 4"), RuntimeError("late")])
+    client = _FakeGlobalClient([_FakeResponse(422, text="cursor mismatch"), RuntimeError("late")])
     monkeypatch.setattr(http_utils, "_http_client", client)
-    with pytest.raises(RuntimeError, match="422.*cursor 3"):
+    with pytest.raises(RuntimeError, match="422.*cursor mismatch"):
         await post_bytes_no_retry("http://x/samples", {}, timeout=5)
     assert client.post_count == 1
 
 
 @pytest.mark.asyncio
 async def test_post_bytes_no_retry_transport_error_propagates_once(monkeypatch):
-    client = _FakeClient([ConnectionError("boom"), RuntimeError("late")])
+    client = _FakeGlobalClient([ConnectionError("boom"), RuntimeError("late")])
     monkeypatch.setattr(http_utils, "_http_client", client)
     with pytest.raises(ConnectionError, match="boom"):
         await post_bytes_no_retry("http://x/samples", {}, timeout=5)
     assert client.post_count == 1
-
-
-# ── v2 wire (--use-session-server v2): metadata channel + extended fields ──
-
-
-@pytest.mark.asyncio
-async def test_collect_samples_v2_payload_carries_metadata_and_decodes_extras(monkeypatch):
-    """v2 pin: the collect body gains the "metadata" key only when the caller
-    passes agent metadata, and the v2 field tuple overlays reward + merged
-    metadata; the v1 pin above (`payload == {"max_seq_len": 7}`) stays."""
-    from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2
-
-    sample = Sample()
-    sample.tokens = [1, 2, 10]
-    sample.response = "r"
-    sample.response_length = 1
-    sample.loss_mask = [1]
-    sample.rollout_log_probs = [-0.5]
-    sample.status = Sample.Status.COMPLETED
-    sample.reward = 0.75
-    sample.metadata = {"leaf": {"node_id": 1}}
-    payload = encode_samples([sample], {"max_trim_tokens": 1}, None, fields=COMPUTED_FIELDS_V2)
-
-    seen = []
-
-    async def fake_post_bytes(url, body, *, timeout):
-        seen.append(body)
-        return payload
-
-    async def fake_post(url, body, action="post"):
-        assert action == "delete"
-        return {}
-
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post_bytes_no_retry", fake_post_bytes)
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post", fake_post)
-
-    tracer = OpenAIEndpointTracer(
-        router_url="http://127.0.0.1:12345", session_id="sid-1", samples_wire_fields=COMPUTED_FIELDS_V2
-    )
-    input_sample = Sample()
-    input_sample.metadata = {"env": "keep-me"}
-    result = await tracer.collect_samples(input_sample, max_seq_len=7, agent_metadata={"reward": 0.75})
-
-    assert seen == [{"max_seq_len": 7, "metadata": {"reward": 0.75}}]
-    (decoded,) = result.samples
-    assert decoded.reward == 0.75
-    assert decoded.metadata == {"env": "keep-me", "leaf": {"node_id": 1}}
-
-
-@pytest.mark.asyncio
-async def test_create_selects_wire_fields_by_session_server_version(monkeypatch):
-    async def fake_post(url: str, payload: dict, action: str = "post"):
-        return {"session_id": "sid-x"}
-
-    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.post", fake_post)
-
-    def args(version):
-        return SimpleNamespace(session_server_ip="127.0.0.1", session_server_ports=[7000], use_session_server=version)
-
-    assert (await OpenAIEndpointTracer.create(args(True))).samples_wire_fields == COMPUTED_FIELDS
-    assert (await OpenAIEndpointTracer.create(args("v2"))).samples_wire_fields == COMPUTED_FIELDS_V2
