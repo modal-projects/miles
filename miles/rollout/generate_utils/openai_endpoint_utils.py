@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import json
 import logging
+import time
 from argparse import Namespace
 
 import httpx
@@ -126,6 +127,8 @@ class OpenAIEndpointTracer:
         if agent_metadata is not None:
             body["metadata"] = agent_metadata
 
+        collect_started = time.monotonic()
+        request_started = time.monotonic()
         try:
             payload = await _request_bytes(
                 self._client,
@@ -137,11 +140,23 @@ class OpenAIEndpointTracer:
         finally:
             self._schedule_delete()
 
-        return decode_samples_and_merge_input_sample(
+        request_seconds = time.monotonic() - request_started
+        decode_started = time.monotonic()
+        reply = await asyncio.to_thread(
+            decode_samples_and_merge_input_sample,
             payload,
             input_sample,
             fields=self.samples_wire_fields,
         )
+        reply.session_metadata.update(
+            {
+                "session_collect/response_bytes": len(payload),
+                "session_collect/request_seconds": request_seconds,
+                "session_collect/decode_seconds": time.monotonic() - decode_started,
+                "session_collect/total_seconds": time.monotonic() - collect_started,
+            }
+        )
+        return reply
 
     def _schedule_delete(self) -> asyncio.Task:
         if self._retirement_task is not None:

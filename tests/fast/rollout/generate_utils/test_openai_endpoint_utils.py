@@ -159,7 +159,7 @@ class _CollectCalls:
 
 
 @pytest.mark.asyncio
-async def test_collect_retires_session(monkeypatch):
+async def test_collect_reports_timing_and_retires_session(monkeypatch):
     calls = _CollectCalls(monkeypatch, post_outcome=_computed_reply_payload())
 
     result = await calls.tracer().collect_samples(Sample(), max_seq_len=7)
@@ -168,6 +168,10 @@ async def test_collect_retires_session(monkeypatch):
     assert [call[0] for call in calls.calls] == ["POST", "DELETE"]
     assert calls.calls[0][2] == {"max_seq_len": 7}
     assert len(result.samples) == 1
+    assert result.session_metadata["session_collect/response_bytes"] > 0
+    assert result.session_metadata["session_collect/request_seconds"] >= 0
+    assert result.session_metadata["session_collect/decode_seconds"] >= 0
+    assert result.session_metadata["session_collect/total_seconds"] >= 0
     assert calls.client.is_closed
 
 
