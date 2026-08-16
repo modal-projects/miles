@@ -183,6 +183,43 @@ class TestTopPMetrics:
         assert not any(key.startswith("sampling_support/") for key in out)
 
 
+class TestSpeculativeMetrics:
+    def test_reads_current_sglang_counters(self):
+        args = make_args(advantage_estimator="ppo", sglang_speculative_algorithm="DFLASH")
+        [sample] = make_samples_grouped(1, 1)
+        sample.spec_info.add(
+            {
+                "spec_num_correct_drafts": 6,
+                "spec_num_proposed_drafts": 8,
+                "spec_verify_ct": 4,
+                "completion_tokens": 10,
+            }
+        )
+
+        out = _compute_metrics_from_samples(args, [sample])
+
+        assert out["spec_accept_rate"] == 0.75
+        assert out["spec_accept_length"] == 2.5
+
+    def test_prefers_current_counters_over_compatibility_aliases(self):
+        args = make_args(advantage_estimator="ppo", sglang_speculative_algorithm="DFLASH")
+        [sample] = make_samples_grouped(1, 1)
+        sample.spec_info.add(
+            {
+                "spec_num_correct_drafts": 3,
+                "spec_num_proposed_drafts": 4,
+                "spec_accepted_drafts": 30,
+                "spec_proposed_drafts": 40,
+                "spec_accept_token_num": 300,
+                "spec_draft_token_num": 400,
+            }
+        )
+
+        out = _compute_metrics_from_samples(args, [sample])
+
+        assert out["spec_accept_rate"] == 0.75
+
+
 class TestComputePassrateFromSamples:
     def test_returns_empty_when_group_size_is_one(self):
         args = make_args(n_samples_per_prompt=1)
