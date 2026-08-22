@@ -9,7 +9,7 @@ import time
 import pytest
 
 from miles.utils import async_utils
-from miles.utils.async_utils import AsyncioGatherUtils, AsyncLoopThread, eager_create_task
+from miles.utils.async_utils import AsyncioGatherUtils, AsyncLoopThread, eager_create_task, maybe_await
 
 
 @pytest.mark.asyncio
@@ -346,6 +346,24 @@ class TestFireThenRendezvous:
 
 async def _failing(message: str):
     raise ValueError(message)
+
+
+class TestMaybeAwait:
+    async def test_a_plain_result_is_handed_back_as_it_is(self):
+        """An out-of-tree hook written against the older contract returns None, and awaiting it would raise."""
+        assert await maybe_await(None) is None
+
+    async def test_an_awaitable_result_is_awaited(self):
+        """The in-tree hooks are coroutines, and their teardown must still finish before the caller moves on."""
+        finished = False
+
+        async def dispose():
+            nonlocal finished
+            finished = True
+            return "done"
+
+        assert await maybe_await(dispose()) == "done"
+        assert finished
 
 
 class TestWaitFutures:
