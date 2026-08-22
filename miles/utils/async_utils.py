@@ -1,14 +1,15 @@
 import asyncio
 import concurrent.futures
+import inspect
 import logging
 import threading
-from collections.abc import Coroutine, Sequence
+from collections.abc import Awaitable, Coroutine, Sequence
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
 
-__all__ = ["get_async_loop", "run", "submit", "wait_futures", "eager_create_task"]
+__all__ = ["get_async_loop", "run", "submit", "wait_futures", "eager_create_task", "maybe_await"]
 
 _T = TypeVar("_T")
 
@@ -98,3 +99,7 @@ class AsyncioGatherUtils:
         for i, output in enumerate(outputs):
             if isinstance(output, BaseException):
                 logger.warning(f"{debug_name} error index={i}", exc_info=output)
+
+
+async def maybe_await(value: Awaitable[_T] | _T) -> _T:
+    return await value if inspect.isawaitable(value) else value
