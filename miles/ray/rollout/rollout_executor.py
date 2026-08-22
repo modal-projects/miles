@@ -23,6 +23,7 @@ from miles.rollout.base_types import (
 from miles.rollout.checkpoint_eval import CheckpointEvalFn, EvalSkip
 from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
 from miles.utils import object_store
+from miles.utils.async_utils import maybe_await
 from miles.utils.audit_utils.event_analyzer import analyzer as event_analyzer
 from miles.utils.audit_utils.event_logger import checkpoint as event_logger_checkpoint
 from miles.utils.audit_utils.process_identity import RolloutExecutorProcessIdentity
@@ -100,14 +101,17 @@ class RolloutExecutor:
     # -------------------------- lifecycle -----------------------------
     # TODO: may have a `async def init` here later
 
-    def dispose(self):
+    async def dispose(self) -> None:
+        train_fn = self.generate_rollout
+        if not self.use_legacy_rollout_v1 and train_fn is not None:
+            await maybe_await(train_fn.dispose())
         if (close := getattr(self.data_source, "close", None)) is not None:
             close()
         event_analyzer.run_analysis_from_args(self.args)
         if self._metric_checker is not None:
             self._metric_checker.dispose()
-        if isinstance(self.eval_generate_rollout, CheckpointEvalFn):
-            self.eval_generate_rollout.dispose()
+        if isinstance(self.eval_generate_rollout, CheckpointEvalFn) and self.eval_generate_rollout is not train_fn:
+            await maybe_await(self.eval_generate_rollout.dispose())
 
     # -------------------------- data generation -----------------------------
 
