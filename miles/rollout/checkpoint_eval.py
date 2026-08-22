@@ -75,8 +75,8 @@ class CheckpointEvalFn(BaseRolloutFn, abc.ABC):
         )
         return await self.evaluate_checkpoint(input.hf_dir, input)
 
-    def dispose(self) -> None:  # noqa: B027 — optional hook, deliberately a no-op default
-        """Tear down anything launched in ``__init__``. Called by RolloutManager.dispose()."""
+    async def dispose(self) -> None:  # noqa: B027 — optional hook, deliberately a no-op default
+        """Tear down anything launched in ``__init__``. Called by RolloutExecutor.dispose()."""
 
 
 def is_checkpoint_eval_fn(eval_function_path: str | None) -> bool:

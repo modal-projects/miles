@@ -9,7 +9,7 @@ import time
 import pytest
 
 from miles.utils import async_utils
-from miles.utils.async_utils import AsyncioGatherUtils, AsyncLoopThread, eager_create_task
+from miles.utils.async_utils import AsyncioGatherUtils, AsyncLoopThread, eager_create_task, maybe_await
 
 
 @pytest.mark.asyncio
@@ -346,6 +346,17 @@ class TestFireThenRendezvous:
 
 async def _failing(message: str):
     raise ValueError(message)
+
+
+class TestMaybeAwait:
+    async def test_plain_result_is_returned(self):
+        assert await maybe_await(None) is None
+
+    async def test_awaitable_result_is_awaited(self):
+        async def answer():
+            return "done"
+
+        assert await maybe_await(answer()) == "done"
 
 
 class TestWaitFutures:
