@@ -73,6 +73,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         )
         self._sample_filter = load_function(input.args.rollout_sample_filter_path)
         self._worker: asyncio.Task | None = None
+        self._disposed = False
         self._eval_prompt_dataset_cache: dict = {}
         self._producer_resumed = asyncio.Event()
         self._producer_resumed.set()
@@ -89,6 +90,12 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             self._worker = asyncio.create_task(self._worker_loop())
             logger.info("Started fully-async rollout worker")
         return await self._drain(input)
+
+    async def dispose(self) -> None:
+        self._disposed = True
+        if (worker := self._worker) is None:
+            return
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_end_worker(worker), worker.get_loop()))
 
     async def _call_eval(self, input: RolloutFnEvalInput) -> RolloutFnOutput:
         if input.generate_state is not None:
@@ -167,6 +174,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 # Checked before the queue: the worker loop never returns normally, so a
                 # dead worker fails the step now instead of after its backlog drains.
                 if self._worker in done:
+                    if self._worker.cancelled() and self._disposed:
+                        raise RuntimeError("fully-async rollout was disposed while a step waited for groups")
                     self._worker.result()
                     raise RuntimeError("fully-async rollout worker exited without an exception")
                 if queue_get in done:
@@ -219,3 +228,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         for sample in prompt_group:
             sample.reset_for_retry()
         self.data_source.add_samples([prompt_group])
+
+
+async def _end_worker(worker: asyncio.Task) -> None:
+    worker.cancel()
+    await asyncio.wait({worker})
