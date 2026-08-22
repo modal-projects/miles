@@ -652,6 +652,52 @@ async def test_custom_data_buffer_path_replaces_default(monkeypatch):
     assert len(output.samples) == 2
 
 
+class WedgedBuffer(data_buffer.DataBuffer):
+    def __init__(self, input: data_buffer.DataBufferConstructorInput):
+        self._never = asyncio.Event()
+
+    async def put(self, input: data_buffer.DataBufferInput) -> None:
+        await self._never.wait()
+
+    async def get(self, **context) -> data_buffer.DataBufferInput:
+        await self._never.wait()
+        raise AssertionError("the wedged buffer never hands out a group")
+
+    def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
+        return {}
+
+
+class TestDisposal:
+    async def test_disposing_ends_the_producer_before_it_returns(self, monkeypatch):
+        args = make_args(rollout_batch_size=1, custom_async_data_buffer_path=f"{__name__}.WedgedBuffer")
+        fn = make_fn(monkeypatch, args, FakeDataSource())
+        step = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+        await asyncio.sleep(0.05)
+        assert not step.done()
+
+        await asyncio.wait_for(fn.dispose(), timeout=5)
+
+        assert fn._worker.cancelled()
+
+    async def test_disposing_fails_a_step_that_is_waiting_for_groups(self, monkeypatch):
+        args = make_args(rollout_batch_size=1, custom_async_data_buffer_path=f"{__name__}.WedgedBuffer")
+        fn = make_fn(monkeypatch, args, FakeDataSource())
+        step = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+        await asyncio.sleep(0.05)
+
+        await fn.dispose()
+
+        with pytest.raises(RuntimeError, match="disposed while a step waited for groups"):
+            await asyncio.wait_for(step, timeout=5)
+
+    async def test_disposing_a_run_that_never_started_is_quiet(self, monkeypatch):
+        fn = make_fn(monkeypatch, make_args(), FakeDataSource())
+
+        await fn.dispose()
+
+        assert fn._worker is None
+
+
 async def test_worker_defaults_to_sample_granularity(monkeypatch):
     """Unset --rollout-submission-granularity: this driver backfills on sample completion."""
     callbacks = []
