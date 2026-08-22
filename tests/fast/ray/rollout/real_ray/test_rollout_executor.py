@@ -724,6 +724,14 @@ class _RecordingMetricChecker:
         self.disposed = True
 
 
+class _RecordingDisposableRolloutFn:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
 class _RecordingCheckpointEvalFn(CheckpointEvalFn):
     def __init__(self) -> None:
         self.disposed = False
@@ -731,7 +739,7 @@ class _RecordingCheckpointEvalFn(CheckpointEvalFn):
     async def evaluate_checkpoint(self, checkpoint_dir, input):
         raise AssertionError("not exercised by the lifecycle tests")
 
-    def dispose(self) -> None:
+    async def dispose(self) -> None:
         self.disposed = True
 
 
@@ -759,7 +767,7 @@ class TestLifecycle:
         assert checker.evaluated == [{"eval/accuracy": 0.75}]
 
     async def test_dispose_releases_every_executor_owned_resource(self, ray_local_mode, patch_low_level, monkeypatch):
-        """Teardown closes the data source, runs event analysis and disposes the checker and the eval fn."""
+        """Teardown closes the data source and disposes the checker and rollout functions."""
         import miles.ray.rollout.rollout_executor as rexec
 
         analyzed: list = []
@@ -773,13 +781,17 @@ class TestLifecycle:
         executor._metric_checker = checker
         eval_fn = _RecordingCheckpointEvalFn()
         executor.eval_generate_rollout = eval_fn
+        train_fn = _RecordingDisposableRolloutFn()
+        executor.generate_rollout = train_fn
+        executor.use_legacy_rollout_v1 = False
 
-        executor.dispose()
+        await executor.dispose()
 
         assert closed == ["closed"]
         assert analyzed == [args]
         assert checker.disposed
         assert eval_fn.disposed
+        assert train_fn.disposed
 
 
 @pytest.mark.asyncio
