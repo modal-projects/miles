@@ -64,18 +64,19 @@ class _UnusedBackend:
         raise AssertionError("collect_samples must not touch the proxy backend")
 
 
-def _build_core(use_addition_r3: bool = False) -> SessionCoreV2:
+def _build_core(config=None, use_addition_r3: bool = False) -> SessionCoreV2:
     # Mirrors setup_session_routes (sessions.py): tokenizer + registry + core.
+    config = _ARGS if config is None else config
     tokenizer = load_tokenizer(
-        _ARGS.hf_checkpoint, chat_template_path=_ARGS.chat_template_path, trust_remote_code=True
+        config.hf_checkpoint, chat_template_path=config.chat_template_path, trust_remote_code=True
     )
     tito_tokenizer = get_tito_tokenizer(
         tokenizer,
-        tokenizer_type=_ARGS.tito_model,
-        chat_template_kwargs=_ARGS.apply_chat_template_kwargs,
+        tokenizer_type=config.tito_model,
+        chat_template_kwargs=config.apply_chat_template_kwargs,
     )
     registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito_tokenizer)
-    return SessionCoreV2(_UnusedBackend(), registry, _ARGS, _ARGS.instance_id, use_addition_r3=use_addition_r3)
+    return SessionCoreV2(_UnusedBackend(), registry, config, config.instance_id, use_addition_r3=use_addition_r3)
 
 
 @pytest.fixture(scope="module")
@@ -86,6 +87,11 @@ def core():
 @pytest.fixture(scope="module")
 def addition_core():
     return _build_core(use_addition_r3=True)
+
+
+@pytest.fixture(scope="module")
+def spec_core():
+    return _build_core(_ARGS.model_copy(update={"sglang_speculative_algorithm": "EAGLE"}))
 
 
 # ── fixtures: a two-turn trajectory with R3 / cache stats / weight versions ──
@@ -217,6 +223,26 @@ async def test_assembled_samples_golden_merged(core):
     assert m.metadata["agent_only"] == 1
     assert m.metadata["accumulated_token_ids"] == _ACCUMULATED
     assert reply.session_metadata["agent"] == _AGENT_METADATA
+
+
+async def test_spec_info_crosses_samples_wire(spec_core):
+    output_token_ids = [10, 11, 12, 13, 14, 15, 16]
+    record = _make_record(prompt_token_ids=[1, 2, 3], output_token_ids=output_token_ids)
+    record.response["choices"][0]["meta_info"].update(
+        {"spec_num_correct_drafts": 3, "spec_num_proposed_drafts": 5, "spec_verify_ct": 2}
+    )
+    sid = await _make_session(spec_core, [record], [1, 2, 3, *output_token_ids])
+
+    status, payload = await _collect_via_op(spec_core, sid)
+    assert status == 200
+    (sample,), _ = _new_pipeline(payload, _input_sample())
+
+    assert sample.spec_info.to_dict() == {
+        "spec_num_correct_drafts": 3,
+        "spec_num_proposed_drafts": 5,
+        "spec_verify_ct": 2,
+        "completion_tokens": 7,
+    }
 
 
 async def test_truncation_golden(core):
