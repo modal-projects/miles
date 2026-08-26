@@ -18,6 +18,7 @@ from miles.rollout.session.core import (
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, encode_samples
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
+from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY, build_session_rollout_metrics
 from miles.rollout.session.v2.session_state import (
     SessionRegistryV2,
     commit_generation,
@@ -82,10 +83,19 @@ class SessionCoreV2(SessionCore):
         metadata = self._session_metadata(session_id, session)
         if agent_metadata is not None:
             metadata["agent"] = agent_metadata
-        if not session.tree.nodes:
-            return _samples_response(
-                encode_samples([], metadata, empty_reason="no_records", fields=COMPUTED_FIELDS_V2)
+
+        def samples_response(samples, *, empty_reason=None):
+            # Hooks may inspect or mutate session metadata, so publish the
+            # authoritative server-owned value only at the wire boundary.
+            metadata[SESSION_ROLLOUT_METRICS_KEY] = build_session_rollout_metrics(
+                self.args, session_id, session.tree.nodes
             )
+            return _samples_response(
+                encode_samples(samples, metadata, empty_reason=empty_reason, fields=COMPUTED_FIELDS_V2)
+            )
+
+        if not session.tree.nodes:
+            return samples_response([], empty_reason="no_records")
 
         try:
             material = build_leaf_material(
@@ -99,9 +109,7 @@ class SessionCoreV2(SessionCore):
         except (AssertionError, ValueError) as exc:
             return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
         if not material:
-            return _samples_response(
-                encode_samples([], metadata, empty_reason="all_truncated", fields=COMPUTED_FIELDS_V2)
-            )
+            return samples_response([], empty_reason="all_truncated")
 
         # Hook lane: a policy bug is a deterministic 422 carrying the hook's
         # identity, never a masked 500 (server death stays loud).
@@ -121,10 +129,8 @@ class SessionCoreV2(SessionCore):
             )
             return Response(content=body.encode(), status_code=422, media_type="text/plain")
         if not samples:
-            return _samples_response(
-                encode_samples([], metadata, empty_reason="all_truncated", fields=COMPUTED_FIELDS_V2)
-            )
-        return _samples_response(encode_samples(samples, metadata, fields=COMPUTED_FIELDS_V2))
+            return samples_response([], empty_reason="all_truncated")
+        return samples_response(samples)
 
     async def chat_completions(
         self, session_id: str, *, method: str, query: str, headers: dict, body: bytes

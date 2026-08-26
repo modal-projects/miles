@@ -10,6 +10,7 @@ from miles.ray.rollout.metrics import (
     _compute_zero_std_metrics,
     log_rollout_data,
 )
+from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.types import Sample
 
 
@@ -79,6 +80,99 @@ class TestComputeSpecMetrics:
             "spec_accept_rate": pytest.approx(10 / 12),
             "spec_accept_length": pytest.approx(29 / 10),
         }
+
+    @staticmethod
+    def _member(session_id, metrics, *, available=True):
+        sample = Sample()
+        sample.metadata[SESSION_ROLLOUT_METRICS_KEY] = {
+            "session_id": session_id,
+            "available": available,
+            "metrics": metrics,
+        }
+        return sample
+
+    @staticmethod
+    def _spec_info(correct, proposed, verify, completion):
+        return {
+            "spec_info": {
+                "spec_num_correct_drafts": correct,
+                "spec_num_proposed_drafts": proposed,
+                "spec_verify_ct": verify,
+                "completion_tokens": completion,
+            }
+        }
+
+    def test_v2_aggregates_one_carrier_per_session(self):
+        args = make_args(sglang_speculative_algorithm="EAGLE", use_session_server="v2")
+        samples = [
+            self._member("sid-1", self._spec_info(2, 4, 2, 6)),
+            self._member("sid-1", None),
+            self._member("sid-2", self._spec_info(3, 6, 1, 2)),
+        ]
+        for sample in samples:
+            sample.spec_info = Sample.SpecInfo(100, 100, 1, 100)
+
+        out = _compute_spec_metrics(args, samples)
+
+        assert out == {
+            "spec_accept_rate": pytest.approx(5 / 10),
+            "spec_accept_length": pytest.approx(8 / 3),
+        }
+
+    @pytest.mark.parametrize("carriers", [0, 2])
+    def test_v2_rejects_missing_or_duplicate_carrier(self, carriers):
+        args = make_args(sglang_speculative_algorithm="EAGLE", use_session_server="v2")
+        metrics = self._spec_info(1, 2, 1, 2)
+        samples = [self._member("sid-1", metrics if i < carriers else None) for i in range(2)]
+
+        with pytest.raises(ValueError, match="exactly one metrics carrier"):
+            _compute_spec_metrics(args, samples)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {},
+            {
+                SESSION_ROLLOUT_METRICS_KEY: {
+                    "session_id": "sid-1",
+                    "available": True,
+                    "metrics": {"spec_info": {"spec_num_correct_drafts": 1}},
+                }
+            },
+            {
+                SESSION_ROLLOUT_METRICS_KEY: {
+                    "session_id": "sid-1",
+                    "available": True,
+                    "metrics": {
+                        "spec_info": {
+                            "spec_num_correct_drafts": True,
+                            "spec_num_proposed_drafts": 2,
+                            "spec_verify_ct": 1,
+                            "completion_tokens": 2,
+                        }
+                    },
+                }
+            },
+        ],
+    )
+    def test_v2_rejects_missing_or_bad_schema(self, metadata):
+        args = make_args(sglang_speculative_algorithm="EAGLE", use_session_server="v2")
+        sample = Sample(metadata=metadata)
+
+        with pytest.raises(ValueError):
+            _compute_spec_metrics(args, [sample])
+
+    def test_v2_excludes_unavailable_session(self, caplog):
+        args = make_args(sglang_speculative_algorithm="EAGLE", use_session_server="v2")
+        samples = [
+            self._member("sid-1", self._spec_info(1, 2, 1, 2)),
+            self._member("sid-2", None, available=False),
+        ]
+
+        out = _compute_spec_metrics(args, samples)
+
+        assert out == {"spec_accept_rate": 0.5, "spec_accept_length": 2.0}
+        assert "Speculative metrics unavailable for 1 v2 sessions" in caplog.text
 
 
 class TestTitoMismatchMetrics:

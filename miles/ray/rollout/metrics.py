@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 
+from miles.rollout.session.v2.metrics import collect_session_rollout_metrics
 from miles.utils.iter_utils import group_by
 from miles.utils.metric_utils import (
     compute_pass_rate,
@@ -199,10 +200,24 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
 def _compute_spec_metrics(args, all_samples: list[Sample]):
     if args.sglang_speculative_algorithm is None:
         return {}
-    num_correct_drafts = sum(sample.spec_info.spec_num_correct_drafts for sample in all_samples)
-    num_proposed_drafts = sum(sample.spec_info.spec_num_proposed_drafts for sample in all_samples)
-    spec_verify_ct = sum(sample.spec_info.spec_verify_ct for sample in all_samples)
-    completion_tokens = sum(sample.spec_info.completion_tokens for sample in all_samples)
+    if args.use_session_server == "v2":
+        session_metrics, unavailable_session_ids = collect_session_rollout_metrics(all_samples)
+        if unavailable_session_ids:
+            logger.warning(
+                "Speculative metrics unavailable for %d v2 sessions: %s",
+                len(unavailable_session_ids),
+                unavailable_session_ids,
+            )
+        spec_infos = [metrics["spec_info"] for metrics in session_metrics]
+        num_correct_drafts = sum(info["spec_num_correct_drafts"] for info in spec_infos)
+        num_proposed_drafts = sum(info["spec_num_proposed_drafts"] for info in spec_infos)
+        spec_verify_ct = sum(info["spec_verify_ct"] for info in spec_infos)
+        completion_tokens = sum(info["completion_tokens"] for info in spec_infos)
+    else:
+        num_correct_drafts = sum(sample.spec_info.spec_num_correct_drafts for sample in all_samples)
+        num_proposed_drafts = sum(sample.spec_info.spec_num_proposed_drafts for sample in all_samples)
+        spec_verify_ct = sum(sample.spec_info.spec_verify_ct for sample in all_samples)
+        completion_tokens = sum(sample.spec_info.completion_tokens for sample in all_samples)
     return {
         "spec_accept_rate": num_correct_drafts / num_proposed_drafts if num_proposed_drafts > 0 else 0.0,
         "spec_accept_length": completion_tokens / spec_verify_ct if spec_verify_ct > 0 else 0.0,

@@ -35,6 +35,7 @@ from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
+from miles.rollout.session.v2.metrics import assign_session_rollout_metrics, read_server_session_rollout_metrics
 from miles.utils.misc import load_function
 from miles.utils.types import Sample
 
@@ -103,6 +104,8 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     if collect_failed:
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
+        if use_v2:
+            assign_session_rollout_metrics([sample], session_id=tracer.session_id, available=False, metrics=None)
         return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
     if not result.samples:
@@ -112,9 +115,15 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             logger.warning("No model calls recorded for sample")
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
+        if use_v2:
+            metrics = read_server_session_rollout_metrics(result.session_metadata, tracer.session_id)
+            assign_session_rollout_metrics([sample], session_id=tracer.session_id, available=True, metrics=metrics)
         return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
     samples = result.samples
+    if use_v2:
+        metrics = read_server_session_rollout_metrics(result.session_metadata, tracer.session_id)
+        assign_session_rollout_metrics(samples, session_id=tracer.session_id, available=True, metrics=metrics)
     if use_v2 and len(samples) > 1:
         # FIXME: handle sample index issues.
         rollout_id = input.sample.rollout_id if input.sample.rollout_id is not None else input.sample.index

@@ -7,6 +7,8 @@ import pytest
 from tests.fast.dashboard.dummy_dump import dump_dummy_run
 
 from miles.dashboard.dump_reader import DumpReader
+from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
+from miles.utils.types import Sample
 
 REMOVED = (3,)  # within-step positions marked remove_sample=True by the fixture
 
@@ -46,6 +48,30 @@ def test_summary_matches_hand_computed(reader):
                 float((row.log_probs - row.rollout_log_probs).exp()[mask].mean()), rel=1e-5
             )
             assert entry["mean_entropy"] == pytest.approx(float(row.entropy[mask].mean()), rel=1e-5)
+
+
+def test_summary_uses_leaf_spec_info_not_session_carrier(reader):
+    sample = Sample(
+        spec_info=Sample.SpecInfo(spec_num_correct_drafts=1, spec_num_proposed_drafts=4),
+        metadata={
+            SESSION_ROLLOUT_METRICS_KEY: {
+                "session_id": "sid-1",
+                "available": True,
+                "metrics": {
+                    "spec_info": {
+                        "spec_num_correct_drafts": 99,
+                        "spec_num_proposed_drafts": 100,
+                        "spec_verify_ct": 1,
+                        "completion_tokens": 2,
+                    }
+                },
+            }
+        },
+    )
+
+    entry = reader._summary_row(sample, None, rollout_id=0)
+
+    assert entry["spec_accept_rate"] == 0.25
 
 
 def test_summary_removed_sample_has_no_masked_stats(reader):
