@@ -56,7 +56,6 @@ def test_summary_uses_leaf_spec_info_not_session_carrier(reader):
         metadata={
             SESSION_ROLLOUT_METRICS_KEY: {
                 "session_id": "sid-1",
-                "available": True,
                 "metrics": {
                     "spec_info": {
                         "spec_num_correct_drafts": 99,

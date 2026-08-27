@@ -108,6 +108,19 @@ class TestStripLastOutputTokens:
 
 
 class TestSpecInfo:
+    def test_ratio_properties(self):
+        info = Sample.SpecInfo(
+            spec_num_correct_drafts=3,
+            spec_num_proposed_drafts=4,
+            spec_verify_ct=2,
+            completion_tokens=5,
+        )
+
+        assert info.spec_accept_rate == 0.75
+        assert info.spec_accept_length == 2.5
+        assert Sample.SpecInfo().spec_accept_rate == 0.0
+        assert Sample.SpecInfo().spec_accept_length == 0.0
+
     def test_add_ignores_completion_without_speculative_verification(self):
         info = Sample.SpecInfo()
 

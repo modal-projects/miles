@@ -35,7 +35,7 @@ from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
-from miles.rollout.session.v2.metrics import assign_session_rollout_metrics, read_server_session_rollout_metrics
+from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.misc import load_function
 from miles.utils.types import Sample
 
@@ -105,8 +105,18 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
         if use_v2:
-            assign_session_rollout_metrics([sample], session_id=tracer.session_id, available=False, metrics=None)
+            sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)
         return GenerateFnOutput(samples=[sample] if use_v2 else sample)
+
+    if use_v2:
+        session_rollout_metrics = result.session_metadata[SESSION_ROLLOUT_METRICS_KEY]
+        if session_rollout_metrics["session_id"] != tracer.session_id:
+            raise ValueError(
+                "session_rollout_metrics.session_id does not match the collected session: "
+                f"{session_rollout_metrics['session_id']!r} != {tracer.session_id!r}"
+            )
+        if session_rollout_metrics["metrics"] is None:
+            raise ValueError("a successful session collect must carry metrics")
 
     if not result.samples:
         if result.empty_reason == "all_truncated":
@@ -116,14 +126,13 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
         if use_v2:
-            metrics = read_server_session_rollout_metrics(result.session_metadata, tracer.session_id)
-            assign_session_rollout_metrics([sample], session_id=tracer.session_id, available=True, metrics=metrics)
+            sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)
         return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
     samples = result.samples
     if use_v2:
-        metrics = read_server_session_rollout_metrics(result.session_metadata, tracer.session_id)
-        assign_session_rollout_metrics(samples, session_id=tracer.session_id, available=True, metrics=metrics)
+        for sample in samples:
+            sample.metadata[SESSION_ROLLOUT_METRICS_KEY] = session_rollout_metrics
     if use_v2 and len(samples) > 1:
         # FIXME: handle sample index issues.
         rollout_id = input.sample.rollout_id if input.sample.rollout_id is not None else input.sample.index

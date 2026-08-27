@@ -411,7 +411,6 @@ async def test_no_records_reply(core):
     assert reply.samples == [] and reply.empty_reason == "no_records"
     assert reply.session_metadata[SESSION_ROLLOUT_METRICS_KEY] == {
         "session_id": sid,
-        "available": True,
         "metrics": {"spec_info": Sample.SpecInfo().to_dict()},
     }
 
@@ -472,16 +471,7 @@ def _single_turn_record(prompt_ids, output_ids, weight_version="w1", spec_info=N
     return record
 
 
-def _fabricate_node(
-    state,
-    parent,
-    record,
-    token_ids,
-    *,
-    completion_span,
-    response_id="",
-    committed_at=None,
-):
+def _fabricate_node(state, parent, record, token_ids, *, completion_span, response_id="", committed_at=None):
     return state.tree.create_node(
         parent,
         delta_messages=[],
@@ -657,7 +647,6 @@ async def test_session_rollout_metrics_count_every_tree_node_once(core, monkeypa
     }
     assert reply.session_metadata[SESSION_ROLLOUT_METRICS_KEY] == {
         "session_id": sid,
-        "available": True,
         "metrics": {
             "spec_info": {
                 "spec_num_correct_drafts": 109,
@@ -937,7 +926,6 @@ async def test_custom_postprocessor_cannot_replace_session_rollout_metrics(core)
         reply = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2)
         assert reply.session_metadata[SESSION_ROLLOUT_METRICS_KEY] == {
             "session_id": sid,
-            "available": True,
             "metrics": {"spec_info": Sample.SpecInfo().to_dict()},
         }
 

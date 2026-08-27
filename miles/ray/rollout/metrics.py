@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from miles.rollout.session.v2.metrics import read_sample_rollout_metrics
+from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.iter_utils import group_by
 from miles.utils.metric_utils import (
     compute_pass_rate,
@@ -168,13 +168,6 @@ def _rollout_key(sample: Sample, position: int) -> tuple[str, int | None, int]:
     return ("position", sample.group_index, position)
 
 
-def _group_samples_by_rollout(samples: list[Sample]) -> list[list[Sample]]:
-    groups: dict[tuple[str, int | None, int], list[Sample]] = {}
-    for position, sample in enumerate(samples):
-        groups.setdefault(_rollout_key(sample, position), []).append(sample)
-    return list(groups.values())
-
-
 def _compute_perf_metrics_from_samples(args, samples, rollout_time):
     non_generation_time = [sample.non_generation_time for sample in samples]
 
@@ -240,30 +233,18 @@ def _compute_spec_metrics(args, all_samples: list[Sample]):
     if args.sglang_speculative_algorithm is None:
         return {}
     if args.use_session_server == "v2":
-        session_metrics = []
-        unavailable_session_ids = []
-        for rollout_samples in _group_samples_by_rollout(all_samples):
-            metrics, session_id = read_sample_rollout_metrics(rollout_samples)
-            if metrics is None:
-                unavailable_session_ids.append(session_id)
-            else:
-                session_metrics.append(metrics)
-        if unavailable_session_ids:
-            logger.warning(
-                "Speculative metrics unavailable for %d v2 sessions: %s",
-                len(unavailable_session_ids),
-                unavailable_session_ids,
-            )
-        spec_infos = [metrics["spec_info"] for metrics in session_metrics]
-        num_correct_drafts = sum(info["spec_num_correct_drafts"] for info in spec_infos)
-        num_proposed_drafts = sum(info["spec_num_proposed_drafts"] for info in spec_infos)
-        spec_verify_ct = sum(info["spec_verify_ct"] for info in spec_infos)
-        completion_tokens = sum(info["completion_tokens"] for info in spec_infos)
+        carriers = {
+            _rollout_key(sample, position): sample.metadata[SESSION_ROLLOUT_METRICS_KEY]
+            for position, sample in enumerate(all_samples)
+            if SESSION_ROLLOUT_METRICS_KEY in sample.metadata
+        }
+        spec_infos = [Sample.SpecInfo(**carrier["metrics"]["spec_info"]) for carrier in carriers.values()]
     else:
-        num_correct_drafts = sum(sample.spec_info.spec_num_correct_drafts for sample in all_samples)
-        num_proposed_drafts = sum(sample.spec_info.spec_num_proposed_drafts for sample in all_samples)
-        spec_verify_ct = sum(sample.spec_info.spec_verify_ct for sample in all_samples)
-        completion_tokens = sum(sample.spec_info.completion_tokens for sample in all_samples)
+        spec_infos = [sample.spec_info for sample in all_samples]
+    num_correct_drafts = sum(info.spec_num_correct_drafts for info in spec_infos)
+    num_proposed_drafts = sum(info.spec_num_proposed_drafts for info in spec_infos)
+    spec_verify_ct = sum(info.spec_verify_ct for info in spec_infos)
+    completion_tokens = sum(info.completion_tokens for info in spec_infos)
     return {
         "spec_accept_rate": num_correct_drafts / num_proposed_drafts if num_proposed_drafts > 0 else 0.0,
         "spec_accept_length": completion_tokens / spec_verify_ct if spec_verify_ct > 0 else 0.0,

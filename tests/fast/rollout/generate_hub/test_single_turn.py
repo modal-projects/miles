@@ -264,10 +264,7 @@ class TestMetaInfo:
             expected_sample(
                 variant,
                 spec_info=Sample.SpecInfo(
-                    spec_num_correct_drafts=10,
-                    spec_num_proposed_drafts=15,
-                    spec_verify_ct=3,
-                    completion_tokens=5,
+                    spec_num_correct_drafts=10, spec_num_proposed_drafts=15, spec_verify_ct=3, completion_tokens=5
                 ),
             )
         ]
