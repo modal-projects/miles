@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import miles.rollout.generate_hub.agentic_tool_call as agentic_tool_call
 from miles.ray.rollout.rollout_data_conversion import validate_compact_rollout_ids
+from miles.rollout.agent_function import InfraAbort
 from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.session.samples.codec import SamplesReply
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
@@ -64,12 +66,12 @@ def _session_metadata(spec_info=None):
     }
 
 
-def _patch_agent(monkeypatch, tracer):
+def _patch_agent(monkeypatch, tracer, agent=_fake_agent):
     async def fake_create(args):
         return tracer
 
     monkeypatch.setattr(agentic_tool_call.OpenAIEndpointTracer, "create", fake_create)
-    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: _fake_agent)
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: agent)
 
 
 @pytest.mark.asyncio
@@ -149,8 +151,10 @@ async def test_v2_requires_input_rollout_identity(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("empty_reason", ["no_records", "all_truncated"])
-async def test_empty_reply_returns_aborted_list(monkeypatch, empty_reason):
+@pytest.mark.parametrize(
+    ("empty_reason", "exit_status"), [("no_records", "NoModelCalls"), ("all_truncated", "AllTruncated")]
+)
+async def test_empty_reply_returns_aborted_list(monkeypatch, empty_reason, exit_status):
     tracer = _Tracer(SamplesReply(samples=[], session_metadata={}, empty_reason=empty_reason))
     _patch_agent(monkeypatch, tracer)
     generate_input = _generate_input()
@@ -161,7 +165,58 @@ async def test_empty_reply_returns_aborted_list(monkeypatch, empty_reason):
     assert len(output.samples) == 1
     assert output.samples[0] is not generate_input.sample
     assert output.samples[0].status == Sample.Status.ABORTED
+    assert output.samples[0].metadata["exit_status"] == exit_status
+    assert output.samples[0].metadata["source"] == "test"
     assert SESSION_ROLLOUT_METRICS_KEY not in output.samples[0].metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_v2", [True, False])
+async def test_infra_abort_discards_the_sample(monkeypatch, use_v2):
+    recorded = Sample(status=Sample.Status.COMPLETED, response="partial", response_length=1, tokens=[1])
+    tracer = _Tracer(SamplesReply(samples=[recorded], session_metadata={}, empty_reason=None))
+
+    async def aborting_agent(**kwargs):
+        raise InfraAbort("SandboxUnavailable", "quota exhausted")
+
+    _patch_agent(monkeypatch, tracer, agent=aborting_agent)
+    generate_input = _generate_input(use_session_server="v2" if use_v2 else "v1")
+
+    output = await agentic_tool_call.generate(generate_input)
+
+    samples = output.samples if use_v2 else [output.samples]
+    assert len(samples) == 1
+    assert samples[0].status == Sample.Status.ABORTED
+    assert samples[0].metadata["exit_status"] == "SandboxUnavailable"
+    assert samples[0] is not recorded
+    assert tracer.agent_metadata is None
+
+
+@pytest.mark.asyncio
+async def test_other_exceptions_keep_the_recorded_sample(monkeypatch):
+    recorded = Sample(status=Sample.Status.COMPLETED, response="partial", response_length=1, tokens=[1])
+    tracer = _Tracer(SamplesReply(samples=[recorded], session_metadata={}, empty_reason=None))
+
+    async def failing_agent(**kwargs):
+        raise RuntimeError("verifier crashed")
+
+    _patch_agent(monkeypatch, tracer, agent=failing_agent)
+
+    output = await agentic_tool_call.generate(_generate_input())
+
+    assert output.samples == [recorded]
+    assert recorded.status == Sample.Status.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_collection_transport_error_aborts_with_exit_status(monkeypatch):
+    tracer = _Tracer(error=httpx.ConnectError("session server unreachable"))
+    _patch_agent(monkeypatch, tracer)
+
+    output = await agentic_tool_call.generate(_generate_input())
+
+    assert output.samples[0].status == Sample.Status.ABORTED
+    assert output.samples[0].metadata["exit_status"] == "CollectFailed"
 
 
 @pytest.mark.asyncio
