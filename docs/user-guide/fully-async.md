@@ -336,6 +336,10 @@ numeric version span. Missing provenance is excluded from lag averages, not trea
 zero. The `buffer_` pair covers groups still sitting in the buffer when the step drained
 it.
 
+`aborted_groups_filtered` counts groups dropped for containing an aborted sample;
+`rollout/aborted/drop_<exit_status>` splits the same count by its recorded cause.
+Synchronous rollout reports the latter metric too.
+
 A `queue_size` pinned at zero means rollout is the bottleneck, so scale rollout capacity
 or lower per-sample generation cost. A `queue_size` pinned at capacity means training is
 the bottleneck, and the `buffer_` staleness metrics will climb with it. A rising
