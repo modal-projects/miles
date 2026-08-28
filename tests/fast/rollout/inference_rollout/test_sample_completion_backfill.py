@@ -210,7 +210,7 @@ async def test_aborted_group_is_classified_before_missing_reward(monkeypatch):
     output, _ = await task
 
     assert [group[0].group_index for group in output.samples] == [2]
-    assert output.metrics["rollout/dynamic_filter/drop_group_has_aborted"] == 1
+    assert output.metrics["rollout/aborted/drop_unknown"] == 1
     assert "rollout/dynamic_filter/drop_group_has_missing_reward" not in output.metrics
 
 
