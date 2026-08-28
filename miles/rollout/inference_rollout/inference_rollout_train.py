@@ -141,7 +141,10 @@ async def generate_rollout_async(
             all_data.append(group)
             filter_output = apply_preput_filters(args, dynamic_filter, group)
             if not filter_output.keep:
-                metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
+                if filter_output.reason == "group_has_aborted":
+                    metric_gatherer.on_aborted_group_drop(group)
+                else:
+                    metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
                 continue
 
             # add the samples to the data
