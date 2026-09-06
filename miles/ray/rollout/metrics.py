@@ -266,15 +266,15 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
 def _compute_spec_metrics(args, all_samples: list[Sample]):
     if args.sglang_speculative_algorithm is None:
         return {}
-    if args.use_session_server == "v2":
-        carriers = {}
-        for sample in all_samples:
-            if SESSION_ROLLOUT_METRICS_KEY in sample.metadata:
-                carrier = sample.metadata[SESSION_ROLLOUT_METRICS_KEY]
-                carriers[carrier["session_id"]] = carrier
-        spec_infos = [Sample.SpecInfo(**carrier["metrics"]["spec_info"]) for carrier in carriers.values()]
-    else:
-        spec_infos = [sample.spec_info for sample in all_samples]
+    carriers = {}
+    spec_infos = []
+    for sample in all_samples:
+        carrier = sample.metadata.get(SESSION_ROLLOUT_METRICS_KEY)
+        if carrier is None:
+            spec_infos.append(sample.spec_info)
+        else:
+            carriers[carrier["session_id"]] = carrier
+    spec_infos.extend(Sample.SpecInfo.from_dict(carrier["metrics"]["spec_info"]) for carrier in carriers.values())
     num_correct_drafts = sum(info.spec_num_correct_drafts for info in spec_infos)
     num_proposed_drafts = sum(info.spec_num_proposed_drafts for info in spec_infos)
     spec_verify_ct = sum(info.spec_verify_ct for info in spec_infos)

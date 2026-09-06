@@ -250,24 +250,40 @@ class TestComputeSpecMetrics:
             }
         }
 
-    def test_v2_deduplicates_shared_metrics_by_session_identity(self):
+    def test_v2_deduplicates_session_carriers_and_includes_ordinary_samples(self):
         args = make_args(sglang_speculative_algorithm="EAGLE", use_session_server="v2")
         session_1_metrics = self._spec_info(2, 4, 2, 6)
+        ordinary_sample = Sample(
+            spec_info=Sample.SpecInfo(
+                spec_num_correct_drafts=3,
+                spec_num_proposed_drafts=5,
+                spec_verify_ct=2,
+                completion_tokens=5,
+            )
+        )
         samples = [
             self._member("sid-1", session_1_metrics, rollout_id=10),
             self._member("sid-1", session_1_metrics, rollout_id=10),
-            self._member("sid-2", self._spec_info(3, 6, 1, 2), rollout_id=10),
+            ordinary_sample,
         ]
-        for sample in samples:
-            sample.spec_info = Sample.SpecInfo(100, 100, 1, 100)
+        for sample in samples[:2]:
+            sample.spec_info = Sample.SpecInfo(
+                spec_num_correct_drafts=100,
+                spec_num_proposed_drafts=100,
+                spec_verify_ct=1,
+                completion_tokens=100,
+            )
 
         out = _compute_spec_metrics(args, samples)
 
         assert out == {
-            "spec_accept_rate": pytest.approx(5 / 10),
-            "spec_accept_length": pytest.approx(8 / 3),
+            "spec_accept_rate": pytest.approx(5 / 9),
+            "spec_accept_length": pytest.approx(11 / 4),
         }
-        assert _compute_spec_metrics(args, samples[1:]) == out
+        assert _compute_spec_metrics(args, [ordinary_sample]) == {
+            "spec_accept_rate": pytest.approx(3 / 5),
+            "spec_accept_length": pytest.approx(5 / 2),
+        }
 
 
 class TestTitoMismatchMetrics:
