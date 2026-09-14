@@ -208,12 +208,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         verify_megatron_parallel_state(self.model)
 
-        if (
-            role == "actor"
-            and args.use_rollout_routing_replay
-            and not args.indep_dp
-            and parallel_state.pp.size > 1
-        ):
+        if role == "actor" and args.use_rollout_routing_replay and not args.indep_dp and parallel_state.pp.size > 1:
             local_routing_spec = {
                 "rank": dist.get_rank(),
                 "dp_rank": parallel_state.intra_dp.rank,
@@ -703,18 +698,28 @@ class MegatronTrainRayActor(TrainRayActor):
 
             maybe_finalize_async_save(blocking=True)
 
-        if is_multi_lora_enabled(self.args):
+        multi_lora = is_multi_lora_enabled(self.args)
+        if multi_lora:
             from miles.backends.megatron_utils.multi_lora_utils import save_due_adapter_checkpoints
 
             if not save_due_adapter_checkpoints(self.args, self.model):
                 return
         else:
-            save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
+            export = None
+            if self.args.save_hf is not None and self.role == "actor":
+                from miles.backends.megatron_utils.hf_export import start_hf_export
+
+                export = start_hf_export(self.args, rollout_id, self.model)
+            try:
+                save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
+            finally:
+                if export is not None:
+                    export.finish()
 
         if force_sync and self.args.async_save:
             maybe_finalize_async_save(blocking=True)
 
-        if self.args.save_hf is not None and self.role == "actor":
+        if multi_lora and self.args.save_hf is not None and self.role == "actor":
             from miles.backends.megatron_utils.hf_export import save_hf_model
 
             save_hf_model(self.args, rollout_id, self.model)
@@ -741,10 +746,8 @@ class MegatronTrainRayActor(TrainRayActor):
     def export_hf(self, rollout_id: int, path: str) -> None:
         """Export current weights as an HF checkpoint to ``path`` (collective).
 
-        Uses the direct megatron->HF converters (the weight updater's machinery), so
-        export coverage matches weight-sync coverage. Unlike the periodic --save-hf
-        path inside save_model, failures propagate to the caller so an eval snapshot
-        that failed to export can be skipped loudly.
+        Failures propagate to the caller so an eval snapshot that failed to export
+        can be skipped loudly.
         """
         self._heartbeat.bump()
         from miles.backends.megatron_utils.hf_export import save_hf_model
