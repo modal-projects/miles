@@ -4,6 +4,7 @@ import logging
 import os
 from string import Formatter
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from sglang_router.launch_router import RouterArgs
@@ -906,6 +907,21 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 nargs="+",
                 help="Address and ports of the external engines.",
+            )
+            parser.add_argument(
+                "--rollout-endpoint-url",
+                type=str,
+                default=None,
+                help=(
+                    "Base URL of an opaque rollout service. Miles sends rollout requests to this "
+                    "endpoint and does not launch or manage its router or inference engines."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-session-affinity-header",
+                type=str,
+                default="X-SMG-Routing-Key",
+                help="Header carrying the session ID to the rollout backend.",
             )
             parser.add_argument(
                 "--update-weight-transfer-mode",
@@ -2875,6 +2891,26 @@ def miles_validate_args(args):
             "version; pass it bare (or 'v1') for the append-only linear server, or 'v2' for "
             "tree serving."
         )
+
+    if args.rollout_endpoint_url is not None:
+        args.rollout_endpoint_url = args.rollout_endpoint_url.rstrip("/")
+        endpoint = urlparse(args.rollout_endpoint_url)
+        if endpoint.scheme not in ("http", "https") or not endpoint.netloc:
+            raise ValueError(
+                f"Invalid --rollout-endpoint-url {args.rollout_endpoint_url!r}; " "expected an absolute HTTP URL."
+            )
+        if endpoint.query or endpoint.fragment:
+            raise ValueError("--rollout-endpoint-url must not contain a query or fragment.")
+        assert args.rollout_num_gpus == 0, (
+            "--rollout-endpoint-url describes a service whose GPUs Miles does not own; " "set --rollout-num-gpus 0."
+        )
+        assert (
+            args.eval_num_gpus == 0
+        ), "--rollout-endpoint-url cannot be combined with a Miles-managed eval fleet; set --eval-num-gpus 0."
+        assert (
+            args.rollout_external_engine_addrs is None
+        ), "--rollout-endpoint-url and --rollout-external-engine-addrs select different external rollout APIs."
+        args.rollout_external = True
 
     assert not (
         args.use_session_server and args.partial_rollout
