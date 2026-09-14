@@ -55,9 +55,9 @@ from collections.abc import Callable
 from typing import Any
 
 from openai import AsyncOpenAI
-from miles.rollout.agentic.session import resolve_session_url
 
 from miles.rollout.agent_function import InfraAbort
+from miles.rollout.agentic.session import resolve_session_url
 
 logger = logging.getLogger(__name__)
 

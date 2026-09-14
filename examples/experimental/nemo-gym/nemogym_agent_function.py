@@ -37,9 +37,9 @@ import random
 from typing import Any
 
 import httpx
-from miles.rollout.agentic.session import resolve_session_url
 
 from miles.rollout.agent_function import InfraAbort
+from miles.rollout.agentic.session import resolve_session_url
 
 logger = logging.getLogger(__name__)
 
