@@ -49,8 +49,23 @@ async def train(args):
 
     maybe_start_mini_ft_controller(args)
 
-    # always update weight first so that sglang has the loaded weights from training.
-    await update_weights(actor_model, rollout_executor)
+    initial_eval = args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train
+    overlap_initial_weight_sync = (
+        args.update_weight_transfer_mode == "disk-delta"
+        and args.rollout_endpoint_url is not None
+        and not args.check_weight_update_equal
+        and not initial_eval
+        and args.start_rollout_id < args.num_rollout
+    )
+
+    # An opaque disk-delta service already serves the configured checkpoint. Its
+    # first update only captures the trainer baseline, so it can overlap the
+    # first rollout. All other initial updates remain a startup barrier.
+    initial_weight_sync_task = None
+    if overlap_initial_weight_sync:
+        initial_weight_sync_task = await eager_create_task(update_weights(actor_model, rollout_executor))
+    else:
+        await update_weights(actor_model, rollout_executor)
 
     if args.check_weight_update_equal:
         await inference_controller.check_weights(
@@ -62,7 +77,7 @@ async def train(args):
 
     eval_dispatcher = EvalDispatcher(args, actor_model, rollout_executor)
 
-    if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
+    if initial_eval:
         await inference_controller.prepare_eval()
         await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
 
@@ -79,6 +94,8 @@ async def train(args):
 
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
+    if initial_weight_sync_task is not None:
+        await initial_weight_sync_task
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:
