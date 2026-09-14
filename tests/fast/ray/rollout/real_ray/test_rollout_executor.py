@@ -27,7 +27,11 @@ def http_client_calls(monkeypatch) -> list[str]:
     import miles.ray.rollout.rollout_executor as rexec
 
     recorded: list[str] = []
-    monkeypatch.setattr(rexec, "init_http_client", lambda args: recorded.append("init_http_client"))
+    monkeypatch.setattr(
+        rexec,
+        "init_http_client",
+        lambda args, *, max_connections: recorded.append("init_http_client"),
+    )
     return recorded
 
 
