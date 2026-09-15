@@ -179,9 +179,7 @@ class DefaultDataBuffer(DataBuffer):
 
                 dequeued_at = time.monotonic()
                 if entry.enqueued_at is not None:
-                    self._metric_queue_residence_seconds.append(
-                        max(0.0, dequeued_at - entry.enqueued_at)
-                    )
+                    self._metric_queue_residence_seconds.append(max(0.0, dequeued_at - entry.enqueued_at))
                 oldest = group_oldest_weight_version(entry.group)
                 newest = group_newest_weight_version(entry.group)
 
@@ -197,9 +195,7 @@ class DefaultDataBuffer(DataBuffer):
                     if oldest is not None and newest is not None:
                         self._metric_accepted_version_spans.append(newest - oldest)
                     if current_version is not None and newest is not None:
-                        self._metric_accepted_newest_to_consume_lag.append(
-                            current_version - newest
-                        )
+                        self._metric_accepted_newest_to_consume_lag.append(current_version - newest)
                     return entry
                 logger.info(f"Filtered stale group ({staleness=} > max={self._args.max_weight_staleness})")
                 self._metric_stale_groups += 1

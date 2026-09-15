@@ -51,9 +51,7 @@ def _numeric_agent_metrics(samples: list[Sample], output: dict[str, Any]) -> Non
             key
             for metrics in agent_metrics
             for key, value in metrics.items()
-            if key != "agent_worker_index"
-            and isinstance(value, (int, float))
-            and not isinstance(value, bool)
+            if key != "agent_worker_index" and isinstance(value, (int, float)) and not isinstance(value, bool)
         }
     )
     for key in keys:
@@ -76,15 +74,12 @@ def _summarize_sample_metadata(
             key
             for sample in samples
             for key, value in sample.metadata.items()
-            if key.startswith(metadata_prefix)
-            and isinstance(value, (int, float))
+            if key.startswith(metadata_prefix) and isinstance(value, (int, float))
         }
     )
     for key in keys:
         values = [
-            float(sample.metadata[key])
-            for sample in samples
-            if isinstance(sample.metadata.get(key), (int, float))
+            float(sample.metadata[key]) for sample in samples if isinstance(sample.metadata.get(key), (int, float))
         ]
         _summary(
             output,
@@ -193,10 +188,9 @@ def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         if isinstance(metrics.get("verifier_return_code"), (int, float))
     ]
     if verifier_return_codes:
-        output["rollout_agent/verifier_nonzero_return_code_ratio"] = (
-            sum(code != 0 for code in verifier_return_codes)
-            / len(verifier_return_codes)
-        )
+        output["rollout_agent/verifier_nonzero_return_code_ratio"] = sum(
+            code != 0 for code in verifier_return_codes
+        ) / len(verifier_return_codes)
     context_limits = sum(bool(metrics.get("context_limit_exceeded")) for metrics in agent_metrics)
     output["rollout_agent/context_limit_exit_ratio"] = context_limits / len(samples)
     output["rollout_agent/step_limit_exit_ratio"] = max(

@@ -2,9 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from miles.backends.megatron_utils.megatron_to_hf.deepseekv3 import (
-    convert_deepseekv3_to_hf,
-)
+from miles.backends.megatron_utils.megatron_to_hf.deepseekv3 import convert_deepseekv3_to_hf
 
 
 def _args():

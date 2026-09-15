@@ -1,9 +1,8 @@
 import asyncio
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
-
 
 MODAL_SWE_DIR = Path(__file__).parents[3] / "examples" / "experimental" / "modal-swe"
 sys.path.insert(0, str(MODAL_SWE_DIR))

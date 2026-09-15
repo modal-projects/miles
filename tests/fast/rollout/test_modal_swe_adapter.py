@@ -12,11 +12,11 @@ sys.path.insert(0, str(MODAL_SWE_DIR))
 
 import modal_swe_agent_function as agent_function_module  # noqa: E402
 from modal_swe_agent_function import (  # noqa: E402
-    _AgentWorker,
-    _EnvironmentSnapshot,
     _OBSERVATION_TEMPLATE,
-    _RayAgentWorkerPool,
+    _AgentWorker,
     _attach_client_model_timings,
+    _environment_metrics,
+    _EnvironmentSnapshot,
     _exception_metadata,
     _failure,
     _instrument_model_requests,
@@ -24,15 +24,16 @@ from modal_swe_agent_function import (  # noqa: E402
     _is_infrastructure_error,
     _is_sandbox_not_found_error,
     _is_truncated_generation_error,
-    _sandbox_boot_semaphore,
-    _environment_metrics,
     _parse_reward,
     _prepare_environment,
+    _RayAgentWorkerPool,
+    _sandbox_boot_semaphore,
     _task_cwd,
     pick_latest_leaf,
     postprocess_samples,
     reward_func,
 )
+from modal_swe_metrics import log_rollout_data  # noqa: E402
 from modal_swe_sandbox import (  # noqa: E402
     _BOUNDED_COMMAND_RUNNER,
     ModalSWEEnvironment,
@@ -41,7 +42,7 @@ from modal_swe_sandbox import (  # noqa: E402
     _parse_bounded_command_response,
     sandbox_settings,
 )
-from modal_swe_metrics import log_rollout_data  # noqa: E402
+
 from miles.utils.types import Sample
 
 
@@ -434,7 +435,7 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
                     {"t0": 1.0, "t1": 2.5, "turn": 1},
                     {"t0": 3.0, "t1": 5.5, "turn": 2},
                 ],
-            }
+            },
         ),
         Sample(
             response_length=20,
@@ -450,7 +451,7 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
                 },
                 "session_collect/total_seconds": 1.0,
                 "lifecycle": {"t0": 10.0, "t1": 13.5, "turn": 1},
-            }
+            },
         ),
     ]
     metrics = {}
@@ -466,10 +467,7 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
     assert metrics["rollout_model/client_minus_backend_seconds_signed"] == pytest.approx(1.5)
     assert metrics["rollout_agent/agent_tool_output_hard_limit_count_mean"] == 0.5
     assert metrics["rollout_agent/context_limit_exit_ratio"] == 0.5
-    assert (
-        "client_model_request_durations_seconds"
-        not in samples[0].metadata["agent_metrics"]
-    )
+    assert "client_model_request_durations_seconds" not in samples[0].metadata["agent_metrics"]
 
 
 def test_rollout_metrics_include_masked_infrastructure_attempts():
@@ -839,18 +837,13 @@ def test_truncated_generation_error_is_recognized_through_wrappers():
     class APIError(RuntimeError):
         status_code = 409
 
-    root = APIError(
-        "truncated generation cannot be extended: the matched node ended "
-        "with finish_reason='length'"
-    )
+    root = APIError("truncated generation cannot be extended: the matched node ended " "with finish_reason='length'")
     wrapper = RuntimeError("episode cleanup failed")
     wrapper.__cause__ = root
 
     assert _is_truncated_generation_error(wrapper)
     assert _is_truncated_generation_error(
-        RuntimeError(
-            "APIError: Error code: 409 - truncated generation cannot be extended"
-        )
+        RuntimeError("APIError: Error code: 409 - truncated generation cannot be extended")
     )
 
 

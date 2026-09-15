@@ -203,9 +203,9 @@ class Sample:
             assert (
                 len(self.rollout_log_probs) == self.response_length
             ), f"rollout_log_probs length ({len(self.rollout_log_probs)}) != response_length ({self.response_length})"
-        assert (self.rollout_sampling_mask_ids is None) == (self.rollout_sampling_mask_offsets is None), (
-            "rollout sampling mask ids and offsets must either both be set or both be None"
-        )
+        assert (self.rollout_sampling_mask_ids is None) == (
+            self.rollout_sampling_mask_offsets is None
+        ), "rollout sampling mask ids and offsets must either both be set or both be None"
         if self.rollout_sampling_mask_offsets is not None:
             assert self.rollout_sampling_mask_offsets, "rollout_sampling_mask_offsets must not be empty"
             assert len(self.rollout_sampling_mask_offsets) == self.response_length + 1, (

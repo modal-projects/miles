@@ -310,11 +310,7 @@ class ModalSWEEnvironment:
         cpu_env = os.getenv("MODAL_SWE_CPUS")
         memory_env = os.getenv("MODAL_SWE_MEMORY_MIB")
         cpu_request = cpu if cpu is not None else (float(cpu_env) if cpu_env else None)
-        memory_request = (
-            memory_mib
-            if memory_mib is not None
-            else (int(memory_env) if memory_env else None)
-        )
+        memory_request = memory_mib if memory_mib is not None else (int(memory_env) if memory_env else None)
 
         started = time.perf_counter()
         create_kwargs = {
@@ -389,9 +385,7 @@ class ModalSWEEnvironment:
             process = self.sandbox.exec("touch", _SANDBOX_READY_PATH)
             return_code = process.wait()
             if return_code != 0:
-                raise RuntimeError(
-                    f"Failed to publish Sandbox readiness marker: {return_code}"
-                )
+                raise RuntimeError(f"Failed to publish Sandbox readiness marker: {return_code}")
             self.sandbox.wait_until_ready()
         except BaseException:
             # A failed probe does not terminate the Sandbox automatically.
@@ -520,7 +514,8 @@ class ModalSWEEnvironment:
                 self.command_timeout_count += 1
                 diagnostic = result.output_tail if result.output_truncated else result.output
                 raise SandboxCommandTimeoutError(
-                    f"command exceeded {command_timeout:.0f}s" + (f"; output tail:\n{diagnostic[-4000:]}" if diagnostic else ""),
+                    f"command exceeded {command_timeout:.0f}s"
+                    + (f"; output tail:\n{diagnostic[-4000:]}" if diagnostic else ""),
                     result=result,
                 )
             return result
@@ -573,9 +568,7 @@ class ModalSWEEnvironment:
         return_code = process.wait()
         if return_code != 0:
             stderr = process.stderr.read().decode("utf-8", errors="replace")
-            raise SandboxTransportError(
-                f"Failed to upload {source} to sandbox: {stderr}"
-            )
+            raise SandboxTransportError(f"Failed to upload {source} to sandbox: {stderr}")
         self.upload_time += time.perf_counter() - started
         self.upload_bytes += payload_size
 
@@ -641,9 +634,7 @@ def _validate_modal_app_name(app_name: str) -> str:
 
 def sandbox_settings() -> dict[str, int | str]:
     return {
-        "app_name": _validate_modal_app_name(
-            os.getenv("MODAL_SWE_SANDBOX_APP", "miles-modal-swe-sandboxes")
-        ),
+        "app_name": _validate_modal_app_name(os.getenv("MODAL_SWE_SANDBOX_APP", "miles-modal-swe-sandboxes")),
         "episode_timeout": int(os.getenv("MODAL_SWE_EPISODE_TIMEOUT", "3600")),
         "exec_timeout": int(os.getenv("MODAL_SWE_EXEC_TIMEOUT", "120")),
         "verify_timeout": int(os.getenv("MODAL_SWE_VERIFY_TIMEOUT", "1200")),

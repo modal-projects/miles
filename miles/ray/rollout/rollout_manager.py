@@ -16,10 +16,7 @@ from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.rollout_server import RolloutServer, start_rollout_servers
 from miles.ray.rollout.router_manager import start_session_server
 from miles.ray.rollout.server_cell import get_cell_indexer_of_id_map
-from miles.ray.rollout.train_data_conversion import (
-    convert_samples_to_train_data,
-    put_train_data,
-)
+from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, put_train_data
 from miles.ray.utils import Lock
 from miles.rollout.base_types import (
     RolloutFnConstructorInput,
@@ -152,6 +149,7 @@ class RolloutManager:
         for monitor in self._health_monitors:
             monitor.stop()
         finish_tracking()
+
     # -------------------------- data generation -----------------------------
 
     async def generate(self, rollout_id):

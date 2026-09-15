@@ -22,8 +22,8 @@ from miles.backends.training_utils.log_utils import (
 from miles.backends.training_utils.loss import compute_advantages_and_returns, get_log_probs_and_entropy, loss_function
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
 from miles.backends.training_utils.sampling_mask import get_rollout_sampling_mask
-from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 from miles.ray.train_actor import TrainRayActor
+from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 from miles.utils import train_dump_utils, train_metric_utils
 from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group

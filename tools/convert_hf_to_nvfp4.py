@@ -90,7 +90,9 @@ def _expand_batched_expert_params(name: str, weight: torch.Tensor) -> list[tuple
         if weight.dim() != 3:
             raise ValueError(f"Expected [experts, hidden, intermediate] for {name}, got {tuple(weight.shape)}.")
         prefix = name.removesuffix(".down_proj")
-        return [(f"{prefix}.{expert_idx}.down_proj.weight", weight[expert_idx]) for expert_idx in range(weight.shape[0])]
+        return [
+            (f"{prefix}.{expert_idx}.down_proj.weight", weight[expert_idx]) for expert_idx in range(weight.shape[0])
+        ]
     return [(name, weight)]
 
 

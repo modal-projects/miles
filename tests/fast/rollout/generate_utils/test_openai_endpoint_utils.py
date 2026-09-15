@@ -9,10 +9,7 @@ import pytest
 
 import miles.utils.http_utils as http_utils
 from miles.rollout.generate_utils import openai_endpoint_utils
-from miles.rollout.generate_utils.openai_endpoint_utils import (
-    OpenAIEndpointTracer,
-    SessionInfrastructureError,
-)
+from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer, SessionInfrastructureError
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, COMPUTED_FIELDS_V2, encode_samples
 from miles.utils.http_utils import post_bytes_no_retry
 from miles.utils.types import Sample

@@ -10,7 +10,6 @@ import os
 import shlex
 import threading
 import time
-import tomllib
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -20,6 +19,7 @@ from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
+import tomllib
 from modal_swe_sandbox import (
     ModalSWEEnvironment,
     SandboxCommandTimeoutError,
@@ -121,9 +121,7 @@ def _task_dir(metadata: dict[str, Any]) -> Path:
     if explicit:
         path = Path(explicit)
     elif instance_id:
-        path = Path(os.getenv("MODAL_SWE_TASKS_DIR", "/data/tasks")) / str(
-            instance_id
-        ).lower()
+        path = Path(os.getenv("MODAL_SWE_TASKS_DIR", "/data/tasks")) / str(instance_id).lower()
     else:
         raise ValueError("Modal SWE metadata must contain task_dir or instance_id")
     if not path.is_dir():
@@ -316,9 +314,7 @@ def _is_truncated_generation_error(error: BaseException) -> bool:
     for current in _exception_chain(error):
         message = str(current).lower()
         status_code = getattr(current, "status_code", None)
-        if marker in message and (
-            status_code == 409 or "error code: 409" in message
-        ):
+        if marker in message and (status_code == 409 or "error code: 409" in message):
             return True
     return False
 
@@ -329,10 +325,7 @@ def _exception_metadata(error: BaseException) -> dict[str, Any]:
     return {
         "error_type": f"{type(error).__module__}.{type(error).__name__}",
         "root_error_type": f"{type(root).__module__}.{type(root).__name__}",
-        "error_chain": [
-            f"{type(item).__module__}.{type(item).__name__}"
-            for item in chain[:8]
-        ],
+        "error_chain": [f"{type(item).__module__}.{type(item).__name__}" for item in chain[:8]],
         "root_error": f"{type(root).__name__}: {root}"[:1000],
     }
 
@@ -560,10 +553,7 @@ class _EnvironmentSnapshot:
 
     def since(self, previous: _EnvironmentSnapshot) -> _EnvironmentSnapshot:
         return _EnvironmentSnapshot(
-            **{
-                field: max(0, getattr(self, field) - getattr(previous, field))
-                for field in self.__dataclass_fields__
-            }
+            **{field: max(0, getattr(self, field) - getattr(previous, field)) for field in self.__dataclass_fields__}
         )
 
 
@@ -625,19 +615,26 @@ def _environment_metrics(
             agent_snapshot.exec_time - agent_snapshot.exec_remote_time,
         ),
         "agent_tool_exec_mean": (sum(agent_durations) / len(agent_durations) if agent_durations else 0.0),
-        "agent_tool_remote_exec_mean": (sum(agent_remote_durations) / len(agent_remote_durations) if agent_remote_durations else 0.0),
-        "agent_tool_transport_mean": (sum(agent_transport_durations) / len(agent_transport_durations) if agent_transport_durations else 0.0),
-        "agent_tool_exec_p90": (sorted(agent_durations)[round((len(agent_durations) - 1) * 0.90)] if agent_durations else 0.0),
+        "agent_tool_remote_exec_mean": (
+            sum(agent_remote_durations) / len(agent_remote_durations) if agent_remote_durations else 0.0
+        ),
+        "agent_tool_transport_mean": (
+            sum(agent_transport_durations) / len(agent_transport_durations) if agent_transport_durations else 0.0
+        ),
+        "agent_tool_exec_p90": (
+            sorted(agent_durations)[round((len(agent_durations) - 1) * 0.90)] if agent_durations else 0.0
+        ),
         "agent_tool_exec_max": max(agent_durations, default=0.0),
         "agent_tool_input_mib": sum(agent_input_sizes) / (1024 * 1024),
         "agent_tool_input_mean_bytes": (sum(agent_input_sizes) / len(agent_input_sizes) if agent_input_sizes else 0.0),
         "agent_tool_input_max_bytes": max(agent_input_sizes, default=0),
         "agent_tool_input_over_64k_count": sum(size > 65536 for size in agent_input_sizes),
-        "agent_tool_input_over_64k_ratio": (sum(size > 65536 for size in agent_input_sizes) / len(agent_input_sizes) if agent_input_sizes else 0.0),
+        "agent_tool_input_over_64k_ratio": (
+            sum(size > 65536 for size in agent_input_sizes) / len(agent_input_sizes) if agent_input_sizes else 0.0
+        ),
         "tool_timeout_count": agent_snapshot.command_timeout_count,
         "agent_tool_output_mib": agent_snapshot.output_bytes / (1024 * 1024),
-        "agent_tool_transferred_mib": agent_snapshot.transferred_bytes
-        / (1024 * 1024),
+        "agent_tool_transferred_mib": agent_snapshot.transferred_bytes / (1024 * 1024),
         "agent_tool_output_truncated_count": agent_snapshot.output_truncated_count,
         "agent_tool_output_truncated_ratio": (
             agent_snapshot.output_truncated_count / agent_snapshot.command_count
@@ -961,7 +958,9 @@ def _run_episode_sync(
         except SandboxCommandTimeoutError as error:
             diagnostic = ""
             if error.result is not None:
-                diagnostic = (error.result.output_tail if error.result.output_truncated else error.result.output)[-_VERIFIER_LOG_TAIL_CHARS:]
+                diagnostic = (error.result.output_tail if error.result.output_truncated else error.result.output)[
+                    -_VERIFIER_LOG_TAIL_CHARS:
+                ]
             logger.warning(
                 "Modal SWE verifier timed out for %s after %ss",
                 task_dir.name,
@@ -1096,10 +1095,7 @@ def _sandbox_boot_semaphore() -> threading.BoundedSemaphore:
     default = max(1, _threads_per_agent_process())
     limit = int(os.getenv("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS", str(default)))
     if limit <= 0:
-        raise ValueError(
-            "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS must be positive, "
-            f"got {limit}"
-        )
+        raise ValueError("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS must be positive, " f"got {limit}")
     return threading.BoundedSemaphore(limit)
 
 
@@ -1214,8 +1210,7 @@ class _AgentWorker:
         except Exception as error:
             if not _is_infrastructure_error(error):
                 raise RuntimeError(
-                    f"Modal SWE episode failed during {current_phase}: "
-                    f"{type(error).__name__}: {error}"
+                    f"Modal SWE episode failed during {current_phase}: " f"{type(error).__name__}: {error}"
                 ) from None
             logger.warning(
                 "Modal SWE worker episode failed during %s: %s: %s",

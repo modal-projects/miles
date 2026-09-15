@@ -682,9 +682,7 @@ def test_compact_routing_replay_for_transport_preserves_values(num_experts, expe
     values = np.array([0, num_experts - 1], dtype=np.int32).reshape(1, 1, 2)
     data = {"tokens": [[1]], "rollout_routed_experts": [values]}
 
-    result = compact_routing_replay_for_transport(
-        make_args(num_experts=num_experts, moe_router_topk=2), data
-    )
+    result = compact_routing_replay_for_transport(make_args(num_experts=num_experts, moe_router_topk=2), data)
 
     assert result is not data
     assert result["rollout_routed_experts"][0].dtype == np.dtype(expected_dtype)

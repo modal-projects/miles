@@ -28,9 +28,7 @@ def _expand_batched_expert_params(converted_named_params):
                 expanded_params.append((f"{prefix}.{expert_idx}.up_proj.weight", up_weights[expert_idx]))
         elif name.endswith(".mlp.experts.down_proj"):
             if weight.dim() != 3:
-                raise ValueError(
-                    f"Expected [experts, hidden, intermediate] for {name}, got {tuple(weight.shape)}."
-                )
+                raise ValueError(f"Expected [experts, hidden, intermediate] for {name}, got {tuple(weight.shape)}.")
             prefix = name.removesuffix(".down_proj")
             expanded_params.extend(
                 (f"{prefix}.{expert_idx}.down_proj.weight", weight[expert_idx])

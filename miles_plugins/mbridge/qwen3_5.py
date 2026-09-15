@@ -294,14 +294,10 @@ class Qwen3_5Bridge(Qwen2MoEBridge):
         num_experts = self.config.num_moe_experts
         ep_size = self.mpu.ep_size
         if num_experts % ep_size:
-            raise ValueError(
-                f"num_moe_experts={num_experts} is not divisible by ep_size={ep_size}"
-            )
+            raise ValueError(f"num_moe_experts={num_experts} is not divisible by ep_size={ep_size}")
         num_local_experts = num_experts // ep_size
         if not 0 <= local_expert_id < num_local_experts:
-            raise ValueError(
-                f"local expert {local_expert_id} is outside [0, {num_local_experts})"
-            )
+            raise ValueError(f"local expert {local_expert_id} is outside [0, {num_local_experts})")
         return self.mpu.ep_rank * num_local_experts + local_expert_id
 
     def _convert_mtp_param(self, name: str) -> list[str]:
@@ -395,8 +391,7 @@ class Qwen3_5Bridge(Qwen2MoEBridge):
                 expert_id = self._global_expert_id(local_expert_id)
                 if w.shape[0] != self.config.num_moe_experts:
                     raise ValueError(
-                        f"expected {self.config.num_moe_experts} fused experts, "
-                        f"got shape {tuple(w.shape)}"
+                        f"expected {self.config.num_moe_experts} fused experts, " f"got shape {tuple(w.shape)}"
                     )
                 expert_w = w[expert_id]
                 return expert_w.contiguous()

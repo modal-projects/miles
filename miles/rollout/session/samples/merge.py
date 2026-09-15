@@ -16,10 +16,7 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
     get_routed_experts_from_response,
 )
 from miles.rollout.generate_utils.sample_utils import merge_samples
-from miles.rollout.generate_utils.sampling_mask import (
-    append_sampling_metadata,
-    sampling_mask_replay_enabled,
-)
+from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata, sampling_mask_replay_enabled
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
 from miles.utils.types import Sample
@@ -121,9 +118,7 @@ def _compute_sample_from_openai_record(
     # empty dict unless trajectory debugging is enabled.  The configured
     # rollout contract is therefore authoritative; the request flag remains a
     # compatibility path for older/debug records and focused tests.
-    if not is_aborted and (
-        sampling_mask_replay_enabled(args) or record.request.get("return_sampling_mask", False)
-    ):
+    if not is_aborted and (sampling_mask_replay_enabled(args) or record.request.get("return_sampling_mask", False)):
         # SGLang aborts are infrastructure outcomes, not samples from the
         # configured top-p distribution. In particular, a request cancelled
         # before scheduler dispatch has no sampled-token support to return.

@@ -99,9 +99,7 @@ def _aborted_generation_response() -> Response:
     )
 
 
-def _configure_sampling_replay_request(
-    request_body: dict, *, top_p: float, top_k: int, temperature: float
-) -> None:
+def _configure_sampling_replay_request(request_body: dict, *, top_p: float, top_k: int, temperature: float) -> None:
     """Request rollout sampling support without changing replayable filters."""
     actual_temperature = request_body.get("temperature", temperature)
     if actual_temperature != temperature:

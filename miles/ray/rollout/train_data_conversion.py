@@ -4,8 +4,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from miles.utils import object_store
 from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
+from miles.utils import object_store
 from miles.utils.dp_schedule import build_dp_schedule, has_full_schedule_config
 from miles.utils.multi_lora import is_multi_lora_enabled
 from miles.utils.object_store import ValueSpec
@@ -102,9 +102,7 @@ def _routing_replay_wire_dtype(num_experts: int) -> np.dtype:
         return np.dtype(np.uint16)
     if num_experts <= np.iinfo(np.int32).max + 1:
         return np.dtype(np.int32)
-    raise ValueError(
-        f"num_experts={num_experts} exceeds the signed int32 R3 protocol range"
-    )
+    raise ValueError(f"num_experts={num_experts} exceeds the signed int32 R3 protocol range")
 
 
 def _validate_routing_replay_ids(data: np.ndarray, *, num_experts: int, position: int) -> None:
@@ -390,9 +388,7 @@ def put_train_data(args, data: dict[str, Any], train_parallel_config: dict | Non
     shards = _make_train_data_shards(args, data, train_parallel_config)
     routing_specs = train_parallel_config.get("routing_replay_specs")
     if routing_specs is None or "rollout_routed_experts" not in data:
-        return {
-            "data_ref": [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
-        }
+        return {"data_ref": [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]}
 
     routing_by_dp = [shard.pop("rollout_routed_experts") for shard in shards]
     data_refs = [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
@@ -422,8 +418,7 @@ def _put_routing_replay_shards(*, routing_by_dp, routing_specs, dp_size: int):
     for rank, spec in enumerate(routing_specs):
         if spec["rank"] != rank:
             raise ValueError(
-                "Routing replay specs must be ordered by trainer rank; "
-                f"position={rank}, spec_rank={spec['rank']}"
+                "Routing replay specs must be ordered by trainer rank; " f"position={rank}, spec_rank={spec['rank']}"
             )
         dp_rank = int(spec["dp_rank"])
         if not 0 <= dp_rank < dp_size:

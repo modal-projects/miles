@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 
+from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 from miles.utils.iter_utils import group_by
 from miles.utils.metric_utils import (
     compute_pass_rate,
@@ -14,7 +15,6 @@ from miles.utils.metric_utils import (
 from miles.utils.misc import load_function
 from miles.utils.tracking_utils import tracking
 from miles.utils.types import Sample
-from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
 
 logger = logging.getLogger(__name__)
 

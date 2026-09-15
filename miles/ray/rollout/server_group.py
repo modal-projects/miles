@@ -16,8 +16,8 @@ from miles.ray.rollout.addr_allocator import (
 )
 from miles.ray.rollout.server_engine import ServerEngine
 from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
-from miles.utils import dumper_utils
 from miles.rollout.generate_utils.sampling_mask import sampling_mask_replay_enabled
+from miles.utils import dumper_utils
 
 logger = logging.getLogger(__name__)
 

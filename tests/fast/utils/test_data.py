@@ -10,10 +10,7 @@ class _UnusedProcessor:
 
 def test_text_prompt_bypasses_multimodal_processor(tmp_path) -> None:
     prompt_path = tmp_path / "prompts.jsonl"
-    prompt_path.write_text(
-        json.dumps({"prompt": "Fix the bug", "metadata": {"instance_id": "task"}})
-        + "\n"
-    )
+    prompt_path.write_text(json.dumps({"prompt": "Fix the bug", "metadata": {"instance_id": "task"}}) + "\n")
 
     dataset = Dataset(
         str(prompt_path),
