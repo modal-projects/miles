@@ -112,6 +112,12 @@ class RayTrainGroup:
         """Save actor model"""
         await self._broadcast("save_model", rollout_id, force_sync=force_sync)
 
+    async def finish_checkpoints(self):
+        if self.args.train_backend == "megatron":
+            if self.args.offload_train and self.args.async_save:
+                await self.onload()
+            await self._broadcast("finish_checkpoints")
+
     async def export_hf(self, rollout_id: int, path: str):
         """Export current weights as an HF checkpoint (collective across all ranks)."""
         await self._broadcast("export_hf", rollout_id, path)

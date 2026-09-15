@@ -68,6 +68,7 @@ def _worker(actor_module, role, *, asleep=True):
     worker.role = role
     worker._asleep = asleep
     worker._heartbeat = Mock()
+    worker._checkpoint_lifecycle = Mock()
     worker.wake_up = Mock()
     worker.sleep = Mock()
     return worker
@@ -136,9 +137,11 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
         custom_megatron_post_save_hook_path=None,
         debug_rollout_only=False,
         save_hf=None,
+        save="/tmp/checkpoints",
     )
     worker.role = "actor"
     worker._heartbeat = Mock()
+    worker._checkpoint_lifecycle = Mock()
     worker.model = object()
     worker.optimizer = object()
     worker.opt_param_scheduler = object()
@@ -173,6 +176,7 @@ def test_update_weights_only_uses_temporary_process_groups_when_asleep(actor_mod
     )
     worker._asleep = asleep
     worker._heartbeat = Mock()
+    worker._checkpoint_lifecycle = Mock()
     worker.weight_updater = Mock()
     worker.weight_updater.is_rollout_engines_fresh.return_value = True
     info = Namespace(
@@ -270,6 +274,7 @@ def _actor_reuse_worker(actor_module, **args_overrides):
     worker.weight_updater = Mock()
     worker.weight_updater.pop_metrics.return_value = {}
     worker._heartbeat = Mock()
+    worker._checkpoint_lifecycle = Mock()
     return worker
 
 

@@ -84,11 +84,11 @@ async def train(args):
             if args.use_critic and args.offload_train:
                 await model.offload()
 
+        await rollout_manager.save.remote(rollout_id)
         if (not args.use_critic) or (rollout_id >= args.num_critic_only_steps):
             await save_training_model(actor_model)
         if args.use_critic:
             await save_training_model(critic_model)
-        await rollout_manager.save.remote(rollout_id)
 
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
@@ -147,6 +147,9 @@ async def train(args):
             )
             break
 
+    await actor_model.finish_checkpoints()
+    if args.use_critic:
+        await critic_model.finish_checkpoints()
     await rollout_manager.dispose.remote()
 
 

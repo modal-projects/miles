@@ -1373,6 +1373,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--custom-checkpoint-completed-hook-path",
+                type=str,
+                default=None,
+                help=(
+                    "Megatron callback called on every actor rank after native, HF, and rollout sampler files "
+                    "are closed: hook(args, rollout_id, checkpoint_dir, hf_checkpoint_dir). "
+                    "Called collectively on the training thread; failures propagate to all ranks."
+                ),
+            )
+            parser.add_argument(
                 "--custom-megatron-post-save-hook-path",
                 type=str,
                 default=None,

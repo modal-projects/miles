@@ -19,6 +19,7 @@ async def prepare_rollout_request(
     payload: dict[str, Any],
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """Prepare transport options; retry_response returns a bool or awaitable bool for pre-dispatch rejection."""
     request = {
         "url": url,
         "payload": payload,
@@ -45,4 +46,6 @@ async def prepare_rollout_request(
         raise ValueError("max_retries must be at least 1")
     if request["retry_sleep"] < 0:
         raise ValueError("retry_sleep must be non-negative")
+    if (retry_response := request.get("retry_response")) is not None and not callable(retry_response):
+        raise TypeError("retry_response must be callable")
     return request

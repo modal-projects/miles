@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 from torch_memory_saver import torch_memory_saver
 
+from miles.backends.megatron_utils.checkpoint_lifecycle import CheckpointLifecycle
 from miles.backends.megatron_utils.rematerialize_utils import build_main_cast_context
 from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.train_actor import TrainRayActor
@@ -168,6 +169,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.debug_rollout_only:
             return 0
+
+        self._checkpoint_lifecycle = CheckpointLifecycle(self.args)
 
         if role == "critic":
             self.args.load = self.args.critic_load
@@ -416,6 +419,8 @@ class MegatronTrainRayActor(TrainRayActor):
         self._last_rollout_id = rollout_id
         if self.args.offload_train and self._asleep:
             self.wake_up()
+        if not self.args.debug_rollout_only:
+            self._checkpoint_lifecycle.poll()
 
         with ExitStack() as stack:
             with timer("data_preprocess"):
@@ -700,10 +705,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.debug_rollout_only:
             return
 
-        if self.args.async_save:
-            from megatron.training.async_utils import maybe_finalize_async_save
-
-            maybe_finalize_async_save(blocking=True)
+        self._checkpoint_lifecycle.prepare()
 
         multi_lora = is_multi_lora_enabled(self.args)
         if multi_lora:
@@ -723,30 +725,30 @@ class MegatronTrainRayActor(TrainRayActor):
                 if export is not None:
                     export.finish()
 
-        if force_sync and self.args.async_save:
-            maybe_finalize_async_save(blocking=True)
-
         if multi_lora and self.args.save_hf is not None and self.role == "actor":
             from miles.backends.megatron_utils.hf_export import save_hf_model
 
             save_hf_model(self.args, rollout_id, self.model)
 
-        if self.args.custom_megatron_post_save_hook_path is not None and dist.get_rank() == 0:
-            if self.args.async_save:
-                maybe_finalize_async_save(blocking=True)
+        from megatron.training.checkpointing import get_checkpoint_name
 
-            from megatron.training.checkpointing import get_checkpoint_name
-
+        checkpoint_dir = get_checkpoint_name(self.args.save, rollout_id, return_base_dir=True)
+        hf_checkpoint_dir = (
+            self.args.save_hf.format(rollout_id=rollout_id)
+            if self.args.save_hf is not None and self.role == "actor"
+            else None
+        )
+        self._checkpoint_lifecycle.saved(rollout_id, checkpoint_dir, hf_checkpoint_dir)
+        post_save_path = self.args.custom_megatron_post_save_hook_path
+        self._checkpoint_lifecycle.poll(blocking=force_sync or post_save_path is not None)
+        if post_save_path is not None and dist.get_rank() == 0:
             from miles.utils.misc import load_function
 
-            checkpoint_dir = get_checkpoint_name(self.args.save, rollout_id, return_base_dir=True)
-            hf_checkpoint_dir = (
-                self.args.save_hf.format(rollout_id=rollout_id)
-                if self.args.save_hf is not None and self.role == "actor"
-                else None
-            )
-            post_save_hook = load_function(self.args.custom_megatron_post_save_hook_path)
-            post_save_hook(self.args, rollout_id, checkpoint_dir, hf_checkpoint_dir)
+            load_function(post_save_path)(self.args, rollout_id, checkpoint_dir, hf_checkpoint_dir)
+
+    def finish_checkpoints(self) -> None:
+        if not self.args.debug_rollout_only:
+            self._checkpoint_lifecycle.poll(blocking=True, terminate=True)
 
     @with_logs
     @timer
