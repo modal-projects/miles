@@ -276,6 +276,7 @@ def _is_infrastructure_error(error: BaseException) -> bool:
     transient_names = {
         "APIConnectionError",
         "APITimeoutError",
+        "BadGatewayError",
         "ActorDiedError",
         "InternalServerError",
         "RayActorError",

@@ -122,6 +122,9 @@ class RolloutManager:
     # -------------------------- lifecycle -----------------------------
     # TODO: may have a `async def init` here later
 
+    def ready(self) -> None:
+        """Return after all rollout resources have initialized successfully."""
+
     def get_router_address(self) -> tuple[str, int]:
         return self.args.sglang_router_ip, self.args.sglang_router_port
 

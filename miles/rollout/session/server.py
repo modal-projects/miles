@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import logging
 
@@ -57,6 +58,22 @@ class SessionServer:
         setup_session_routes(self.app, self, args, use_addition_r3=self.use_addition_r3)
 
     async def do_proxy(self, request: ProxyRequest, path: str, *, body: bytes, headers: dict) -> dict:
+        deadline = asyncio.timeout(getattr(self.args, "rollout_request_timeout_secs", None))
+        try:
+            async with deadline:
+                return await self._do_proxy(request, path, body=body, headers=headers)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            logger.warning("Proxy request deadline exceeded for %s %s", request.method, path)
+            return {
+                "request_body": body,
+                "response_body": b'{"error":"backend transport error: request deadline exceeded"}',
+                "status_code": 502,
+                "headers": {"content-type": "application/json"},
+            }
+
+    async def _do_proxy(self, request: ProxyRequest, path: str, *, body: bytes, headers: dict) -> dict:
         url = f"{self.backend_url}/{path}"
         if request.query:
             url = f"{url}?{request.query}"
@@ -65,6 +82,7 @@ class SessionServer:
 
         max_retries = 1
         retry_sleep = 1.0
+        retry_response = None
         if request.session_id is not None and getattr(self.args, "custom_rollout_request_hook_path", None):
             prepared = await prepare_rollout_request(
                 self.args,
@@ -80,6 +98,7 @@ class SessionServer:
             )
             max_retries = prepared["max_retries"]
             retry_sleep = prepared["retry_sleep"]
+            retry_response = prepared.get("retry_response")
 
         response = None
         for attempt in range(max_retries):
@@ -102,7 +121,13 @@ class SessionServer:
                 # before generation. A generic 5xx may be returned after the
                 # stateful request was dispatched, so replaying it could
                 # advance the same session twice.
-                retryable = response.status_code in (409, 429)
+                retryable = (
+                    retry_response(response) if retry_response is not None else response.status_code in (409, 429)
+                )
+                if inspect.isawaitable(retryable):
+                    retryable = await retryable
+                if not isinstance(retryable, bool):
+                    raise TypeError("retry_response must return a bool")
                 if not retryable or attempt + 1 == max_retries:
                     break
                 await response.aread()
