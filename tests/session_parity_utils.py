@@ -197,7 +197,11 @@ def assert_agentic_retry_trajectory_parity(v1: SessionParityRun, v2: SessionPari
     assert v1.samples[0].metadata["max_trim_tokens"] == v2.session_metadata["max_trim_tokens"]
 
     v2_linear_metadata = {key: value for key, value in v2.session_metadata.items() if key not in ("agent", "tree")}
-    _assert_bits_equal(v1.session_metadata, v2_linear_metadata, path="session_metadata")
+    _assert_bits_equal(
+        _project_session_metadata(v1.session_metadata),
+        _project_session_metadata(v2_linear_metadata),
+        path="session_metadata",
+    )
     assert_sample_bitwise_equal(
         v1.samples[0],
         v2.samples[0],
@@ -261,8 +265,21 @@ def _serve_session(*, backend_url: str, hf_checkpoint: str, version: str) -> Ite
         server.stop()
 
 
+def _project_session_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(metadata)
+    # Transport timing and wire size vary across independent session requests.
+    for metric in ("response_bytes", "request_seconds", "decode_seconds", "total_seconds"):
+        key = f"session_collect/{metric}"
+        if key not in projected:
+            continue
+        value = projected.pop(key)
+        assert type(value) is (int if metric == "response_bytes" else float)
+        assert math.isfinite(value) and value >= 0
+    return projected
+
+
 def _training_metadata_projection(metadata: dict[str, Any]) -> dict[str, Any]:
-    projected = deepcopy(metadata)
+    projected = _project_session_metadata(deepcopy(metadata))
     projected.pop("leaf", None)
     projected.pop("max_trim_tokens", None)
     lifecycle = projected.get("lifecycle")

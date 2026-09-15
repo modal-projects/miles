@@ -1,8 +1,9 @@
-# SGLang runtime imports reached by the hosted CPU suite. GPU and ROCm images get these from their SGLang base image.
+# SGLang runtime and optional adapter dependencies for the hosted CPU suite.
 compressed-tensors==0.17.1
 einops==0.8.2
 gguf==0.19.0
 ipython==9.15.0
+modal==1.5.5
 msgspec==0.21.1
 openai==2.6.1
 partial_json_parser==0.2.1.1.post7

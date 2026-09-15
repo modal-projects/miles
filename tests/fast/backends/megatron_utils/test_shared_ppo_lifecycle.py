@@ -100,6 +100,7 @@ def test_critic_train_wakes_and_leaves_offload_to_driver(actor_module, monkeypat
 def test_actor_receives_critic_payload_and_leaves_offload_to_driver(actor_module, monkeypatch):
     worker = _worker(actor_module, "actor")
     worker.train_actor = Mock(return_value=None)
+    monkeypatch.setattr(actor_module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(
         actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
@@ -117,6 +118,7 @@ def test_actor_receives_critic_payload_and_leaves_offload_to_driver(actor_module
 def test_train_keeps_model_resident(actor_module, monkeypatch):
     worker = _worker(actor_module, "actor", asleep=False)
     worker.train_actor = Mock(return_value=None)
+    monkeypatch.setattr(actor_module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(
         actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )

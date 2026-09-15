@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,7 @@ from miles.utils.audit_utils.event_logger.logger import EventLogger, read_events
 from miles.utils.audit_utils.event_logger.models import CellReconfigureEvent
 from miles.utils.audit_utils.process_identity import MainProcessIdentity
 from miles.utils.audit_utils.witness.allocator import WitnessIdAllocator
+from miles.utils.retry_utils import retry
 
 pytestmark = pytest.mark.asyncio
 
@@ -1070,7 +1072,8 @@ class TestMaybeLogInferenceEngineWeightChecksums:
         assert logged == dict(rollout_id=3, engine_checksums=[{"rank0/w": "e0"}, {"rank0/w": "e1"}])
 
 
-async def test_update_weights_resumes_health_monitor_after_failure():
+async def test_update_weights_resumes_health_monitor_after_failure(monkeypatch):
+    monkeypatch.setattr("miles.ray.train.group.retry", partial(retry, sleep_fn=AsyncMock()))
     rollout_mgr = MagicMock()
     rollout_mgr.get_updatable_engines_and_lock.remote = AsyncMock(return_value={"engine": "info"})
     rollout_mgr.health_monitoring_pause.remote = AsyncMock()

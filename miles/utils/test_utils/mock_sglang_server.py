@@ -24,6 +24,8 @@ class ProcessResultMetaInfo:
     spec_accept_token_num: int | None = None
     spec_draft_token_num: int | None = None
     spec_verify_ct: int | None = None
+    output_token_sampling_mask: list[list[int]] | None = None
+    output_token_sampling_logprobs: list[float] | None = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}

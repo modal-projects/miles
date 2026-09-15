@@ -3,10 +3,11 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 
-def install_bridge_stubs():
+def install_bridge_stubs(monkeypatch):
     megatron_mod = types.ModuleType("megatron")
     core_mod = types.ModuleType("megatron.core")
     models_mod = types.ModuleType("megatron.core.models")
@@ -91,18 +92,19 @@ def install_bridge_stubs():
     mbridge_core_mod.register_model = register_model
     mbridge_models_mod.Qwen2MoEBridge = Qwen2MoEBridge
 
-    sys.modules["megatron"] = megatron_mod
-    sys.modules["megatron.core"] = core_mod
-    sys.modules["megatron.core.models"] = models_mod
-    sys.modules["megatron.core.models.gpt"] = gpt_mod
-    sys.modules["megatron.core.models.gpt.gpt_layer_specs"] = gpt_layer_specs_mod
-    sys.modules["mbridge"] = mbridge_mod
-    sys.modules["mbridge.core"] = mbridge_core_mod
-    sys.modules["mbridge.models"] = mbridge_models_mod
+    monkeypatch.setitem(sys.modules, "megatron", megatron_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core", core_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core.models", models_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core.models.gpt", gpt_mod)
+    monkeypatch.setitem(sys.modules, "megatron.core.models.gpt.gpt_layer_specs", gpt_layer_specs_mod)
+    monkeypatch.setitem(sys.modules, "mbridge", mbridge_mod)
+    monkeypatch.setitem(sys.modules, "mbridge.core", mbridge_core_mod)
+    monkeypatch.setitem(sys.modules, "mbridge.models", mbridge_models_mod)
 
 
-def load_bridge_module():
-    install_bridge_stubs()
+@pytest.fixture
+def bridge_module(monkeypatch):
+    install_bridge_stubs(monkeypatch)
     module_path = Path(__file__).resolve().parents[4] / "miles_plugins" / "mbridge" / "qwen3_5.py"
     module_name = "test_qwen3_5_bridge_module"
     sys.modules.pop(module_name, None)
@@ -126,9 +128,8 @@ def load_raw_export_module():
     return module
 
 
-def test_mtp_moe_expert_mapping_uses_individual_hf_weights():
-    module = load_bridge_module()
-    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
+def test_mtp_moe_expert_mapping_uses_individual_hf_weights(bridge_module):
+    bridge = bridge_module.Qwen3_5Bridge.__new__(bridge_module.Qwen3_5Bridge)
 
     fc1_names = bridge._convert_mtp_param("mtp.layers.0.transformer_layer.mlp.experts.linear_fc1.weight42")
     fc2_names = bridge._convert_mtp_param("mtp.layers.0.transformer_layer.mlp.experts.linear_fc2.weight42")
@@ -140,9 +141,8 @@ def test_mtp_moe_expert_mapping_uses_individual_hf_weights():
     assert fc2_names == ["mtp.layers.0.mlp.experts.42.down_proj.weight"]
 
 
-def test_mtp_dense_mlp_mapping_still_uses_dense_hf_weights():
-    module = load_bridge_module()
-    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
+def test_mtp_dense_mlp_mapping_still_uses_dense_hf_weights(bridge_module):
+    bridge = bridge_module.Qwen3_5Bridge.__new__(bridge_module.Qwen3_5Bridge)
 
     fc1_names = bridge._convert_mtp_param("mtp.layers.0.transformer_layer.mlp.linear_fc1.weight")
     fc2_names = bridge._convert_mtp_param("mtp.layers.0.transformer_layer.mlp.linear_fc2.weight")
@@ -151,9 +151,8 @@ def test_mtp_dense_mlp_mapping_still_uses_dense_hf_weights():
     assert fc2_names == ["mtp.layers.0.mlp.down_proj.weight"]
 
 
-def test_mtp_block_spec_uses_current_transformer_layer_spec():
-    module = load_bridge_module()
-    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
+def test_mtp_block_spec_uses_current_transformer_layer_spec(bridge_module):
+    bridge = bridge_module.Qwen3_5Bridge.__new__(bridge_module.Qwen3_5Bridge)
     bridge.config = "CONFIG_OBJECT"
     bridge.hf_config = types.SimpleNamespace(text_config=types.SimpleNamespace(mtp_num_hidden_layers=1))
 
@@ -164,9 +163,8 @@ def test_mtp_block_spec_uses_current_transformer_layer_spec():
     assert result["mtp_block_spec"] == ("mtp-spec", "REAL_LAYER_SPEC_VP3")
 
 
-def test_eh_proj_keeps_column_order_when_loading_to_mcore():
-    module = load_bridge_module()
-    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
+def test_eh_proj_keeps_column_order_when_loading_to_mcore(bridge_module):
+    bridge = bridge_module.Qwen3_5Bridge.__new__(bridge_module.Qwen3_5Bridge)
 
     weight = torch.arange(24, dtype=torch.float32).view(3, 8)
     converted = bridge._weight_to_mcore_format("mtp.layers.0.eh_proj.weight", [weight])
@@ -174,9 +172,8 @@ def test_eh_proj_keeps_column_order_when_loading_to_mcore():
     assert torch.equal(converted, weight)
 
 
-def test_fused_expert_loading_uses_the_global_ep_expert_id():
-    module = load_bridge_module()
-    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
+def test_fused_expert_loading_uses_the_global_ep_expert_id(bridge_module):
+    bridge = bridge_module.Qwen3_5Bridge.__new__(bridge_module.Qwen3_5Bridge)
     bridge.config = types.SimpleNamespace(num_moe_experts=8)
     bridge.mpu = types.SimpleNamespace(ep_size=2, ep_rank=1)
     fused_experts = torch.arange(8 * 3 * 2).view(8, 3, 2)
@@ -192,9 +189,8 @@ def test_fused_expert_loading_uses_the_global_ep_expert_id():
         assert not torch.equal(converted, fused_experts[1])
 
 
-def test_build_config_enables_gated_attention_when_transformer_config_supports_it():
-    module = load_bridge_module()
-    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
+def test_build_config_enables_gated_attention_when_transformer_config_supports_it(bridge_module):
+    bridge = bridge_module.Qwen3_5Bridge.__new__(bridge_module.Qwen3_5Bridge)
     bridge.hf_config = types.SimpleNamespace(text_config=types.SimpleNamespace(mtp_num_hidden_layers=1))
     bridge.TransformerConfigClass = types.SimpleNamespace(
         __dataclass_fields__={

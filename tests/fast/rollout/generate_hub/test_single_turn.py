@@ -42,6 +42,7 @@ def expected_request(
     sampling_params: dict | None = None,
     return_routed_experts: bool = False,
     return_indexer_topk: bool = False,
+    return_sampling_mask: bool = False,
     image_data: list[str] | None = None,
 ) -> dict:
     result = {
@@ -53,6 +54,8 @@ def expected_request(
         result["return_routed_experts"] = return_routed_experts
     if variant in ("single_turn", "multi_turn") or return_indexer_topk:
         result["return_indexer_topk"] = return_indexer_topk
+    if variant in ("single_turn", "multi_turn") or return_sampling_mask:
+        result["return_sampling_mask"] = return_sampling_mask
     if image_data is not None:
         result["image_data"] = image_data
     return result
@@ -78,6 +81,8 @@ def expected_sample(
     prompt_tokens: int = 7,
     weight_versions: list[str] | None = None,
     rollout_routed_experts: np.ndarray | None = None,
+    rollout_sampling_mask_ids: list[int] | None = None,
+    rollout_sampling_mask_offsets: list[int] | None = None,
     spec_info: Sample.SpecInfo | None = None,
     multimodal_inputs: dict | None = None,
     multimodal_train_inputs: dict | None = None,
@@ -102,6 +107,8 @@ def expected_sample(
         weight_versions=weight_versions or [],
         rollout_log_probs=RESPONSE_LOG_PROBS if isinstance(rollout_log_probs, _Unset) else rollout_log_probs,
         rollout_routed_experts=rollout_routed_experts,
+        rollout_sampling_mask_ids=rollout_sampling_mask_ids,
+        rollout_sampling_mask_offsets=rollout_sampling_mask_offsets,
         remove_sample=False,
         status=status,
         metadata={},
@@ -282,14 +289,35 @@ class TestInputStatusValidation:
 
 
 class TestPayloadStructure:
+    @pytest.mark.parametrize(
+        "generation_env", [{"args_kwargs": {"extra_argv": ["--rollout-top-p", "0.9"]}}], indirect=True
+    )
     def test_sampling_params_passed_through(self, variant, generation_env):
+        generation_env.mock_server.process_fn = lambda _: ProcessResult(
+            text=RESPONSE_TEXT,
+            meta_info=ProcessResultMetaInfo(
+                output_token_sampling_mask=[[token] for token in RESPONSE_TOKENS],
+                output_token_sampling_logprobs=[0.0] * len(RESPONSE_TOKENS),
+            ),
+        )
         result = _run_generate(
             variant, generation_env, sampling_params={"max_new_tokens": 16, "temperature": 0.5, "top_p": 0.9}
         )
         assert result.requests == [
-            expected_request(variant, sampling_params={"max_new_tokens": 16, "temperature": 0.5, "top_p": 0.9})
+            expected_request(
+                variant,
+                sampling_params={"max_new_tokens": 16, "temperature": 0.5, "top_p": 0.9},
+                return_sampling_mask=True,
+            )
         ]
-        assert listify(result.sample) == [expected_sample(variant)]
+        assert listify(result.sample) == [
+            expected_sample(
+                variant,
+                rollout_log_probs=[0.0] * len(RESPONSE_TOKENS),
+                rollout_sampling_mask_ids=RESPONSE_TOKENS,
+                rollout_sampling_mask_offsets=list(range(len(RESPONSE_TOKENS) + 1)),
+            )
+        ]
 
 
 class TestBoundaryConditions:
