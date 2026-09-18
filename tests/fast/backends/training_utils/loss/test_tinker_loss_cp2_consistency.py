@@ -22,10 +22,7 @@ from .loss_test_utils import make_args
 
 VOCAB_SIZE = 64
 
-# (total_length, response_length) per datum. (10, 6) leaves rank 0 with no
-# response logits; a response covering the whole sequence (prompt_length = 0)
-# is unsupported by the existing CP offset helpers, so every datum keeps a
-# non-empty prompt.
+# (total_length, response_length); (10, 6) leaves rank 0 with no response logits.
 DATUM_SHAPES = [(12, 8), (7, 5), (10, 6)]
 
 
