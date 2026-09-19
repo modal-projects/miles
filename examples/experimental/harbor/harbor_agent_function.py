@@ -43,7 +43,7 @@ Env vars (read on the rollout worker):
   AGENT_MAX_INPUT_TOKENS / AGENT_MAX_OUTPUT_TOKENS, HARBOR_MAX_SEQ_LEN,
   HARBOR_AGENT_MAX_ITERATIONS, HARBOR_RESPONSE_LENGTH_POLICY,
   HARBOR_TERMINUS_2_ENABLE_SUMMARIZE, HARBOR_TERMINUS_2_LINEAR_HISTORY,
-  HARBOR_OVERRIDE_MEMORY_MB, HARBOR_TIMEOUT_MULTIPLIER,
+  HARBOR_OVERRIDE_CPUS, HARBOR_OVERRIDE_MEMORY_MB, HARBOR_TIMEOUT_MULTIPLIER,
   HARBOR_VERIFIER_TIMEOUT_SEC, HARBOR_ENV_BUILD_TIMEOUT_MULTIPLIER,
   HARBOR_AGENT_ALLOWED_HOSTS
                          same meaning as on the agent server
@@ -322,6 +322,7 @@ def _environment_config():
             )
     overrides = {}
     for field, var in (
+        ("override_cpus", "HARBOR_OVERRIDE_CPUS"),
         ("override_memory_mb", "HARBOR_OVERRIDE_MEMORY_MB"),
         ("override_storage_mb", "HARBOR_OVERRIDE_STORAGE_MB"),
     ):
