@@ -301,13 +301,27 @@ def _parse_external_endpoint(*extra: str) -> argparse.Namespace:
     )
 
 
-def test_external_endpoint_selects_an_opaque_rollout_topology():
-    args = _parse_external_endpoint()
+def test_external_endpoint_selects_an_opaque_rollout_topology(tmp_path: Path):
+    args = _parse_external_endpoint(
+        "--update-weight-transfer-mode",
+        "disk-delta",
+        "--update-weight-disk-dir",
+        str(tmp_path / "deltas"),
+        "--hf-checkpoint",
+        str(tmp_path),
+    )
 
     miles_validate_args(args)
 
     assert args.rollout_endpoint_url == "https://rollout.example"
     assert args.rollout_external is True
+
+
+def test_external_endpoint_training_requires_disk_delta():
+    args = _parse_external_endpoint()
+
+    with pytest.raises(ValueError, match="requires --update-weight-transfer-mode=disk-delta"):
+        miles_validate_args(args)
 
 
 @pytest.mark.parametrize(

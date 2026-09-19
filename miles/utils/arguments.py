@@ -2956,6 +2956,12 @@ def miles_validate_args(args):
         assert (
             args.rollout_external_engine_addrs is None
         ), "--rollout-endpoint-url and --rollout-external-engine-addrs select different external rollout APIs."
+        if not args.debug_rollout_only and args.update_weight_transfer_mode != "disk-delta":
+            raise ValueError(
+                "Training with --rollout-endpoint-url requires "
+                "--update-weight-transfer-mode=disk-delta; Miles has no engine handles for "
+                "broadcast or p2p weight updates to an opaque service."
+            )
         args.rollout_external = True
 
     assert not (

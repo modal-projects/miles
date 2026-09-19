@@ -94,7 +94,7 @@ def _capture_baseline(protocol: UpdateWeightFromDiskDelta, tmp_path) -> None:
     ):
         dist_mock.get_rank.return_value = 0
         dist_mock.get_world_size.return_value = 1
-        protocol._capture_baseline(lambda materialize: [])
+        protocol._capture_baseline(lambda materialize: [], baseline_version=0)
 
 
 def test_baseline_capture_pulls_with_both_checkpoint_dirs(tmp_path):
@@ -139,6 +139,6 @@ def test_non_source_rank_waits_for_baseline_engine_reload(tmp_path):
     ):
         dist_mock.get_rank.return_value = 1
         dist_mock.get_world_size.return_value = 1
-        protocol._capture_baseline(lambda materialize: [])
+        protocol._capture_baseline(lambda materialize: [], baseline_version=0)
 
     assert dist_mock.barrier.call_count == 2
