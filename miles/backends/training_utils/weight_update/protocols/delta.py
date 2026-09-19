@@ -120,7 +120,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
     def begin_sync(self, weight_version: int, iter_buckets) -> bool:
         # The first call only captures the baseline snapshot the next sync diffs against.
         if not self._baseline_captured:
-            self._capture_baseline(iter_buckets)
+            self._capture_baseline(iter_buckets, baseline_version=weight_version - 1)
             self._baseline_captured = True
             return False
         self._begin_encode(weight_version)
@@ -156,18 +156,22 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         self._publish_and_reload_engines(weight_version)
         self._record_metrics(weight_version)
 
-    def _capture_baseline(self, iter_buckets) -> None:
-        """Capture the baseline snapshot the first delta diffs against (no publish), and clear any
-        stale stream from a prior run. Seeds from hf_checkpoint — what each host materializes its
-        base from — so the invariant ``snapshot == engine base`` holds even where the megatron->HF
-        round-trip trims vocab-padding rows (embed/lm_head). Every emitted tensor must have the same
-        layout as that canonical checkpoint because deltas operate on raw bytes. pull_weights(0)
-        makes each host materialize its local base now, overlapped with the snapshot gather, so the
-        first real sync only pays the delta apply."""
-        # a prior run's versions would apply against the wrong base; start the dir clean
+    def _capture_baseline(self, iter_buckets, *, baseline_version: int) -> None:
+        """Capture the baseline snapshot the first delta diffs against without publishing.
+
+        A fresh stream is seeded from ``hf_checkpoint``, exactly what connected engines
+        materialize. A resumed artifact-only stream is seeded from the restored actor,
+        exactly what the external fleet already serves. The first real sync then pays
+        only the delta apply.
+        """
+        resumed_artifact_stream = not self.rollout_engines and baseline_version > 0
+        # A fresh stream starts from hf_checkpoint. An external resumed fleet already
+        # serves the restored actor checkpoint, so preserve its prior artifacts and use
+        # the loaded actor bytes as the next delta's baseline.
         pulls = []
         if dist.get_rank() == 0:
-            shutil.rmtree(self.delta_dir, ignore_errors=True)
+            if not resumed_artifact_stream:
+                shutil.rmtree(self.delta_dir, ignore_errors=True)
             os.makedirs(self.delta_dir, exist_ok=True)
             if self._post_write_hook is not None:
                 self._post_write_hook(self.args, self.delta_dir, list(self.rollout_engines))
@@ -185,7 +189,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
 
         read_hf = None
         local_error: ValueError | None = None
-        if self.is_sender:
+        if self.is_sender and not resumed_artifact_stream:
             try:
                 read_hf = make_tensor_reader(self.args.hf_checkpoint)  # index the HF headers once
             except ValueError as error:
@@ -194,19 +198,22 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         for bucket in iter_buckets(materialize=self.is_sender):
             if not self.is_sender or local_error is not None:
                 continue
-            assert read_hf is not None
             try:
                 for name, tensor in bucket:
-                    try:
-                        baseline = read_hf(
-                            name,
-                            expected_dtype=_safetensors_dtype(tensor.dtype),
-                            expected_shape=tuple(tensor.shape),
-                        )
-                    except KeyError as error:
-                        raise ValueError(
-                            f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint"
-                        ) from error
+                    if resumed_artifact_stream:
+                        baseline = tensor.detach().contiguous().view(torch.uint8).reshape(-1).cpu().numpy().copy()
+                    else:
+                        assert read_hf is not None
+                        try:
+                            baseline = read_hf(
+                                name,
+                                expected_dtype=_safetensors_dtype(tensor.dtype),
+                                expected_shape=tuple(tensor.shape),
+                            )
+                        except KeyError as error:
+                            raise ValueError(
+                                f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint"
+                            ) from error
                     emitted_nbytes = tensor.numel() * tensor.element_size()
                     if emitted_nbytes != baseline.nbytes:
                         raise ValueError(
@@ -255,9 +262,10 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
                 # TODO: temporarily weaken checkers; should enhance and fix related logics
                 _update_weight_version_if_unset(self.rollout_engines, "0")
             logger.info(
-                "[disk delta] captured baseline snapshot of %d tensors from %s",
+                "[disk delta] captured version %d baseline of %d tensors from %s",
+                baseline_version,
                 len(self._snapshot),
-                self.args.hf_checkpoint,
+                "loaded actor" if resumed_artifact_stream else self.args.hf_checkpoint,
             )
         dist.barrier(group=get_gloo_group())
 

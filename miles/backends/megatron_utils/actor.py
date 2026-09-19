@@ -260,6 +260,8 @@ class MegatronTrainRayActor(TrainRayActor):
             self.args.vocab_size = self.tokenizer.vocab_size
 
         self._init_training_state()
+        if args.rollout_endpoint_url is not None and args.update_weight_transfer_mode == "disk-delta":
+            self.weight_updater.weight_version = max(0, loaded_rollout_id)
 
         # empty cache after initialization
         clear_memory()

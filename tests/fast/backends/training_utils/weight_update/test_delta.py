@@ -2,7 +2,9 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.protocols.delta import UpdateWeightFromDiskDelta
@@ -90,6 +92,45 @@ def test_artifact_only_publish_calls_the_hook_without_engine_requests() -> None:
 
     hook.assert_called_once_with(protocol.args, protocol._version_dir, [])
     dist_mock.barrier.assert_called_once()
+
+
+def test_resumed_artifact_stream_uses_loaded_actor_as_baseline(tmp_path: Path) -> None:
+    existing = tmp_path / "delta" / "weight_v000239" / "model.safetensors.index.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("existing")
+    current = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
+
+    protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    protocol.args = Namespace(
+        check_weight_update_equal=False,
+        hf_checkpoint="/original-hf",
+        update_weight_disk_dir=str(tmp_path / "delta"),
+        update_weight_local_checkpoint_dir=None,
+    )
+    protocol.delta_dir = protocol.args.update_weight_disk_dir
+    protocol.is_sender = True
+    protocol.rollout_engines = []
+    protocol._post_write_hook = None
+    protocol._snapshot = {}
+
+    with (
+        patch(f"{_DELTA_MODULE}.dist") as dist_mock,
+        patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=MagicMock()),
+        patch(
+            f"{_DELTA_MODULE}.make_tensor_reader",
+            side_effect=AssertionError("a resumed artifact stream must not read the original HF checkpoint"),
+        ),
+    ):
+        dist_mock.get_rank.return_value = 0
+        dist_mock.get_world_size.return_value = 1
+        protocol._capture_baseline(
+            lambda *, materialize: [[("weight", current)]],
+            baseline_version=239,
+        )
+
+    assert existing.read_text() == "existing"
+    expected = current.view(torch.uint8).reshape(-1).numpy()
+    np.testing.assert_array_equal(protocol._snapshot["weight"], expected)
 
 
 class TestReloadEnginesFailureTransitions:
