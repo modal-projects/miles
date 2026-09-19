@@ -113,6 +113,7 @@ def _compute_sample_from_openai_record(
     output_log_probs = [item[0] for item in choice["meta_info"]["output_token_logprobs"]]
 
     sample = Sample()
+    is_aborted = finish_reason == "abort"
     if record.request.get("return_sampling_mask", False):
         output_log_probs = append_sampling_metadata(
             sample,
@@ -126,9 +127,11 @@ def _compute_sample_from_openai_record(
     sample.response_length = len(output_token_ids)
     sample.loss_mask = [1] * len(output_token_ids)
     sample.rollout_routed_experts = (
-        None if use_addition_r3 else get_routed_experts_from_response(args, choice, len(sample.tokens) - 1)
+        None
+        if is_aborted or use_addition_r3
+        else get_routed_experts_from_response(args, choice, len(sample.tokens) - 1)
     )
-    sample.rollout_indexer_topk = get_indexer_topk_from_response(args, choice, sample)
+    sample.rollout_indexer_topk = None if is_aborted else get_indexer_topk_from_response(args, choice, sample)
     sample.weight_versions = [WeightVersionsPerCall.from_meta_info(choice["meta_info"], output_end=len(sample.tokens))]
 
     if trim_count > 0:

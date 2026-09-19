@@ -69,6 +69,24 @@ def _samples_response(payload: bytes) -> Response:
     return Response(content=payload, status_code=200, media_type="application/octet-stream")
 
 
+def _aborted_generation_response() -> Response:
+    """Return a retryable error for a backend abort reported as HTTP 200."""
+    return Response(
+        content=_render_json(
+            {
+                "error": {
+                    "message": "upstream generation aborted before completion",
+                    "type": "upstream_generation_aborted",
+                    "code": "upstream_generation_aborted",
+                }
+            }
+        ),
+        status_code=503,
+        headers={"retry-after": "0"},
+        media_type=JSON_MEDIA_TYPE,
+    )
+
+
 _CLIENT_STRIPPED_META_KEYS = (
     "routed_experts",
     "indexer_topk",
@@ -299,9 +317,11 @@ class SessionCore:
                     encode_samples([], metadata, empty_reason="all_truncated", fields=self.samples_wire_fields)
                 )
             if self.use_addition_r3:
-                samples = [merge_samples_with_addition_r3(self.config, samples, session.records, tokenizer)]
+                sample = merge_samples_with_addition_r3(self.config, samples, session.records, tokenizer)
             else:
-                samples = [merge_samples(samples, tokenizer)]
+                sample = merge_samples(samples, tokenizer)
+            sample.validate()
+            samples = [sample]
         except (AssertionError, ValueError) as exc:
             return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
         return _samples_response(encode_samples(samples, metadata, fields=self.samples_wire_fields))
@@ -372,6 +392,8 @@ class SessionCore:
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if choice.get("finish_reason") == "abort":
+            return _aborted_generation_response()
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,

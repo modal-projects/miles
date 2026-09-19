@@ -23,8 +23,13 @@ def merge_samples(samples: list[Sample], tokenizer) -> Sample:
         # TODO (shi.dong): figure out how in-turn truncation should be handled.
         if acc.status != Sample.Status.COMPLETED:
             break
-        # Replay metadata must be complete through the merged prefix.
+        # Replay metadata must be complete through the merged prefix. An aborted
+        # suffix with no replay payload cannot extend the prefix, but it still
+        # makes the trajectory non-trainable.
         if _introduces_replay_gap(acc, sample):
+            if sample.status == Sample.Status.ABORTED:
+                acc = deepcopy(acc)
+                acc.status = Sample.Status.ABORTED
             break
         acc = _merge_sample_pair(acc, sample, tokenizer=tokenizer)
     return acc

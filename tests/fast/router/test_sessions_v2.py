@@ -145,6 +145,23 @@ def test_lora_adapter_reaches_backend():
         assert env.backend.request_log[-1]["lora_path"] == LORA_ADAPTER_NAME
 
 
+def test_aborted_backend_generation_is_retryable_and_not_committed():
+    with _serve_router() as env:
+        session_id = _create_session(env.url)
+        env.backend.process_fn = lambda _: ProcessResult(text="", finish_reason="abort")
+
+        response = _post_chat(
+            env.url,
+            session_id,
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "upstream_generation_aborted"
+        session = requests.get(f"{env.url}/sessions/{session_id}", timeout=5.0).json()
+        assert session["records"] == []
+
+
 def test_proxy_chat_postprocesses_completion_before_commit(router_env, monkeypatch):
     calls = []
     committed_messages = []
