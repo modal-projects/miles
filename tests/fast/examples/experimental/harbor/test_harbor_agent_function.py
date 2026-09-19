@@ -157,13 +157,17 @@ def test_reclaim_timers_are_daytona_only(tasks_dir, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "var, field",
-    [("HARBOR_OVERRIDE_MEMORY_MB", "override_memory_mb"), ("HARBOR_OVERRIDE_STORAGE_MB", "override_storage_mb")],
+    "var, field, value",
+    [
+        ("HARBOR_OVERRIDE_CPUS", "override_cpus", 2),
+        ("HARBOR_OVERRIDE_MEMORY_MB", "override_memory_mb", 20480),
+        ("HARBOR_OVERRIDE_STORAGE_MB", "override_storage_mb", 10240),
+    ],
 )
-def test_resource_overrides_reach_harbor_and_reject_nonpositive(tasks_dir, monkeypatch, var, field):
-    monkeypatch.setenv(var, "20480")
+def test_resource_overrides_reach_harbor_and_reject_nonpositive(tasks_dir, monkeypatch, var, field, value):
+    monkeypatch.setenv(var, str(value))
     cfg = haf.build_trial_config({"instance_id": "task-1", "agent_name": "mini-swe-agent"}, "http://s/v1", {})
-    assert getattr(cfg.environment, field) == 20480
+    assert getattr(cfg.environment, field) == value
 
     monkeypatch.setenv(var, "0")
     with pytest.raises(ValueError, match=var):
