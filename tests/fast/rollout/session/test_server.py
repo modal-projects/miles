@@ -17,6 +17,36 @@ class TestSessionServer:
         assert server.client.timeout == httpx.Timeout(7.5)
 
 
+def test_run_session_server_disables_access_log(monkeypatch):
+    app = object()
+    uvicorn_call = {}
+
+    class FakeSessionServer:
+        def __init__(self, config):
+            self.app = app
+
+    monkeypatch.setattr(session_server_module, "configure_logger_raw", lambda *_: None)
+    monkeypatch.setattr(session_server_module.setproctitle, "setproctitle", lambda *_: None)
+    monkeypatch.setattr(session_server_module, "SessionServer", FakeSessionServer)
+
+    def fake_uvicorn_run(received_app, **kwargs):
+        uvicorn_call["app"] = received_app
+        uvicorn_call.update(kwargs)
+
+    monkeypatch.setattr(session_server_module.uvicorn, "run", fake_uvicorn_run)
+    config = make_session_server_config(host="127.0.0.1", port=31001)
+
+    session_server_module.run_session_server(config)
+
+    assert uvicorn_call == {
+        "app": app,
+        "host": "127.0.0.1",
+        "port": 31001,
+        "log_level": "info",
+        "access_log": False,
+    }
+
+
 class TestMain:
     def test_feeds_the_parsed_config_to_the_server(self, monkeypatch):
         """The CLI parses the config payload losslessly."""
