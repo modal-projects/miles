@@ -1,6 +1,13 @@
 from types import SimpleNamespace
 
-from miles.rollout.endpoint import compute_rollout_concurrency, get_rollout_url
+import pytest
+
+from miles.rollout.endpoint import (
+    can_overlap_external_weight_sync,
+    compute_rollout_concurrency,
+    get_rollout_url,
+    uses_external_disk_deltas,
+)
 
 
 class TestRolloutConcurrency:
@@ -87,3 +94,29 @@ class TestRolloutUrl:
         )
 
         assert get_rollout_url(args, "/generate") == "http://127.0.0.1:30000/generate"
+
+
+@pytest.mark.parametrize(
+    ("transfer_mode", "endpoint", "pause_mode", "uses_deltas", "can_overlap"),
+    [
+        ("disk-delta", "https://fleet.example", "in_place", True, True),
+        ("disk-delta", "https://fleet.example", "retract", True, False),
+        ("disk-delta", None, "in_place", False, False),
+        ("broadcast", "https://fleet.example", "in_place", False, False),
+    ],
+)
+def test_external_weight_sync_capabilities(
+    transfer_mode: str,
+    endpoint: str | None,
+    pause_mode: str,
+    uses_deltas: bool,
+    can_overlap: bool,
+) -> None:
+    args = SimpleNamespace(
+        pause_generation_mode=pause_mode,
+        rollout_endpoint_url=endpoint,
+        update_weight_transfer_mode=transfer_mode,
+    )
+
+    assert uses_external_disk_deltas(args) is uses_deltas
+    assert can_overlap_external_weight_sync(args) is can_overlap

@@ -5,6 +5,7 @@ import os
 from miles.ray.placement_group import create_rollout_components, create_training_models, update_weights
 from miles.ray.rollout.eval_dispatch import EvalDispatcher
 from miles.ray.wiring import launch_worker_manager
+from miles.rollout.endpoint import can_overlap_external_weight_sync, uses_external_disk_deltas
 from miles.utils import object_store
 from miles.utils.arguments import parse_args, validate_async_off_policy_correction
 from miles.utils.async_utils import eager_create_task
@@ -49,10 +50,20 @@ async def train(args):
 
     maybe_start_mini_ft_controller(args)
 
-    # always update weight first so that sglang has the loaded weights from training.
-    await update_weights(actor_model, rollout_executor)
+    # An opaque disk-delta fleet already serves the configured checkpoint. Its
+    # first update only captures the trainer-side baseline, so generation can
+    # start while that snapshot is collected. Other transports may mutate the
+    # rollout engines and must finish before generation starts.
+    initial_weight_sync_task = None
+    if uses_external_disk_deltas(args):
+        initial_weight_sync_task = await eager_create_task(update_weights(actor_model, rollout_executor))
+    else:
+        await update_weights(actor_model, rollout_executor)
 
     if args.check_weight_update_equal:
+        if initial_weight_sync_task is not None:
+            await initial_weight_sync_task
+            initial_weight_sync_task = None
         await inference_controller.check_weights(
             action="compare",
             allow_quant_error=args.check_weight_update_allow_quant_error,
@@ -63,6 +74,9 @@ async def train(args):
     eval_dispatcher = EvalDispatcher(args, actor_model, rollout_executor)
 
     if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
+        if initial_weight_sync_task is not None:
+            await initial_weight_sync_task
+            initial_weight_sync_task = None
         await inference_controller.prepare_eval()
         await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
 
@@ -79,6 +93,8 @@ async def train(args):
 
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
+    if initial_weight_sync_task is not None:
+        await initial_weight_sync_task
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:
@@ -113,9 +129,11 @@ async def train(args):
                 os.remove(args.save_trigger_sentinel)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            # sync generate before update weights to prevent update weight in the middle of generation
-            rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
-            rollout_data_next_future = None
+            if not can_overlap_external_weight_sync(args):
+                # Engines without an external in-place updater must finish
+                # generation before their weights change.
+                rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
+                rollout_data_next_future = None
             await update_weights(actor_model, rollout_executor, rollout_id=rollout_id)
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout):

@@ -1,3 +1,11 @@
+def uses_external_disk_deltas(args) -> bool:
+    return args.rollout_endpoint_url is not None and args.update_weight_transfer_mode == "disk-delta"
+
+
+def can_overlap_external_weight_sync(args) -> bool:
+    return uses_external_disk_deltas(args) and args.pause_generation_mode == "in_place"
+
+
 def compute_rollout_concurrency(args) -> int:
     if args.rollout_endpoint_url is not None:
         if args.async_max_concurrent_samples is not None:

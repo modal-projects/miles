@@ -29,12 +29,15 @@ def _make_args(**overrides: Any) -> SimpleNamespace:
         num_critic_only_steps=0,
         num_rollout=0,
         offload_train=False,
+        pause_generation_mode="retract",
+        rollout_endpoint_url=None,
         save_hf=None,
         save_interval=None,
         save_trigger_sentinel=None,
         skip_eval_before_train=False,
         start_rollout_id=0,
         update_weights_interval=1,
+        update_weight_transfer_mode="broadcast",
         use_critic=False,
         use_rollout_logprobs=False,
         use_tis=False,
@@ -151,6 +154,33 @@ class TestPipelinedGeneration:
 
         assert events.index("generate_start:1") < events.index("actor_train:0")
         assert events.index("generate_done:1") < events.index("update_weights:0")
+        assert components.actor_model.trained == [0, 1]
+
+    async def test_external_in_place_update_does_not_drain_generation(self, monkeypatch: pytest.MonkeyPatch):
+        events: list[str] = []
+        args = _make_args(
+            num_rollout=2,
+            pause_generation_mode="in_place",
+            rollout_endpoint_url="https://rollout.example",
+            update_weight_transfer_mode="disk-delta",
+            update_weights_interval=1,
+        )
+        components = _install_driver_fakes(monkeypatch, args, events)
+        held_generation = asyncio.Event()
+        components.rollout_executor.generation_gates[1] = held_generation
+
+        driver = asyncio.create_task(train_async_driver.train(args))
+        await asyncio.wait_for(components.actor_model.train_started[0].wait(), timeout=10)
+        while "update_weights:0" not in events:
+            await asyncio.sleep(0)
+
+        assert "generate_start:1" in events
+        assert "generate_done:1" not in events
+
+        held_generation.set()
+        await asyncio.wait_for(driver, timeout=10)
+
+        assert events.index("update_weights:0") < events.index("generate_done:1")
         assert components.actor_model.trained == [0, 1]
 
 
