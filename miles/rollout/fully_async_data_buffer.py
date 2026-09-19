@@ -9,12 +9,13 @@ Every group-level decision lives here — what to keep, what to hand to
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
+from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, iter_samples
 from miles.rollout.filter_hub.common_filters import apply_aborted_filter, apply_missing_reward_filter, group_staleness
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
@@ -30,6 +31,16 @@ def first_sample(group: Group) -> Sample:
     return group[0][0] if isinstance(group[0], list) else group[0]
 
 
+def group_weight_version_bounds(group: Group) -> tuple[int, int] | None:
+    versions = [
+        int(span.version)
+        for sample in iter_samples(group)
+        for span in sample.all_weight_version_spans
+        if str(span.version).isdigit()
+    ]
+    return (min(versions), max(versions)) if versions else None
+
+
 @dataclass(frozen=True)
 class DataBufferConstructorInput:
     args: Namespace
@@ -40,6 +51,7 @@ class DataBufferConstructorInput:
 class DataBufferInput:
     prompt_group: list[Sample]  # resubmittable, for recycling
     group: Group  # finished samples
+    enqueued_at: float | None = None
 
 
 class DataBuffer(ABC):
@@ -109,14 +121,28 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_aborted_groups = 0
         self._metric_stale_groups = 0
         self._metric_consumed_staleness: list[int] = []
+        self._metric_accepted_staleness: list[int] = []
+        self._metric_filtered_staleness: list[int] = []
+        self._metric_generation_version_span: list[int] = []
+        self._metric_post_generation_lag: list[int] = []
+        self._metric_queue_residence_seconds: list[float] = []
+        self._metric_backpressure_seconds = 0.0
+        self._metric_backpressure_events = 0
 
     async def put(self, input: DataBufferInput) -> None:
         if not self._preput_filter(input):
             return
 
         async with self._cond:
+            blocked_at = None
             while len(self._buffer) >= self._capacity:
+                if blocked_at is None:
+                    blocked_at = time.monotonic()
                 await self._cond.wait()
+            if blocked_at is not None:
+                self._metric_backpressure_events += 1
+                self._metric_backpressure_seconds += time.monotonic() - blocked_at
+            input.enqueued_at = time.monotonic()
             self._buffer.append(input)
             self._cond.notify_all()
 
@@ -148,35 +174,76 @@ class DefaultDataBuffer(DataBuffer):
                 entry = self._buffer.pop(0)
                 self._cond.notify_all()  # wake producers blocked on a full buffer
 
+                if entry.enqueued_at is not None:
+                    self._metric_queue_residence_seconds.append(time.monotonic() - entry.enqueued_at)
                 staleness = group_staleness(entry.group, current_version)
                 if staleness is not None:
                     self._metric_consumed_staleness.append(staleness)
                     if self._args.max_weight_staleness is not None and staleness > self._args.max_weight_staleness:
                         logger.info(f"Filtered stale group ({staleness=} > max={self._args.max_weight_staleness})")
                         self._metric_stale_groups += 1
+                        self._metric_filtered_staleness.append(staleness)
                         self._unused_handler_fn(entry.prompt_group)
                         continue
+                    self._metric_accepted_staleness.append(staleness)
+                if current_version is not None and (bounds := group_weight_version_bounds(entry.group)) is not None:
+                    oldest, newest = bounds
+                    self._metric_generation_version_span.append(newest - oldest)
+                    self._metric_post_generation_lag.append(current_version - newest)
                 return entry
 
     def get_metrics(self) -> dict[str, float]:
         prefix = "rollout/fully_async/"
         metrics = {
             f"{prefix}queue_size": len(self._buffer),
+            f"{prefix}queue_capacity": self._capacity,
             f"{prefix}aborted_groups_filtered": self._metric_aborted_groups,
             f"{prefix}stale_groups_filtered": self._metric_stale_groups,
+            f"{prefix}backpressure_events": self._metric_backpressure_events,
+            f"{prefix}backpressure_seconds": self._metric_backpressure_seconds,
             **self._metric_gatherer.collect(),
         }
         if consumed := self._metric_consumed_staleness:
             metrics[f"{prefix}avg_staleness"] = sum(consumed) / len(consumed)
             metrics[f"{prefix}max_staleness"] = max(consumed)
+        self._add_avg_max(metrics, f"{prefix}accepted_staleness", self._metric_accepted_staleness)
+        self._add_avg_max(metrics, f"{prefix}filtered_staleness", self._metric_filtered_staleness)
         buffered = [
             s for entry in self._buffer if (s := group_staleness(entry.group, self._current_version)) is not None
         ]
         if buffered:
             metrics[f"{prefix}buffer_avg_staleness"] = sum(buffered) / len(buffered)
             metrics[f"{prefix}buffer_max_staleness"] = max(buffered)
+        self._add_avg_max(
+            metrics,
+            f"{prefix}generation_version_span",
+            self._metric_generation_version_span,
+        )
+        self._add_avg_max(
+            metrics,
+            f"{prefix}post_generation_lag",
+            self._metric_post_generation_lag,
+        )
+        self._add_avg_max(
+            metrics,
+            f"{prefix}queue_residence_seconds",
+            self._metric_queue_residence_seconds,
+        )
 
         self._metric_gatherer = MetricGatherer()
         self._metric_consumed_staleness = []
+        self._metric_accepted_staleness = []
+        self._metric_filtered_staleness = []
+        self._metric_generation_version_span = []
+        self._metric_post_generation_lag = []
+        self._metric_queue_residence_seconds = []
+        self._metric_backpressure_seconds = 0.0
+        self._metric_backpressure_events = 0
         self._metric_aborted_groups = self._metric_stale_groups = 0
         return metrics
+
+    @staticmethod
+    def _add_avg_max(metrics: dict[str, float], prefix: str, values: list[float | int]) -> None:
+        if values:
+            metrics[f"{prefix}_avg"] = sum(values) / len(values)
+            metrics[f"{prefix}_max"] = max(values)
