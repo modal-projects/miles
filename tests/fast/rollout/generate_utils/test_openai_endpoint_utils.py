@@ -195,8 +195,17 @@ class _CollectCalls:
 @pytest.mark.asyncio
 async def test_collect_samples_single_post_then_delete(monkeypatch):
     calls = _CollectCalls(monkeypatch, post_outcome=_computed_reply_payload())
+    decoded_off_loop = False
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        nonlocal decoded_off_loop
+        decoded_off_loop = True
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr("miles.rollout.generate_utils.openai_endpoint_utils.asyncio.to_thread", fake_to_thread)
     result = await _tracer().collect_samples(Sample(), max_seq_len=7)
 
+    assert decoded_off_loop
     assert calls.calls == [
         "POST http://127.0.0.1:12345/sessions/sid-1/samples",
         "DELETE http://127.0.0.1:12345/sessions/sid-1",
