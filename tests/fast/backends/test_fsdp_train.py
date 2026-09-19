@@ -20,7 +20,7 @@ def test_fsdp_train_debug_rollout_only_returns_a_normal_output(monkeypatch):
     actor._train_core = Mock()
     actor.wake_up = Mock()
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
     monkeypatch.setattr(actor_module, "timer", _noop_timer)
     monkeypatch.setattr(actor_module, "inverse_timer", _noop_timer)

@@ -84,7 +84,7 @@ def test_critic_train_wakes_and_leaves_offload_to_driver(actor_module, monkeypat
     critic_output = TrainStepOutput(outcome=TrainStepOutcome.NORMAL, values=Box("cpu-values-ref"))
     worker.train_critic = Mock(return_value=critic_output)
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
     phases = []
 
@@ -110,7 +110,7 @@ def test_actor_receives_critic_payload_and_leaves_offload_to_driver(actor_module
     worker = _worker(actor_module, "actor")
     worker.train_actor = Mock(return_value=None)
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
     values = TrainStepOutput(outcome=TrainStepOutcome.NORMAL, values=Box("cpu-values-ref"))
 
@@ -127,7 +127,7 @@ def test_train_keeps_model_resident(actor_module, monkeypatch):
     worker = _worker(actor_module, "actor", asleep=False)
     worker.train_actor = Mock(return_value=None)
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
 
     worker.train(5, object())
@@ -606,7 +606,7 @@ def test_debug_rollout_only_train_answers_with_a_normal_train_step_output(
     worker.train_actor = Mock()
     worker.train_critic = Mock()
     monkeypatch.setattr(
-        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, nullcontext())
+        actor_module, "get_rollout_data", lambda _args, _ref, **_kwargs: ({"tokens": []}, [nullcontext()])
     )
     monkeypatch.setattr(actor_module, "log_rollout_data", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(actor_module, "timer", _noop_timer)

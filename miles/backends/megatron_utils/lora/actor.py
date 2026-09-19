@@ -1,5 +1,7 @@
 from contextlib import ExitStack
 
+import torch.distributed as dist
+
 from miles.backends.megatron_utils.actor import MegatronTrainRayActor
 from miles.backends.megatron_utils.lora import checkpoint as lora_checkpoint
 from miles.backends.megatron_utils.lora import model as lora_model
@@ -31,8 +33,11 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
     def forward_backward(self, batch_id: int, rollout_data_ref: Box) -> dict:
         self._heartbeat.bump()
         with ExitStack() as stack:
-            rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref)
-            stack.enter_context(store_get_result)
+            rollout_data, store_get_results = get_rollout_data(
+                self.args, rollout_data_ref, routing_replay_rank=dist.get_rank()
+            )
+            for store_get_result in store_get_results:
+                stack.enter_context(store_get_result)
             return lora_model.run_forward_backward(self.args, batch_id, self.model, rollout_data)
 
     @with_logs
@@ -46,8 +51,11 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
         forward() contract returns the requested loss per datum."""
         self._heartbeat.bump()
         with ExitStack() as stack:
-            rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref)
-            stack.enter_context(store_get_result)
+            rollout_data, store_get_results = get_rollout_data(
+                self.args, rollout_data_ref, routing_replay_rank=dist.get_rank()
+            )
+            for store_get_result in store_get_results:
+                stack.enter_context(store_get_result)
             return lora_model.run_forward_backward(self.args, batch_id, self.model, rollout_data, forward_only=True)
 
     @with_logs
