@@ -6,6 +6,8 @@ import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
 
+ROUTING_REPLAY_LAYER_INDICES_KEY = "rollout_routed_experts_layer_indices"
+
 
 def _get_rank():
     return dist.get_rank() if dist.is_initialized() else 0
@@ -57,6 +59,7 @@ class BaseReplayManager:
     # True when replayed indices are token/KV positions (indexer): rebase the
     # per-sample 0-based rollout indices onto the packed training sequence.
     replay_indices_are_token_positions = False
+    stream_indices_key: str | None = None
 
     def __init__(self):
         self.replays: list[Replay] = []
@@ -220,6 +223,7 @@ class RoutingReplayManager(BaseReplayManager):
     name = "routing"
     filename = "routing_replay.pt"
     data_key = "rollout_routed_experts"
+    stream_indices_key = ROUTING_REPLAY_LAYER_INDICES_KEY
     if_sp_region = True
     enable_check_replay_result = False
     replay_check_max_mismatch_fraction = 1e-2

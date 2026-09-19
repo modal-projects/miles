@@ -1,5 +1,7 @@
 from contextlib import ExitStack
 
+import torch.distributed as dist
+
 from miles.backends.megatron_utils.actor import MegatronTrainRayActor
 from miles.backends.megatron_utils.lora import checkpoint as lora_checkpoint
 from miles.backends.megatron_utils.lora import model as lora_model
@@ -28,11 +30,16 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
         self.weight_publisher = WeightPublisher(iterator, build_lora_sync_config(args))
 
     @with_logs
-    def forward_backward(self, batch_id: int, rollout_data_ref: Box) -> dict:
+    def forward_backward(self, batch_id: int, rollout_data_ref: Box | dict[str, list[Box]]) -> dict:
         self._heartbeat.bump()
         with ExitStack() as stack:
-            rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref)
-            stack.enter_context(store_get_result)
+            rollout_data, store_get_results = get_rollout_data(
+                self.args,
+                rollout_data_ref,
+                routing_replay_rank=dist.get_rank() if isinstance(rollout_data_ref, dict) else None,
+            )
+            for store_get_result in store_get_results:
+                stack.enter_context(store_get_result)
             return lora_model.run_forward_backward(self.args, batch_id, self.model, rollout_data)
 
     @with_logs
@@ -41,13 +48,18 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
         return lora_model.optim_step(self.slot_optimizers, adam_params_by_slot)
 
     @with_logs
-    def forward_only(self, batch_id: int, rollout_data_ref: Box) -> dict:
+    def forward_only(self, batch_id: int, rollout_data_ref: Box | dict[str, list[Box]]) -> dict:
         """Same loss pass as forward_backward, without the backward: the Tinker
         forward() contract returns the requested loss per datum."""
         self._heartbeat.bump()
         with ExitStack() as stack:
-            rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref)
-            stack.enter_context(store_get_result)
+            rollout_data, store_get_results = get_rollout_data(
+                self.args,
+                rollout_data_ref,
+                routing_replay_rank=dist.get_rank() if isinstance(rollout_data_ref, dict) else None,
+            )
+            for store_get_result in store_get_results:
+                stack.enter_context(store_get_result)
             return lora_model.run_forward_backward(self.args, batch_id, self.model, rollout_data, forward_only=True)
 
     @with_logs
