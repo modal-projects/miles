@@ -11,6 +11,7 @@ import time
 
 import httpx
 
+from miles.rollout.endpoint import compute_rollout_concurrency
 from miles.utils.logging_utils import configure_logger_raw
 
 logger = logging.getLogger(__name__)
@@ -331,13 +332,12 @@ async def post_bytes_no_retry(url: str, payload: dict, *, timeout: float) -> byt
     return await asyncio.wait_for(_do(), timeout=timeout)
 
 
-def init_http_client(args, *, max_connections: int):
+def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
-    if max_connections == 0:
+    _client_concurrency = compute_rollout_concurrency(args)
+    if _client_concurrency == 0:
         return
-
-    _client_concurrency = max_connections
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),
