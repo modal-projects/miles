@@ -85,3 +85,8 @@ class TestRolloutUrl:
         )
 
         assert get_rollout_url(args, "/generate") == "http://127.0.0.1:30000/generate"
+
+    def test_uses_miles_router_when_external_endpoint_is_unspecified(self):
+        args = SimpleNamespace(sglang_router_ip="127.0.0.1", sglang_router_port=30000)
+
+        assert get_rollout_url(args, "/generate") == "http://127.0.0.1:30000/generate"
