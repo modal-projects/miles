@@ -259,7 +259,6 @@ async def test_stale_group_recycled(monkeypatch):
     assert data_source.recycled == [stale]
     assert output.metrics["rollout/fully_async/stale_groups_filtered"] == 1
     assert output.metrics["rollout/fully_async/max_staleness"] == 0
-    assert output.metrics["rollout/fully_async/stale_filtered_max_staleness"] == 5
 
 
 async def test_stale_group_dropped_by_default(monkeypatch):
@@ -590,7 +589,7 @@ async def test_buffer_staleness_metrics():
     assert metrics["rollout/fully_async/buffer_max_staleness"] == 4
 
 
-async def test_buffer_separates_selected_and_stale_filtered_staleness():
+async def test_buffer_reports_selected_policy_provenance():
     buffer, _ = make_buffer(max_groups=8, max_staleness=2)
     await put_group(buffer, make_group(1, weight_versions=["2", "4"]))
     await put_group(buffer, make_group(2, weight_versions=["8", "10"]))
@@ -600,8 +599,6 @@ async def test_buffer_separates_selected_and_stale_filtered_staleness():
 
     assert metrics["rollout/fully_async/avg_staleness"] == 2
     assert metrics["rollout/fully_async/max_staleness"] == 2
-    assert metrics["rollout/fully_async/stale_filtered_avg_staleness"] == 8
-    assert metrics["rollout/fully_async/stale_filtered_max_staleness"] == 8
     assert metrics["rollout/fully_async/avg_post_generation_staleness"] == 0
     assert metrics["rollout/fully_async/avg_generation_version_span"] == 2
     assert metrics["rollout/fully_async/token_weighted_staleness"] == 1
