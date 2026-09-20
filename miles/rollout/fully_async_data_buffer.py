@@ -115,7 +115,6 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_aborted_groups = 0
         self._metric_stale_groups = 0
         self._metric_consumed_staleness: list[int] = []
-        self._metric_stale_group_staleness: list[int] = []
         self._metric_selected_newest_lag: list[int] = []
         self._metric_selected_version_span: list[int] = []
         self._metric_selected_token_lag_sum = 0.0
@@ -168,7 +167,6 @@ class DefaultDataBuffer(DataBuffer):
                     if self._args.max_weight_staleness is not None and staleness > self._args.max_weight_staleness:
                         logger.info(f"Filtered stale group ({staleness=} > max={self._args.max_weight_staleness})")
                         self._metric_stale_groups += 1
-                        self._metric_stale_group_staleness.append(staleness)
                         self._unused_handler_fn(entry.prompt_group)
                         continue
                     self._metric_consumed_staleness.append(staleness)
@@ -204,9 +202,6 @@ class DefaultDataBuffer(DataBuffer):
         if consumed := self._metric_consumed_staleness:
             metrics[f"{prefix}avg_staleness"] = sum(consumed) / len(consumed)
             metrics[f"{prefix}max_staleness"] = max(consumed)
-        if filtered := self._metric_stale_group_staleness:
-            metrics[f"{prefix}stale_filtered_avg_staleness"] = sum(filtered) / len(filtered)
-            metrics[f"{prefix}stale_filtered_max_staleness"] = max(filtered)
         if newest_lag := self._metric_selected_newest_lag:
             metrics[f"{prefix}avg_post_generation_staleness"] = sum(newest_lag) / len(newest_lag)
             metrics[f"{prefix}max_post_generation_staleness"] = max(newest_lag)
@@ -230,7 +225,6 @@ class DefaultDataBuffer(DataBuffer):
 
         self._metric_gatherer = MetricGatherer()
         self._metric_consumed_staleness = []
-        self._metric_stale_group_staleness = []
         self._metric_selected_newest_lag = []
         self._metric_selected_version_span = []
         self._metric_selected_token_lag_sum = 0.0

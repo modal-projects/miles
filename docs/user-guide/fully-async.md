@@ -308,7 +308,6 @@ rollout/fully_async/queue_size
 rollout/fully_async/aborted_groups_filtered
 rollout/fully_async/stale_groups_filtered
 rollout/fully_async/avg_staleness, rollout/fully_async/max_staleness
-rollout/fully_async/stale_filtered_avg_staleness, rollout/fully_async/stale_filtered_max_staleness
 rollout/fully_async/avg_post_generation_staleness, rollout/fully_async/max_post_generation_staleness
 rollout/fully_async/avg_generation_version_span, rollout/fully_async/max_generation_version_span
 rollout/fully_async/token_weighted_staleness
@@ -329,8 +328,8 @@ Staleness is measured in published rollout weight versions: with
 otherwise it does not. The metrics separate three parts of policy provenance:
 
 - `avg_staleness` and `max_staleness` are the gap from the current version to the
-  oldest version in each selected group. The `stale_filtered_` pair reports the same
-  quantity only for groups rejected by `--max-weight-staleness`.
+  oldest version in each selected group. `stale_groups_filtered` counts groups that
+  exceeded `--max-weight-staleness`; rejected groups do not enter these averages.
 - `post_generation_staleness` is the gap from the current version to the newest version
   in each selected group. `generation_version_span` is the newest minus oldest version
   within the group. Together they distinguish aging after generation from updates that
