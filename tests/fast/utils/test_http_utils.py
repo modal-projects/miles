@@ -39,7 +39,6 @@ import pytest
 import ray
 from tests.fast.utils.fake_ray_ids import fake_ray_node_id
 
-from miles.rollout.endpoint import compute_rollout_concurrency
 from miles.utils import http_utils
 from miles.utils.http_utils import (
     GeneralHttpClientProvider,
@@ -640,7 +639,7 @@ class TestInitHttpClientConcurrency:
     def _init(self, monkeypatch, args):
         monkeypatch.setattr(http_utils, "_http_client", None)
         monkeypatch.setattr(http_utils, "_client_concurrency", 0)
-        http_utils.init_http_client(args, max_connections=compute_rollout_concurrency(args))
+        http_utils.init_http_client(args)
         if http_utils._http_client is not None:
             asyncio.run(http_utils._http_client.aclose())
         return http_utils._client_concurrency, http_utils._http_client
