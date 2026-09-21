@@ -126,11 +126,12 @@ def _sum_loss_and_outputs(
     log_probs: list[torch.Tensor],
     per_datum_losses: list[torch.Tensor],
 ) -> tuple[torch.Tensor, dict]:
-    if per_datum_losses:
+    if any(log_prob.numel() for log_prob in log_probs):
         loss = torch.stack(per_datum_losses).sum()
     else:
-        # a microbatch with no supervised tokens still needs the graph alive; fp32 sum avoids fp16 inf -> nan
-        loss = logits.sum(dtype=torch.float32) * 0
+        # a rank with no response tokens (empty microbatch, or every CP shard empty)
+        # still needs a loss attached to the graph; an empty view avoids reading logits
+        loss = logits[..., :0].sum(dtype=torch.float32)
     per_datum = _gather_per_datum_outputs(args, batch, log_probs, per_datum_losses)
     return loss, {"loss": loss.detach(), "per_datum": per_datum}
 

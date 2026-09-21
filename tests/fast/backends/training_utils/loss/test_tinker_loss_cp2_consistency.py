@@ -24,6 +24,9 @@ VOCAB_SIZE = 64
 
 # (total_length, response_length); (10, 6) leaves rank 0 with no response logits.
 DATUM_SHAPES = [(12, 8), (7, 5), (10, 6)]
+# A lone one-token response: rank 0 holds no response tokens for the whole
+# microbatch and must still produce a loss connected to the graph.
+EMPTY_RANK_SHAPES = [(9, 1)]
 
 
 def _set_parallel_state(rank: int, world_size: int, tp_group) -> None:
@@ -44,7 +47,7 @@ def _set_parallel_state(rank: int, world_size: int, tp_group) -> None:
     )
 
 
-def _make_datums() -> list[dict]:
+def _make_datums(shapes: list[tuple[int, int]]) -> list[dict]:
     g = torch.Generator()
     g.manual_seed(7)
 
@@ -53,9 +56,9 @@ def _make_datums() -> list[dict]:
 
     datums = []
     loss_mask_zeros = {0: [2], 1: [0]}
-    for i, (total_length, response_length) in enumerate(DATUM_SHAPES):
+    for i, (total_length, response_length) in enumerate(shapes):
         loss_mask = torch.ones(response_length, dtype=torch.float32)
-        loss_mask[loss_mask_zeros.get(i, [])] = 0
+        loss_mask[[z for z in loss_mask_zeros.get(i, []) if z < response_length]] = 0
         datums.append(
             dict(
                 unconcat_tokens=torch.randint(0, VOCAB_SIZE, (total_length,), generator=g),
@@ -86,7 +89,7 @@ def _batch(datums: list[dict], rollout_log_probs: list, loss_fn: str) -> dict:
     }
 
 
-def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str) -> None:
+def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str, shapes: list[tuple[int, int]]) -> None:
     init_gloo(rank, world_size, port=port)
     tp_group = [dist.new_group([r]) for r in range(world_size)][rank]
 
@@ -99,9 +102,9 @@ def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str) -> None:
         calculate_per_token_loss=False,
         recompute_loss_function=False,
         use_dynamic_global_batch_size=True,
-        global_batch_size=len(DATUM_SHAPES),
+        global_batch_size=len(shapes),
     )
-    datums = _make_datums()
+    datums = _make_datums(shapes)
     total_lengths = [d["unconcat_tokens"].numel() for d in datums]
     response_lengths = [len(d["target_tokens"]) for d in datums]
 
@@ -166,6 +169,7 @@ def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str) -> None:
         torch.testing.assert_close(cp_output["logprobs"], base_output["logprobs"], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("shapes", [DATUM_SHAPES, EMPTY_RANK_SHAPES], ids=["ragged", "empty_rank"])
 @pytest.mark.parametrize("loss_fn", sorted(tinker_losses.TINKER_LOSS_FUNCTIONS))
-def test_tinker_cp2_matches_cp1(loss_fn: str) -> None:
-    run_multiprocess(partial(_run_case, loss_fn=loss_fn))
+def test_tinker_cp2_matches_cp1(loss_fn: str, shapes: list[tuple[int, int]]) -> None:
+    run_multiprocess(partial(_run_case, loss_fn=loss_fn, shapes=shapes))
