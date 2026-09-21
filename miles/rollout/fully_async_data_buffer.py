@@ -181,10 +181,12 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_samples += stats.sample_count
         self._metric_selected_versioned_samples += stats.versioned_sample_count
 
+        if stats.oldest_version is not None and stats.newest_version is not None:
+            self._metric_selected_version_span.append(stats.newest_version - stats.oldest_version)
+
         newest_lag = stats.newest_lag(current_version)
         if newest_lag is not None:
             self._metric_selected_newest_lag.append(newest_lag)
-            self._metric_selected_version_span.append(stats.newest_version - stats.oldest_version)
 
         token_weighted_lag = stats.token_weighted_lag(current_version)
         if token_weighted_lag is not None:

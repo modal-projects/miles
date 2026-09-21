@@ -605,6 +605,18 @@ async def test_buffer_reports_selected_policy_provenance():
     assert metrics["rollout/fully_async/weight_version_sample_coverage"] == 1
 
 
+async def test_buffer_reports_generation_span_without_current_version():
+    buffer, _ = make_buffer(max_groups=8)
+    await put_group(buffer, make_group(1, weight_versions=["2", "4"]))
+
+    await buffer.get(current_version=None)
+    metrics = buffer.get_metrics()
+
+    assert metrics["rollout/fully_async/avg_generation_version_span"] == 2
+    assert "rollout/fully_async/avg_post_generation_staleness" not in metrics
+    assert "rollout/fully_async/token_weighted_staleness" not in metrics
+
+
 async def test_buffer_reports_missing_weight_version_coverage_without_inventing_lag():
     buffer, _ = make_buffer(max_groups=8)
     partial_group = make_group(1, weight_versions=["7"])
