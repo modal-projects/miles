@@ -1,6 +1,6 @@
-"""CP=2 consistency tests for the Tinker (multi-LoRA) loss path.
+"""CP>1 consistency tests for the Tinker (multi-LoRA) loss path.
 
-Each case runs the same client batch through cp=1 and cp=2 (zigzag layout:
+Each case runs the same client batch through cp=1 and cp>1 (zigzag layout:
 each rank holds chunks ``rank`` and ``2*cp-1-rank`` of every sequence) and
 asserts that per-datum log-probs, the summed loss, logits gradients, and the
 ``per_datum`` outputs all match the cp=1 run.
@@ -89,7 +89,15 @@ def _batch(datums: list[dict], rollout_log_probs: list, loss_fn: str) -> dict:
     }
 
 
-def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str, shapes: list[tuple[int, int]]) -> None:
+def _run_case(
+    rank: int,
+    world_size: int,
+    port: int,
+    *,
+    loss_fn: str,
+    shapes: list[tuple[int, int]],
+    recompute: bool = False,
+) -> None:
     init_gloo(rank, world_size, port=port)
     tp_group = [dist.new_group([r]) for r in range(world_size)][rank]
 
@@ -100,7 +108,7 @@ def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str, shapes: li
         allgather_cp=False,
         multi_lora=True,
         calculate_per_token_loss=False,
-        recompute_loss_function=False,
+        recompute_loss_function=recompute,
         use_dynamic_global_batch_size=True,
         global_batch_size=len(shapes),
     )
@@ -117,7 +125,7 @@ def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str, shapes: li
     base_loss.backward()
     grad_full = logits_full.grad.squeeze(0)
 
-    # cp=2: slice each sample's logits into this rank's zigzag shard and
+    # cp>1: slice each sample's logits into this rank's zigzag shard and
     # pre-slice rollout_log_probs like get_rollout_data does.
     _set_parallel_state(rank=rank, world_size=world_size, tp_group=tp_group)
     logits_local = (
@@ -140,6 +148,11 @@ def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str, shapes: li
     cp_log_probs = tinker_losses._target_logprobs(args, batch_local, logits_local)
     cp_loss.backward()
     grad_local = logits_local.grad.squeeze(0)
+
+    # the client vectors are sliced per call, never in place: a recomputed
+    # forward must see the full-length batch again.
+    for key in ("advantages", "loss_weights", "loss_masks"):
+        assert [len(v) for v in batch_local[key]] == response_lengths
 
     # (a) per-token log-probs: CE is row-wise, so the gather is exact.
     for i, (total, response) in enumerate(zip(total_lengths, response_lengths, strict=True)):
@@ -173,3 +186,9 @@ def _run_case(rank: int, world_size: int, port: int, *, loss_fn: str, shapes: li
 @pytest.mark.parametrize("loss_fn", sorted(tinker_losses.TINKER_LOSS_FUNCTIONS))
 def test_tinker_cp2_matches_cp1(loss_fn: str, shapes: list[tuple[int, int]]) -> None:
     run_multiprocess(partial(_run_case, loss_fn=loss_fn, shapes=shapes))
+
+
+@pytest.mark.parametrize("recompute", [False, True], ids=["direct", "recompute"])
+@pytest.mark.parametrize("loss_fn", ["importance_sampling", "cross_entropy"])
+def test_tinker_cp4_matches_cp1(loss_fn: str, recompute: bool) -> None:
+    run_multiprocess(partial(_run_case, loss_fn=loss_fn, shapes=DATUM_SHAPES, recompute=recompute), world_size=4)
