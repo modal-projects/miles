@@ -19,6 +19,7 @@ from pathlib import Path
 import safetensors.torch
 import torch
 from megatron.core.distributed import DistributedDataParallel as DDP
+from safetensors import safe_open
 
 from miles.backends.megatron_utils.lora.utils import is_lora_model, save_lora_checkpoint
 from miles.backends.megatron_utils.named_weights import named_params_and_buffers
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 HF_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
+HF_STATIC_WEIGHT_SUFFIXES = (".input_scale", ".rotary_emb.inv_freq")
 
 
 def _collectively(operation):
@@ -69,13 +71,79 @@ class _HfExport:
 def _is_hf_metadata_file(path: Path) -> bool:
     """Tokenizer/config files worth copying into an export — not weights, and not the
     base checkpoint's weight index, which would clobber the one the export writes."""
-    return path.is_file() and path.suffix not in HF_WEIGHT_SUFFIXES and not path.name.endswith(".index.json")
+    return (
+        path.is_file()
+        and path.name != HF_EXPORT_COMPLETE_MARKER
+        and path.suffix not in HF_WEIGHT_SUFFIXES
+        and not path.name.endswith(".index.json")
+    )
 
 
 def _prepare_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     if torch.distributed.get_rank() == 0:
         (path / HF_EXPORT_COMPLETE_MARKER).unlink(missing_ok=True)
+
+
+def _static_weight_prefixes(args) -> tuple[str, ...]:
+    prefixes = getattr(args, "hf_export_static_weight_prefixes", ())
+    if prefixes is None:
+        return ()
+    if not isinstance(prefixes, (list, tuple)) or any(
+        not isinstance(prefix, str) or not prefix for prefix in prefixes
+    ):
+        raise ValueError("hf_export_static_weight_prefixes must be a list of nonempty strings")
+    return tuple(dict.fromkeys(prefixes))
+
+
+def _source_weight_map(base: Path) -> dict[str, str]:
+    index = base / "model.safetensors.index.json"
+    if index.is_file():
+        weight_map = json.loads(index.read_text()).get("weight_map")
+        if not isinstance(weight_map, dict) or any(
+            not isinstance(name, str) or not isinstance(shard, str) for name, shard in weight_map.items()
+        ):
+            raise ValueError(f"Invalid safetensors index: {index}")
+        return weight_map
+
+    shards = sorted(base.glob("*.safetensors"))
+    if not shards:
+        return {}
+    if len(shards) != 1:
+        raise ValueError(f"Sharded source checkpoint has no model.safetensors.index.json: {base}")
+    with safe_open(shards[0], framework="pt", device="cpu") as source:
+        return dict.fromkeys(source.keys(), shards[0].name)
+
+
+def _copy_source_static_weights(
+    base: Path,
+    path: Path,
+    weight_map: dict[str, str],
+    prefixes: tuple[str, ...],
+) -> int:
+    """Copy immutable source tensors absent from the live training model."""
+    source_weights = _source_weight_map(base)
+    for prefix in prefixes:
+        if not any(name.startswith(prefix) for name in source_weights):
+            raise ValueError(f"HF export static prefix has no source weights: {prefix!r}")
+
+    by_shard: dict[str, list[str]] = {}
+    for name, shard in source_weights.items():
+        if name in weight_map:
+            continue
+        if name.endswith(HF_STATIC_WEIGHT_SUFFIXES) or name.startswith(prefixes):
+            by_shard.setdefault(shard, []).append(name)
+
+    total_size = 0
+    for index, (source_shard, names) in enumerate(sorted(by_shard.items()), start=1):
+        with safe_open(base / source_shard, framework="pt", device="cpu") as source:
+            tensors = {name: source.get_tensor(name).contiguous() for name in names}
+        output_shard = f"model-static-{index:05d}.safetensors"
+        safetensors.torch.save_file(tensors, path / output_shard)
+        for name, tensor in tensors.items():
+            weight_map[name] = output_shard
+            total_size += tensor.numel() * tensor.element_size()
+    return total_size
 
 
 def _buffer_shards(
@@ -136,6 +204,7 @@ def _start_direct_export(
     quantization_config,
     megatron_local_weights,
 ) -> _HfExport:
+    static_weight_prefixes = _static_weight_prefixes(args)
     _collectively(lambda: _prepare_directory(path))
     iterator = HfWeightIteratorDirect(
         args,
@@ -154,12 +223,21 @@ def _start_direct_export(
             return
         base_checkpoint = Path(args.hf_checkpoint)
         if base_checkpoint.is_dir():
+            exported_size = total_size + _copy_source_static_weights(
+                base_checkpoint,
+                path,
+                weight_map,
+                static_weight_prefixes,
+            )
             for meta_file in base_checkpoint.iterdir():
                 if _is_hf_metadata_file(meta_file):
                     shutil.copy2(meta_file, path / meta_file.name)
         else:
+            if static_weight_prefixes:
+                raise ValueError("hf_export_static_weight_prefixes requires a local source checkpoint")
             logger.warning("hf_checkpoint %s is not a local dir; metadata not copied to %s", args.hf_checkpoint, path)
-        index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
+            exported_size = total_size
+        index = {"metadata": {"total_size": exported_size}, "weight_map": weight_map}
         (path / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hf-export")

@@ -1413,6 +1413,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--hf-export-static-weight-prefixes",
+                type=str,
+                nargs="*",
+                default=(),
+                help=(
+                    "HF tensor prefixes to copy unchanged from --hf-checkpoint when they are deliberately "
+                    "absent from the training model, such as a frozen vision tower."
+                ),
+            )
+            parser.add_argument(
                 "--save-trigger-sentinel",
                 type=str,
                 default=None,

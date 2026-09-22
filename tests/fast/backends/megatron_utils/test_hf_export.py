@@ -65,6 +65,7 @@ def exporter(monkeypatch, tmp_path):
     (base / "config.json").write_text("{}")
     args = SimpleNamespace(
         hf_checkpoint=str(base),
+        hf_export_static_weight_prefixes=(),
         save_hf=str(tmp_path / "export"),
         model_name=None,
         megatron_to_hf_mode="raw",
@@ -194,3 +195,72 @@ def test_duplicate_tensor_drains_the_collective_iterator_before_failing(exporter
         )
 
     assert visited == [0, 1, 2]
+
+
+def test_source_static_weights_complete_the_live_export(exporter):
+    source_tensors = {
+        "first": torch.zeros(4),
+        "layer.input_scale": torch.tensor([0.25]),
+        "layer.rotary_emb.inv_freq": torch.ones(2),
+        "model.visual.proj.weight": torch.arange(6).reshape(2, 3),
+        "missing.trainable.weight": torch.full((2,), 9),
+    }
+    base = Path(exporter.args.hf_checkpoint)
+    safetensors.torch.save_file(source_tensors, base / "model.safetensors")
+    (base / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(source_tensors, "model.safetensors")})
+    )
+    (base / ".complete").touch()
+    exporter.args.hf_export_static_weight_prefixes = ["model.visual."]
+
+    exporter.module.export_hf_model_direct(
+        exporter.args,
+        [],
+        exporter.path,
+        model_name="model",
+        quantization_config=None,
+        megatron_local_weights={},
+    )
+
+    index = json.loads((exporter.path / "model.safetensors.index.json").read_text())
+    assert set(index["weight_map"]) == {
+        "first",
+        "second",
+        "layer.input_scale",
+        "layer.rotary_emb.inv_freq",
+        "model.visual.proj.weight",
+    }
+    assert "missing.trainable.weight" not in index["weight_map"]
+    expected_size = sum(
+        tensor.numel() * tensor.element_size()
+        for tensor in (
+            torch.arange(4),
+            torch.ones(4),
+            source_tensors["layer.input_scale"],
+            source_tensors["layer.rotary_emb.inv_freq"],
+            source_tensors["model.visual.proj.weight"],
+        )
+    )
+    assert index["metadata"]["total_size"] == expected_size
+    assert not (exporter.path / ".complete").exists()
+    assert torch.equal(
+        safetensors.torch.load_file(exporter.path / index["weight_map"]["first"])["first"],
+        torch.arange(4),
+    )
+    for name in ("layer.input_scale", "layer.rotary_emb.inv_freq", "model.visual.proj.weight"):
+        saved = safetensors.torch.load_file(exporter.path / index["weight_map"][name])[name]
+        assert torch.equal(saved, source_tensors[name])
+
+
+def test_declared_static_prefix_must_exist_in_the_source(exporter):
+    exporter.args.hf_export_static_weight_prefixes = ["model.missing."]
+
+    with pytest.raises(RuntimeError, match="static prefix has no source weights"):
+        exporter.module.export_hf_model_direct(
+            exporter.args,
+            [],
+            exporter.path,
+            model_name="model",
+            quantization_config=None,
+            megatron_local_weights={},
+        )
