@@ -64,3 +64,56 @@ def test_converter_rejects_bf16_carveout_without_a_decoder_layer_root(tmp_path):
             device="cpu",
             num_layers_at_end_in_bf16=1,
         )
+
+
+def test_converter_expands_nested_fused_experts_in_a_bf16_layer(tmp_path):
+    model_dir = tmp_path / "model"
+    save_dir = tmp_path / "converted"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"text_config": {"num_hidden_layers": 1}})
+    )
+
+    prefix = "model.language_model.layers.0.mlp.experts"
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.gate_up_proj": torch.arange(
+                4 * NVFP4_GROUP_SIZE, dtype=torch.float32
+            ).to(torch.bfloat16).reshape(2, 2 * NVFP4_GROUP_SIZE, 1),
+            f"{prefix}.down_proj": torch.arange(
+                2 * NVFP4_GROUP_SIZE, dtype=torch.float32
+            ).to(torch.bfloat16).reshape(2, 1, NVFP4_GROUP_SIZE),
+            "model.language_model.layers.0.linear_attn.A_log": torch.ones(
+                NVFP4_GROUP_SIZE, dtype=torch.bfloat16
+            ),
+        },
+        model_dir / "model.safetensors",
+        metadata={"format": "pt"},
+    )
+
+    convert_nvfp4(
+        str(model_dir),
+        str(save_dir),
+        device="cpu",
+        num_layers_at_end_in_bf16=1,
+    )
+
+    with safetensors.safe_open(
+        save_dir / "model.safetensors", framework="pt", device="cpu"
+    ) as checkpoint:
+        assert f"{prefix}.gate_up_proj" not in checkpoint.keys()
+        assert f"{prefix}.down_proj" not in checkpoint.keys()
+        assert checkpoint.get_tensor(f"{prefix}.0.gate_proj.weight").shape == (
+            NVFP4_GROUP_SIZE,
+            1,
+        )
+        assert checkpoint.get_tensor(f"{prefix}.1.down_proj.weight").shape == (
+            1,
+            NVFP4_GROUP_SIZE,
+        )
+        assert (
+            checkpoint.get_tensor(
+                "model.language_model.layers.0.linear_attn.A_log"
+            ).dtype
+            == torch.float32
+        )
