@@ -89,6 +89,11 @@ class MilesBackend:
                     by_index[index] = {
                         "loss": float(datum_output["loss"]),
                         "logprobs": datum_output["logprobs"].tolist(),
+                        **{
+                            name: float(datum_output[name])
+                            for name in ("clipped_tokens", "loss_tokens")
+                            if name in datum_output
+                        },
                     }
         return [by_index[index] for index in range(len(slot_datums))]
 

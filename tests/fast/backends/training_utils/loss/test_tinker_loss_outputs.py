@@ -140,3 +140,39 @@ def test_nonzero_objectives_and_gradients(monkeypatch, recompute, loss_fn, confi
     torch.testing.assert_close(torch.stack([output["loss"] for output in outputs]), expected_losses)
     torch.testing.assert_close(torch.cat([output["logprobs"] for output in outputs]), logprobs.detach())
     assert all(not output["loss"].requires_grad and not output["logprobs"].requires_grad for output in outputs)
+
+
+@pytest.mark.parametrize(
+    "loss_fn, clipped_per_datum",
+    [
+        # ratios 0.5, 0.5, 1 | 1, 5, 5 with advantages 2, -3, 2 | -3, 2, -3;
+        # ppo clips only where the clamped branch lowers the objective
+        ("ppo", [1.0, 1.0]),
+        ("cispo", [0.0, 2.0]),
+        ("importance_sampling", None),
+        ("dro", None),
+    ],
+)
+def test_clip_stats_count_masked_tokens_whose_objective_is_clipped(monkeypatch, loss_fn, clipped_per_datum):
+    monkeypatch.setattr(tinker_losses, "_target_logprobs", lambda _args, _batch, logits: [logits[:3], logits[3:]])
+    ratios = torch.tensor([0.5, 0.5, 1, 1, 5, 5, 0.5, 5], dtype=torch.float64)
+    logprobs = torch.full((8,), -1.0, dtype=torch.float64, requires_grad=True)
+    batch = {
+        "loss_fn": loss_fn,
+        "loss_fn_config": {},
+        "advantages": [[2, -3, 2], [-3, 2, -3, 11, -13]],
+        "rollout_log_probs": [(-1 - ratios.log())[:3], (-1 - ratios.log())[3:]],
+        "loss_masks": [torch.ones(3), torch.tensor([1, 1, 1, 0, 0])],
+        "total_lengths": [4, 6],
+        "response_lengths": [3, 5],
+        "sample_indices": [7, 11],
+    }
+
+    _, log = tinker_losses.TINKER_LOSS_FUNCTIONS[loss_fn](Namespace(), batch, logprobs, None)
+
+    outputs = log["per_datum"]
+    if clipped_per_datum is None:
+        assert all("clipped_tokens" not in output for output in outputs)
+        return
+    assert [output["clipped_tokens"].item() for output in outputs] == clipped_per_datum
+    assert [output["loss_tokens"].item() for output in outputs] == [3.0, 3.0]

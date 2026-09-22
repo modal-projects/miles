@@ -44,20 +44,37 @@ def _response_masks(batch: RolloutBatch, log_probs: list[torch.Tensor]) -> list[
     return [_as_tensor_like(mask, log_prob) for mask, log_prob in zip(batch["loss_masks"], log_probs, strict=True)]
 
 
+def _clip_stats(clipped: torch.Tensor, mask: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Clipped and eligible token counts over the loss mask, for a clip-fraction diagnostic."""
+    return {
+        "clipped_tokens": (clipped.to(mask.dtype) * mask).sum().detach(),
+        "loss_tokens": mask.sum().detach(),
+    }
+
+
 def _sum_loss_and_outputs(
     batch: RolloutBatch,
     logits: torch.Tensor,
     log_probs: list[torch.Tensor],
     per_datum_losses: list[torch.Tensor],
+    per_datum_stats: list[dict[str, torch.Tensor]] | None = None,
 ) -> tuple[torch.Tensor, dict]:
     if per_datum_losses:
         loss = torch.stack(per_datum_losses).sum()
     else:
         # a microbatch with no supervised tokens still needs the graph alive; fp32 sum avoids fp16 inf -> nan
         loss = logits.sum(dtype=torch.float32) * 0
+    stats = per_datum_stats if per_datum_stats is not None else [{} for _ in per_datum_losses]
     per_datum = [
-        {"sample_index": index, "logprobs": log_prob.detach().cpu(), "loss": sample_loss.detach().cpu()}
-        for index, log_prob, sample_loss in zip(batch["sample_indices"], log_probs, per_datum_losses, strict=True)
+        {
+            "sample_index": index,
+            "logprobs": log_prob.detach().cpu(),
+            "loss": sample_loss.detach().cpu(),
+            **{name: value.cpu() for name, value in sample_stats.items()},
+        }
+        for index, log_prob, sample_loss, sample_stats in zip(
+            batch["sample_indices"], log_probs, per_datum_losses, stats, strict=True
+        )
     ]
     return loss, {"loss": loss.detach(), "per_datum": per_datum}
 
@@ -105,14 +122,19 @@ def ppo_loss_function(
     clip_high = config.get("clip_high_threshold", PPO_DEFAULTS["clip_high_threshold"])
     log_probs = _target_logprobs(args, batch, logits)
     per_datum_losses = []
+    per_datum_stats = []
     for log_prob, sampling_log_prob, advantage, mask in zip(
         log_probs, batch["rollout_log_probs"], batch["advantages"], _response_masks(batch, log_probs), strict=True
     ):
         ratio = torch.exp(log_prob - _as_tensor_like(sampling_log_prob, log_prob))
         advantages = _as_tensor_like(advantage, log_prob)
-        objective = torch.minimum(ratio * advantages, torch.clamp(ratio, clip_low, clip_high) * advantages)
+        unclipped = ratio * advantages
+        clipped_objective = torch.clamp(ratio, clip_low, clip_high) * advantages
+        objective = torch.minimum(unclipped, clipped_objective)
         per_datum_losses.append(-(objective * mask).sum())
-    return _sum_loss_and_outputs(batch, logits, log_probs, per_datum_losses)
+        # a token is clipped only where the clamped branch wins, which is where the gradient is cut
+        per_datum_stats.append(_clip_stats(clipped_objective < unclipped, mask))
+    return _sum_loss_and_outputs(batch, logits, log_probs, per_datum_losses, per_datum_stats)
 
 
 def cispo_loss_function(
@@ -126,13 +148,15 @@ def cispo_loss_function(
     clip_high = config.get("clip_high_threshold", CISPO_DEFAULTS["clip_high_threshold"])
     log_probs = _target_logprobs(args, batch, logits)
     per_datum_losses = []
+    per_datum_stats = []
     for log_prob, sampling_log_prob, advantage, mask in zip(
         log_probs, batch["rollout_log_probs"], batch["advantages"], _response_masks(batch, log_probs), strict=True
     ):
         ratio = torch.exp(log_prob - _as_tensor_like(sampling_log_prob, log_prob))
         coefficient = torch.clamp(ratio, clip_low, clip_high).detach()
         per_datum_losses.append(-(coefficient * log_prob * _as_tensor_like(advantage, log_prob) * mask).sum())
-    return _sum_loss_and_outputs(batch, logits, log_probs, per_datum_losses)
+        per_datum_stats.append(_clip_stats(coefficient != ratio.detach(), mask))
+    return _sum_loss_and_outputs(batch, logits, log_probs, per_datum_losses, per_datum_stats)
 
 
 def dro_loss_function(

@@ -3,7 +3,7 @@
 import numpy as np
 
 from miles.tinker.core.types import UserInputError
-from miles.tinker.server.encoding import build_datum
+from miles.tinker.server.encoding import build_datum, forward_backward_metrics
 from tinker.proto import tinker_public_pb2 as public_pb
 
 PROTO_CONTENT_TYPE = "application/x-protobuf"
@@ -94,7 +94,8 @@ def encode_forward_backward_output(result: dict) -> bytes:
     message = public_pb.ForwardBackwardOutput()
     message.loss_fn_output_type = "ArrayRecord"
     outputs = result["outputs"]
-    message.metrics["loss:sum"] = float(sum(output["loss"] for output in outputs))
+    for name, value in forward_backward_metrics(outputs).items():
+        message.metrics[name] = value
 
     record = message.loss_fn_outputs.add()
     record.num_datums = len(outputs)
