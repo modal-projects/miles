@@ -231,6 +231,11 @@ The rollout endpoint and the version store are separate interfaces. The
 request path should not have to carry model-sized weights, and publishing a new
 version should not require miles to enumerate the current replicas.
 
+If a trainer restarts while the external fleet keeps serving version `N`, pass
+`--update-weight-initial-version N`. The first new publication is then
+`N + 1`; the trainer checkpoint used for the restart must represent version
+`N`. Fresh runs leave the option at its default of zero.
+
 One open-source package implementing the rollout-service side is
 [Stitch](https://github.com/modal-projects/stitch). It connects miles policy
 publication and version-constrained requests to an independently managed
