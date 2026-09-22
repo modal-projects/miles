@@ -3,6 +3,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import safetensors.torch
+import torch
 
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.protocols.delta import UpdateWeightFromDiskDelta
@@ -72,6 +74,61 @@ class TestConnectionOwnership:
 
         with pytest.raises(ValueError, match="local-checkpoint-dir"):
             self._connect(protocol, [MagicMock()])
+
+
+class TestCanonicalCheckpointLayout:
+    @staticmethod
+    def _protocol(checkpoint: Path) -> UpdateWeightFromDiskDelta:
+        protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+        protocol.args = Namespace(hf_checkpoint=str(checkpoint))
+        return protocol
+
+    def test_casts_only_between_plain_float_storage_dtypes(self, tmp_path: Path) -> None:
+        safetensors.torch.save_file(
+            {"router": torch.zeros((2, 3), dtype=torch.bfloat16)},
+            tmp_path / "model.safetensors",
+        )
+
+        emitted = torch.ones((2, 3), dtype=torch.float32)
+        matched = self._protocol(tmp_path)._match_checkpoint_layout("router", emitted)
+
+        assert matched.dtype is torch.bfloat16
+        torch.testing.assert_close(matched.float(), emitted)
+
+    def test_preserves_an_exact_nvfp4_layout(self, tmp_path: Path) -> None:
+        tensors = {
+            "expert.weight": torch.zeros((2, 3), dtype=torch.uint8),
+            "expert.weight_scale": torch.zeros((2, 1), dtype=torch.float8_e4m3fn),
+            "expert.weight_scale_2": torch.zeros((), dtype=torch.float32),
+        }
+        safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
+        protocol = self._protocol(tmp_path)
+
+        for name, emitted in tensors.items():
+            assert protocol._match_checkpoint_layout(name, emitted) is emitted
+
+    def test_rejects_a_missing_quantization_step(self, tmp_path: Path) -> None:
+        safetensors.torch.save_file(
+            {"expert.weight": torch.zeros((2, 3), dtype=torch.uint8)},
+            tmp_path / "model.safetensors",
+        )
+
+        with pytest.raises(ValueError, match="must be produced by the model's weight converter"):
+            self._protocol(tmp_path)._match_checkpoint_layout(
+                "expert.weight", torch.ones((2, 3), dtype=torch.bfloat16)
+            )
+
+    def test_rejects_shape_and_name_mismatches(self, tmp_path: Path) -> None:
+        safetensors.torch.save_file(
+            {"weight": torch.zeros((2, 3), dtype=torch.bfloat16)},
+            tmp_path / "model.safetensors",
+        )
+        protocol = self._protocol(tmp_path)
+
+        with pytest.raises(ValueError, match="has shape"):
+            protocol._match_checkpoint_layout("weight", torch.ones((3, 2), dtype=torch.bfloat16))
+        with pytest.raises(ValueError, match="absent from the canonical checkpoint"):
+            protocol._match_checkpoint_layout("missing", torch.ones((2, 3), dtype=torch.bfloat16))
 
 
 def test_artifact_only_publish_calls_the_hook_without_engine_requests() -> None:
