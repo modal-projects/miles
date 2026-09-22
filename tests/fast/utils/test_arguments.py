@@ -438,6 +438,74 @@ def test_finite_top_k_enables_sampling_support_replay():
     miles_validate_args(args)
 
 
+def test_external_endpoint_owns_sampling_support_forwarding():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(
+        [
+            "--rollout-top-p",
+            "0.95",
+            "--rollout-top-k",
+            "32",
+            "--rollout-endpoint-url",
+            "https://rollout.example.test",
+            "--num-rollout",
+            "1",
+            *REQUIRED_ARGS,
+        ]
+    )
+
+    miles_validate_args(args)
+
+
+def _parse_external_endpoint(*extra: str) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    return parser.parse_args(
+        [
+            "--rollout-endpoint-url",
+            "https://rollout.example/",
+            "--rollout-num-gpus",
+            "0",
+            "--num-rollout",
+            "1",
+            *extra,
+            *REQUIRED_ARGS,
+        ]
+    )
+
+
+def test_external_endpoint_selects_an_opaque_rollout_topology():
+    args = _parse_external_endpoint()
+
+    miles_validate_args(args)
+
+    assert args.rollout_endpoint_url == "https://rollout.example"
+    assert args.rollout_external is True
+
+
+def test_weight_update_initial_version_must_be_non_negative():
+    args = _parse_external_endpoint("--update-weight-initial-version", "-1")
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        miles_validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "extra,message",
+    [
+        (("--rollout-num-gpus", "1"), "set --rollout-num-gpus 0"),
+        (("--eval-num-gpus", "1"), "set --eval-num-gpus 0"),
+        (("--rollout-external-engine-addrs", "host:8000"), "different external rollout APIs"),
+    ],
+)
+def test_external_endpoint_rejects_a_second_engine_topology(extra: tuple[str, ...], message: str):
+    args = _parse_external_endpoint(*extra)
+
+    with pytest.raises(AssertionError, match=message):
+        miles_validate_args(args)
+
+
 def test_sglang_parallel_sizes_keep_server_args_destinations():
     parser = add_sglang_arguments(argparse.ArgumentParser())
     args = parser.parse_args(
