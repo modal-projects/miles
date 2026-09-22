@@ -935,6 +935,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-initial-version",
+                type=int,
+                default=0,
+                help=(
+                    "Weight version already served before this trainer starts publishing. "
+                    "Leave at 0 for a fresh fleet; an independently managed persistent fleet "
+                    "must supply its current version when the trainer resumes."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-disk-dir",
                 type=str,
                 default=None,
@@ -2913,6 +2923,9 @@ def miles_validate_args(args):
             args.rollout_external_engine_addrs is None
         ), "--rollout-endpoint-url and --rollout-external-engine-addrs select different external rollout APIs."
         args.rollout_external = True
+
+    if args.update_weight_initial_version < 0:
+        raise ValueError("--update-weight-initial-version must be non-negative")
 
     assert not (
         args.use_session_server and args.partial_rollout

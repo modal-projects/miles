@@ -467,6 +467,13 @@ def test_external_endpoint_selects_an_opaque_rollout_topology():
     assert args.rollout_external is True
 
 
+def test_weight_update_initial_version_must_be_non_negative():
+    args = _parse_external_endpoint("--update-weight-initial-version", "-1")
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        miles_validate_args(args)
+
+
 @pytest.mark.parametrize(
     "extra,message",
     [
