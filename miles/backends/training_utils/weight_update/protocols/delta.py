@@ -143,7 +143,9 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         """Submit each tensor of the bucket to the diff/compress pool (pipelined with the gather)."""
         for name, tensor in bucket:
             tensor = self._match_checkpoint_layout(name, tensor)
-            flat = tensor.detach().contiguous().view(torch.uint8).reshape(-1)
+            # Flatten before reinterpreting storage: PyTorch cannot dtype-view a
+            # 0-D tensor, and quantized checkpoints contain scalar global scales.
+            flat = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
             nbytes = int(flat.numel())
             if self._use_pinned and nbytes <= self._max_bytes:
                 buf = self._free_q.get()  # blocks when all buffers are in flight -> backpressures the gather

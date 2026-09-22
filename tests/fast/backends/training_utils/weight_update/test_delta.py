@@ -1,4 +1,5 @@
 from argparse import Namespace
+from collections import deque
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -129,6 +130,25 @@ class TestCanonicalCheckpointLayout:
             protocol._match_checkpoint_layout("weight", torch.ones((3, 2), dtype=torch.bfloat16))
         with pytest.raises(ValueError, match="absent from the canonical checkpoint"):
             protocol._match_checkpoint_layout("missing", torch.ones((2, 3), dtype=torch.bfloat16))
+
+    def test_send_bucket_encodes_a_scalar_global_scale(self, tmp_path: Path) -> None:
+        safetensors.torch.save_file(
+            {"expert.weight_scale_2": torch.ones((), dtype=torch.float32)},
+            tmp_path / "model.safetensors",
+        )
+        protocol = self._protocol(tmp_path)
+        protocol._use_pinned = False
+        protocol._pool = MagicMock()
+        protocol._inflight = deque()
+        protocol.total_bytes = 0
+
+        protocol.send_bucket([("expert.weight_scale_2", torch.ones((), dtype=torch.float32))])
+
+        _, name, payload, nbytes, pinned = protocol._pool.submit.call_args.args
+        assert name == "expert.weight_scale_2"
+        assert payload.shape == (torch.float32.itemsize,)
+        assert nbytes == torch.float32.itemsize
+        assert not pinned
 
 
 def test_artifact_only_publish_calls_the_hook_without_engine_requests() -> None:
