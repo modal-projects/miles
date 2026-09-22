@@ -288,6 +288,7 @@ class MegatronTrainRayActor(TrainRayActor):
             parallel_state=get_parallel_state(),
             is_lora=is_lora,
             lora_sync_config=build_lora_sync_config(args) if is_lora else None,
+            initial_weight_version=args.update_weight_initial_version,
         )
 
     def _clear_quantized_weight_workspaces(self) -> None:
