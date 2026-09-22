@@ -305,6 +305,10 @@ standard rollout metrics:
 
 ```text
 rollout/fully_async/queue_size
+rollout/fully_async/producer_blocked_time_ratio, rollout/fully_async/consumer_wait_time_ratio
+rollout/fully_async/completed_groups_per_second
+rollout/fully_async/completed_response_tokens_per_second
+rollout/fully_async/completed_groups_pending_buffer
 rollout/fully_async/aborted_groups_filtered
 rollout/fully_async/stale_groups_filtered
 rollout/fully_async/avg_staleness, rollout/fully_async/max_staleness
@@ -313,6 +317,8 @@ rollout/fully_async/avg_generation_version_span, rollout/fully_async/max_generat
 rollout/fully_async/token_weighted_staleness
 rollout/fully_async/weight_version_sample_coverage
 rollout/fully_async/buffer_avg_staleness, rollout/fully_async/buffer_max_staleness
+rollout/fully_async/avg_selected_group_age_seconds, rollout/fully_async/max_selected_group_age_seconds
+rollout/fully_async/filtered_response_token_ratio
 rollout/dynamic_filter/drop_<reason>
 ```
 
@@ -340,12 +346,18 @@ it.
 `rollout/aborted/drop_<exit_status>` splits the same count by its recorded cause.
 Synchronous rollout reports the latter metric too.
 
-A `queue_size` pinned at zero means rollout is the bottleneck, so scale rollout capacity
-or lower per-sample generation cost. A `queue_size` pinned at capacity means training is
-the bottleneck, and the `buffer_` staleness metrics will climb with it. A rising
-`stale_groups_filtered` means groups are aging out faster than the trainer consumes
-them. In the logs, a `No completed rollout groups for 30.0s` warning means the drain is
-starved.
+`producer_blocked_time_ratio` measures time when a completed group was waiting for
+buffer capacity; `consumer_wait_time_ratio` measures time when training was waiting for
+a group. A high consumer-wait ratio means rollout is the bottleneck. A high
+producer-blocked ratio or a growing `completed_groups_pending_buffer` means training and
+filtering cannot accept completions as quickly as rollout produces them.
+
+`selected_group_age_seconds` runs from generation-and-reward completion to selection.
+`filtered_response_token_ratio` is the fraction of response tokens in decisions during
+the window that belonged to aborted, missing-reward, dynamic-filtered, or stale-filtered
+groups. It counts response tokens, not GPU FLOPs. A rising `stale_groups_filtered` means
+groups are aging out before selection. In the logs, a
+`No completed rollout groups for 30.0s` warning means the drain is starved.
 
 ### Async eval metrics
 
