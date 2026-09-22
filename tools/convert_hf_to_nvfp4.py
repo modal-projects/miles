@@ -87,6 +87,25 @@ def _get_num_hidden_layers(model_dir: str) -> int:
     return int(num_layers)
 
 
+def _bf16_layer_prefixes(
+    num_hidden_layers: int,
+    num_layers_at_start_in_bf16: int,
+    num_layers_at_end_in_bf16: int,
+) -> set[str]:
+    """HF decoder prefixes selected by the first/last-layer BF16 policy."""
+    layer_indices = set(range(0, num_layers_at_start_in_bf16))
+    if num_layers_at_end_in_bf16:
+        layer_indices.update(range(num_hidden_layers - num_layers_at_end_in_bf16, num_hidden_layers))
+    return {
+        prefix
+        for layer_idx in layer_indices
+        for prefix in (
+            f"model.layers.{layer_idx}.",
+            f"model.language_model.layers.{layer_idx}.",
+        )
+    }
+
+
 def should_quantize(
     name: str,
     weight: torch.Tensor,
@@ -300,11 +319,11 @@ def process_file(
 
     modules_to_not_convert: list[str] = []
     q_weights: dict[str, torch.Tensor] = {}
-    head_end_idx = num_layers_at_start_in_bf16
-    tail_start_idx = num_hidden_layers - num_layers_at_end_in_bf16
-    dynamic_skip_layer_prefixes: set[str] = set()
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(0, head_end_idx)})
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(tail_start_idx, num_hidden_layers)})
+    dynamic_skip_layer_prefixes = _bf16_layer_prefixes(
+        num_hidden_layers,
+        num_layers_at_start_in_bf16,
+        num_layers_at_end_in_bf16,
+    )
 
     if num_layers_at_end_in_bf16 > 0 or num_layers_at_start_in_bf16 > 0:
         modules_to_not_convert.extend(sorted(dynamic_skip_layer_prefixes))
@@ -393,11 +412,11 @@ def convert_nvfp4(
     safetensors_files = [f for f in os.listdir(input_path) if f.endswith(".safetensors")]
 
     num_hidden_layers = _get_num_hidden_layers(input_path)
-    head_end_idx = num_layers_at_start_in_bf16
-    tail_start_idx = num_hidden_layers - num_layers_at_end_in_bf16
-    dynamic_skip_layer_prefixes: set[str] = set()
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(0, head_end_idx)})
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(tail_start_idx, num_hidden_layers)})
+    dynamic_skip_layer_prefixes = _bf16_layer_prefixes(
+        num_hidden_layers,
+        num_layers_at_start_in_bf16,
+        num_layers_at_end_in_bf16,
+    )
     dynamic_skip_substrings = (
         *extra_high_precision_layers_hf,
         *sorted(dynamic_skip_layer_prefixes),
