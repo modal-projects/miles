@@ -134,6 +134,8 @@ class TestConfigToArgv:
             rollout_session_affinity_header="X-SMG-Routing-Key",
             session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_retries",
             session_sample_postprocessor_path=("miles.rollout.session.v2.postprocessor_hub.default_postprocess"),
+            custom_rollout_request_hook_path=None,
+            custom_rollout_request_hook_args={},
         )
         assert parse_config_argv(SessionServerConfig, config_to_argv(session_config)) == session_config
 
