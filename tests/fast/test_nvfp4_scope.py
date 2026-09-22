@@ -169,6 +169,37 @@ def test_nested_text_config_controls_layer_bounds_and_bf16_edges(tmp_path, fake_
     assert not any(rule.startswith("model.layers.") for rule in ignore)
 
 
+def test_qwen_fused_experts_expand_in_a_bf16_layer(tmp_path, fake_quantizers):
+    prefix = "model.language_model.layers.0.mlp.experts"
+    tensors = {
+        f"{prefix}.gate_up_proj": torch.arange(64, dtype=torch.float32)
+        .to(torch.bfloat16)
+        .reshape(2, 32, 1),
+        f"{prefix}.down_proj": torch.arange(32, dtype=torch.float32)
+        .to(torch.bfloat16)
+        .reshape(2, 1, 16),
+        "model.language_model.layers.0.linear_attn.A_log": torch.ones(
+            16, dtype=torch.bfloat16
+        ),
+    }
+
+    actual, ignore, _ = _convert(
+        tmp_path,
+        {"text_config": {"num_hidden_layers": 1}},
+        {"model.safetensors": tensors},
+        num_layers_at_end_in_bf16=1,
+    )
+
+    assert fake_quantizers == []
+    assert f"{prefix}.gate_up_proj" not in actual
+    assert f"{prefix}.down_proj" not in actual
+    assert actual[f"{prefix}.0.gate_proj.weight"].shape == (16, 1)
+    assert actual[f"{prefix}.1.down_proj.weight"].shape == (1, 16)
+    assert actual["model.language_model.layers.0.linear_attn.A_log"].dtype == torch.float32
+    assert prefix in ignore
+    assert "model.layers.0.mlp.experts" in ignore
+
+
 @pytest.mark.parametrize(
     "prefix, eligible",
     [
