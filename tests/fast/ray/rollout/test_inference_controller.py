@@ -3,6 +3,7 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
@@ -528,6 +529,17 @@ class TestUpdateWeightsLockWindow:
 
         await controller.end_update_weights(snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
         await reconcile_task
+
+    @pytest.mark.asyncio
+    async def test_abort_releases_the_lock_and_resumes_health_monitoring(self):
+        controller = _make_controller({})
+        controller._health_monitoring_resume = AsyncMock()
+
+        await controller.start_update_weights()
+        await controller.abort_update_weights()
+
+        assert not controller.context_lock.locked
+        controller._health_monitoring_resume.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_a_plain_locked_call_does_not_leave_the_lock_held(self):

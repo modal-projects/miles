@@ -112,6 +112,32 @@ async def test_start_update_weights_initializes_colocated_cells_before_snapshott
     assert init_counts_at_snapshot == [1]
 
 
+@pytest.mark.asyncio
+async def test_failed_start_resumes_health_checks_and_releases_the_lock():
+    order: list[str] = []
+    controller = _make_inference_controller()
+
+    async def _record_pause() -> None:
+        order.append("health_monitoring_pause")
+
+    async def _fail_readiness() -> None:
+        order.append("ensure_cells_ready")
+        raise RuntimeError("cells did not become ready")
+
+    async def _record_resume() -> None:
+        order.append("health_monitoring_resume")
+
+    controller._health_monitoring_pause = _record_pause
+    controller._ensure_cells_ready = _fail_readiness
+    controller._health_monitoring_resume = _record_resume
+
+    with pytest.raises(RuntimeError, match="cells did not become ready"):
+        await controller.start_update_weights()
+
+    assert order == ["health_monitoring_pause", "ensure_cells_ready", "health_monitoring_resume"]
+    assert not controller.context_lock.locked
+
+
 def _make_controller(order: list[str]):
     from miles.ray.train.group import TrainerController
 
@@ -149,6 +175,20 @@ async def test_the_trainer_hands_end_update_weights_the_snapshot_start_returned(
     await group.update_weights()
 
     _assert_the_snapshot_is_handed_back_unchanged(group._inference_controller)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_broadcast_aborts_the_update_window(monkeypatch):
+    monkeypatch.setattr("miles.ray.train.group._RETRY_MAX_ATTEMPTS", 1)
+    order: list[str] = []
+    group = _make_controller(order)
+    group._execute_first_alive.side_effect = RuntimeError("weight transfer failed")
+
+    with pytest.raises(RuntimeError, match="weight transfer failed"):
+        await group.update_weights()
+
+    assert order == ["start_update_weights", "abort_update_weights"]
+    assert not any(name == "end_update_weights" for name, _args, _kwargs in group._inference_controller.calls)
 
 
 def test_fsdp_updater_flushes_only_after_every_engine_is_paused():

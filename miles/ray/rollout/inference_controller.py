@@ -164,23 +164,29 @@ class InferenceController:
     async def start_update_weights(self) -> "UpdatableEngines":
         """Return engines eligible for weight updates."""
         await self._health_monitoring_pause()
-        await self._ensure_cells_ready()
+        try:
+            await self._ensure_cells_ready()
 
-        srv = self._get_updatable_server()
-        if not srv:
+            srv = self._get_updatable_server()
+            if not srv:
+                return UpdatableEngines(
+                    rollout_engines=[],
+                    engine_gpu_counts=[],
+                    engine_gpu_offsets=[],
+                    snapshot_cell_id_to_hashes={},
+                )
+
             return UpdatableEngines(
-                rollout_engines=[],
-                engine_gpu_counts=[],
-                engine_gpu_offsets=[],
-                snapshot_cell_id_to_hashes={},
+                rollout_engines=srv.api_clients,
+                engine_gpu_counts=srv.engine_gpu_counts,
+                engine_gpu_offsets=srv.engine_gpu_offsets,
+                snapshot_cell_id_to_hashes={
+                    cell_id: cell.meta.workers_hash for cell_id, cell in srv.server_cells.items()
+                },
             )
-
-        return UpdatableEngines(
-            rollout_engines=srv.api_clients,
-            engine_gpu_counts=srv.engine_gpu_counts,
-            engine_gpu_offsets=srv.engine_gpu_offsets,
-            snapshot_cell_id_to_hashes={cell_id: cell.meta.workers_hash for cell_id, cell in srv.server_cells.items()},
-        )
+        except BaseException:
+            await self._health_monitoring_resume()
+            raise
 
     @releases_lock
     async def end_update_weights(self, snapshot_cell_id_to_hashes: dict[str, str]):
@@ -194,6 +200,11 @@ class InferenceController:
                 and cell.is_pending_weights
             ]
         )
+
+    @releases_lock
+    async def abort_update_weights(self) -> None:
+        """Close a failed update window without admitting pending replicas."""
+        await self._health_monitoring_resume()
 
     @requires_lock
     async def _ensure_cells_ready(self) -> None:
