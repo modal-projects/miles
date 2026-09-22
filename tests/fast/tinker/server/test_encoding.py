@@ -5,6 +5,7 @@ from miles.tinker.server.encoding import (
     build_datum,
     decode_command,
     decode_sample_request,
+    forward_backward_metrics,
     render_result,
     tensor_data_to_list,
 )
@@ -102,3 +103,21 @@ class TestRenderResult:
         assert rendered["loss_fn_output_type"] == "ArrayRecord"
         assert rendered["metrics"] == {"loss:sum": 2.0}
         assert rendered["loss_fn_outputs"][0]["logprobs"] == {"dtype": "float32", "shape": [2], "data": [0.1, 0.2]}
+
+
+def test_forward_backward_metrics_report_the_clip_fraction():
+    outputs = [
+        {"loss": 1.0, "clipped_tokens": 1.0, "loss_tokens": 3.0},
+        {"loss": 2.0, "clipped_tokens": 2.0, "loss_tokens": 5.0},
+    ]
+
+    assert forward_backward_metrics(outputs) == {
+        "loss:sum": 3.0,
+        "clipped_tokens:sum": 3.0,
+        "loss_tokens:sum": 8.0,
+        "clip_fraction:mean": 0.375,
+    }
+
+
+def test_forward_backward_metrics_omit_clipping_for_a_loss_that_does_not_clip():
+    assert forward_backward_metrics([{"loss": 1.0}]) == {"loss:sum": 1.0}

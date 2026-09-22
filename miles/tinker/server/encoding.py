@@ -167,6 +167,18 @@ def decode_sample_request(payload: dict) -> dict:
 # -------- result rendering (JSON; proto_codec renders the binary forms) --------
 
 
+def forward_backward_metrics(outputs: list[dict]) -> dict[str, float]:
+    """Step metrics for one client: loss plus the PPO/CISPO clip fraction when the loss clips."""
+    metrics = {"loss:sum": float(sum(output["loss"] for output in outputs))}
+    loss_tokens = sum(output.get("loss_tokens", 0.0) for output in outputs)
+    if any("clipped_tokens" in output for output in outputs):
+        clipped_tokens = sum(output.get("clipped_tokens", 0.0) for output in outputs)
+        metrics["clipped_tokens:sum"] = float(clipped_tokens)
+        metrics["loss_tokens:sum"] = float(loss_tokens)
+        metrics["clip_fraction:mean"] = float(clipped_tokens / loss_tokens) if loss_tokens else 0.0
+    return metrics
+
+
 def render_result(result: dict) -> dict:
     op = result["op"]
     if op in ("forward_backward", "forward_only"):
@@ -178,7 +190,7 @@ def render_result(result: dict) -> dict:
                 {"loss:sum": _tensor_json([output["loss"]]), "logprobs": _tensor_json(output["logprobs"])}
                 for output in outputs
             ],
-            "metrics": {"loss:sum": float(sum(output["loss"] for output in outputs))},
+            "metrics": forward_backward_metrics(outputs),
         }
     if op == "sample":
         rendered = {"type": "sample", "sequences": result["sequences"]}
