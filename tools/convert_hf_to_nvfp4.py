@@ -87,6 +87,36 @@ def _get_num_hidden_layers(model_dir: str) -> int:
     return int(num_layers)
 
 
+def _find_decoder_layer_roots(input_path: str, safetensors_files: list[str]) -> tuple[str, ...]:
+    """Find the decoder-layer roots that own routed experts in the checkpoint."""
+    roots: set[str] = set()
+    for filename in safetensors_files:
+        with safetensors.safe_open(os.path.join(input_path, filename), framework="pt", device="cpu") as f:
+            for name in f.keys():
+                if not _is_routed_expert_weight_name(name):
+                    continue
+                before_experts = name.split(".experts.", 1)[0]
+                parts = before_experts.split(".")
+                for index in range(len(parts) - 1, -1, -1):
+                    if parts[index].isdigit():
+                        roots.add(".".join(parts[:index]))
+                        break
+    return tuple(sorted(roots))
+
+
+def _bf16_layer_prefixes(
+    decoder_layer_roots: tuple[str, ...],
+    num_hidden_layers: int,
+    num_layers_at_start_in_bf16: int,
+    num_layers_at_end_in_bf16: int,
+) -> set[str]:
+    """Return the checkpoint prefixes selected by the first/last-layer BF16 policy."""
+    layer_indices = set(range(num_layers_at_start_in_bf16))
+    if num_layers_at_end_in_bf16:
+        layer_indices.update(range(num_hidden_layers - num_layers_at_end_in_bf16, num_hidden_layers))
+    return {f"{root}.{layer_index}." for root in decoder_layer_roots for layer_index in layer_indices}
+
+
 def should_quantize(
     name: str,
     weight: torch.Tensor,
@@ -287,9 +317,7 @@ def process_file(
     filename: str,
     result_collector: ConversionResult,
     device: str,
-    num_hidden_layers: int,
-    num_layers_at_start_in_bf16: int,
-    num_layers_at_end_in_bf16: int,
+    dynamic_skip_layer_prefixes: set[str],
     extra_high_precision_layers_hf: tuple[str, ...],
     gated_pair_locations: dict[str, dict[str, tuple[str, str]]],
     processed_gated_pairs: set[str],
@@ -300,14 +328,7 @@ def process_file(
 
     modules_to_not_convert: list[str] = []
     q_weights: dict[str, torch.Tensor] = {}
-    head_end_idx = num_layers_at_start_in_bf16
-    tail_start_idx = num_hidden_layers - num_layers_at_end_in_bf16
-    dynamic_skip_layer_prefixes: set[str] = set()
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(0, head_end_idx)})
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(tail_start_idx, num_hidden_layers)})
-
-    if num_layers_at_end_in_bf16 > 0 or num_layers_at_start_in_bf16 > 0:
-        modules_to_not_convert.extend(sorted(dynamic_skip_layer_prefixes))
+    modules_to_not_convert.extend(sorted(dynamic_skip_layer_prefixes))
 
     dynamic_skip_substrings = (
         *extra_high_precision_layers_hf,
@@ -359,7 +380,7 @@ def process_file(
             else:
                 if key.endswith(".weight"):
                     module_name = key[: -len(".weight")]
-                    is_dynamic_bf16 = any(prefix in key for prefix in dynamic_skip_layer_prefixes)
+                    is_dynamic_bf16 = any(key.startswith(prefix) for prefix in dynamic_skip_layer_prefixes)
                     if ".experts." not in key:
                         modules_to_not_convert.append(module_name)
                     elif is_dynamic_bf16:
@@ -393,11 +414,15 @@ def convert_nvfp4(
     safetensors_files = [f for f in os.listdir(input_path) if f.endswith(".safetensors")]
 
     num_hidden_layers = _get_num_hidden_layers(input_path)
-    head_end_idx = num_layers_at_start_in_bf16
-    tail_start_idx = num_hidden_layers - num_layers_at_end_in_bf16
-    dynamic_skip_layer_prefixes: set[str] = set()
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(0, head_end_idx)})
-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(tail_start_idx, num_hidden_layers)})
+    decoder_layer_roots = _find_decoder_layer_roots(input_path, safetensors_files)
+    if (num_layers_at_start_in_bf16 or num_layers_at_end_in_bf16) and not decoder_layer_roots:
+        raise ValueError("Could not find decoder layers containing routed experts for the requested BF16 carve-out.")
+    dynamic_skip_layer_prefixes = _bf16_layer_prefixes(
+        decoder_layer_roots,
+        num_hidden_layers,
+        num_layers_at_start_in_bf16,
+        num_layers_at_end_in_bf16,
+    )
     dynamic_skip_substrings = (
         *extra_high_precision_layers_hf,
         *sorted(dynamic_skip_layer_prefixes),
@@ -419,9 +444,7 @@ def convert_nvfp4(
             filename,
             result_collector,
             device,
-            num_hidden_layers,
-            num_layers_at_start_in_bf16,
-            num_layers_at_end_in_bf16,
+            dynamic_skip_layer_prefixes,
             extra_high_precision_layers_hf,
             gated_pair_locations,
             processed_gated_pairs,
