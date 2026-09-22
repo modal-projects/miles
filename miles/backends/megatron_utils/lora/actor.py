@@ -9,6 +9,7 @@ from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_h
 from miles.backends.training_utils.data import get_rollout_data
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.snapshot_publisher import WeightPublisher
+from miles.utils.function_registry import load_function
 from miles.utils.multi_lora import AdapterSpec
 from miles.utils.ray_utils import Box
 from miles.utils.tracking_utils.structured_log import with_logs
@@ -26,6 +27,9 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )
         self.weight_publisher = WeightPublisher(iterator, build_lora_sync_config(args))
+        self._checkpoint_publish = (
+            load_function(args.custom_checkpoint_publish_path) if args.custom_checkpoint_publish_path else None
+        )
 
     @with_logs
     def forward_backward(self, batch_id: int, rollout_data_ref: Box) -> dict:
@@ -60,13 +64,24 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
 
     @with_logs
     def save_slot(self, slot: int, path: str, metadata: dict | None = None) -> None:
-        lora_checkpoint.save_slot(self.model, self.slot_optimizers[slot], path, metadata=metadata)
+        lora_checkpoint.save_slot(
+            self.model,
+            self.slot_optimizers[slot],
+            path,
+            metadata=metadata,
+            publish=self._checkpoint_publish,
+        )
 
     @with_logs
     def export_slot(self, slot: int, rank: int, alpha: float, path: str, metadata: dict | None = None) -> None:
         """Write the slot's adapter as an engine-loadable dir."""
         self._heartbeat.bump()
-        self.weight_publisher.publish_adapter(AdapterSpec(slot=slot, rank=rank, alpha=alpha), path, metadata=metadata)
+        self.weight_publisher.publish_adapter(
+            AdapterSpec(slot=slot, rank=rank, alpha=alpha),
+            path,
+            metadata=metadata,
+            publish=self._checkpoint_publish,
+        )
 
     @with_logs
     def unload_slot(self, slot: int) -> dict | None:

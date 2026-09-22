@@ -14,16 +14,29 @@ import torch.distributed as dist
 from miles.utils.distributed_utils import get_gloo_group
 
 
+def publish_checkpoint_dir(tmp_dir: Path, final_dir: Path) -> None:
+    """Atomically point ``final_dir`` at ``tmp_dir``'s contents; rank 0 only, older versions are retained."""
+    if _rank() != 0:
+        return
+    version_dir = final_dir.parent / f"_version_{final_dir.name}_{uuid4().hex}"
+    os.replace(tmp_dir, version_dir)
+    tmp_dir.symlink_to(version_dir.name, target_is_directory=True)
+    os.replace(tmp_dir, final_dir)
+
+
 def write_checkpoint_dir(
     path: str | Path,
     write_shards: Callable[[Path], None],
     metadata: dict | None = None,
     *,
     overwrite: bool = True,
+    publish: Callable[[Path, Path], None] | None = None,
 ) -> None:
     """Write collectively, then atomically point ``path`` at the completed version.
 
-    All ranks must call. Readers may still hold an older version, so retain it.
+    ``publish`` runs on every rank once all shards and ``META.json`` are in
+    ``tmp_dir``; it must leave ``path`` pointing at the completed checkpoint.
+    Default: rank 0 renames it into place, which assumes a shared POSIX filesystem.
     """
     final_dir = Path(path)
     tmp_dir = final_dir.parent / f"_tmp_{final_dir.name}"
@@ -43,21 +56,17 @@ def write_checkpoint_dir(
                 shutil.rmtree(tmp_dir)
             tmp_dir.mkdir(parents=True)
 
-    def publish_dir():
-        if _rank() != 0:
-            return
-        if metadata is not None:
+    def write_metadata():
+        if _rank() == 0 and metadata is not None:
             (tmp_dir / "META.json").write_text(json.dumps(metadata, indent=2))
-        version_dir = final_dir.parent / f"_version_{final_dir.name}_{uuid4().hex}"
-        os.replace(tmp_dir, version_dir)
-        tmp_dir.symlink_to(version_dir.name, target_is_directory=True)
-        os.replace(tmp_dir, final_dir)
 
     make_tmp_dir()
     _barrier()
     write_shards(tmp_dir)
     _barrier()
-    publish_dir()
+    write_metadata()
+    _barrier()
+    (publish or publish_checkpoint_dir)(tmp_dir, final_dir)
     _barrier()
 
 

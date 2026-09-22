@@ -1409,6 +1409,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "hf_checkpoint_dir: str | None) -> None."
                 ),
             )
+            parser.add_argument(
+                "--custom-checkpoint-publish-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom function that publishes a collectively written checkpoint directory in "
+                    "place of the default rank-0 rename — for filesystems where hosts do not see each other's "
+                    "writes until an explicit sync (e.g. object-store-backed volumes). Called on every rank once all "
+                    "shards and META.json are in the temp dir. "
+                    "Signature: ``def publish(tmp_dir: Path, final_dir: Path) -> None``; it must leave final_dir "
+                    "pointing at the completed checkpoint."
+                ),
+            )
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
             reset_arg(parser, "--calculate-per-token-loss", action="store_true")

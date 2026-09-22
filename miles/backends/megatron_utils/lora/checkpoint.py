@@ -4,7 +4,7 @@ Every tensor carries its global shard coordinates and a slot-agnostic key,
 so a checkpoint reloads under any tp/pp/ep/world-size layout and into any
 free slot."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from megatron.core import dist_checkpointing
@@ -38,11 +38,22 @@ def _canonicalize_slot_keys(tree: dict, slot: int) -> dict:
     return tree
 
 
-def save_slot(model: Sequence[DDP], slot_optimizer: SlotOptimizer, path: str, metadata: dict | None = None) -> None:
+def save_slot(
+    model: Sequence[DDP],
+    slot_optimizer: SlotOptimizer,
+    path: str,
+    metadata: dict | None = None,
+    publish: Callable[[Path, Path], None] | None = None,
+) -> None:
     weights = _slot_weights_sharded_state_dict(model, slot_optimizer.slot)
     sharded = {_WEIGHTS_KEY: weights, _OPTIM_KEY: slot_optimizer.sharded_state(weights, is_loading=False)}
     _canonicalize_slot_keys(sharded, slot_optimizer.slot)
-    write_checkpoint_dir(path, lambda tmp_dir: dist_checkpointing.save(sharded, str(tmp_dir)), metadata=metadata)
+    write_checkpoint_dir(
+        path,
+        lambda tmp_dir: dist_checkpointing.save(sharded, str(tmp_dir)),
+        metadata=metadata,
+        publish=publish,
+    )
 
 
 def load_slot(model: Sequence[DDP], slot_optimizer: SlotOptimizer, path: str, load_optimizer: bool) -> None:

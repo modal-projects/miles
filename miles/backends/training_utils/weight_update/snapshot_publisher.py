@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import safetensors.torch
@@ -17,7 +18,13 @@ class WeightPublisher:
         self._adapter_config = adapter_config
 
     @torch.no_grad()
-    def publish_adapter(self, adapter: AdapterSpec, path: str, metadata: dict | None = None) -> None:
+    def publish_adapter(
+        self,
+        adapter: AdapterSpec,
+        path: str,
+        metadata: dict | None = None,
+        publish: Callable[[Path, Path], None] | None = None,
+    ) -> None:
         is_writer = dist.get_rank() == 0
 
         def write_shards(tmp_dir: Path):
@@ -32,4 +39,10 @@ class WeightPublisher:
                 (tmp_dir / "adapter_config.json").write_text(json.dumps(config))
                 (tmp_dir / "adapter_model.safetensors").write_bytes(data)
 
-        write_checkpoint_dir(path, write_shards, metadata=metadata, overwrite=False)
+        write_checkpoint_dir(
+            path,
+            write_shards,
+            metadata=metadata,
+            overwrite=False,
+            publish=publish,
+        )
