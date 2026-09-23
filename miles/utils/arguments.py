@@ -2608,6 +2608,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "Instance i listens on this port plus i. Defaults to a dynamically allocated port.",
             )
             parser.add_argument(
+                "--session-server-external-url-map",
+                type=json.loads,
+                default=None,
+                help="Optional JSON mapping from each internal session-server address to the HTTP origin "
+                "an external agent uses to reach that same server. Miles keeps using the internal address "
+                "for control and sample collection.",
+            )
+            parser.add_argument(
                 "--tito-model",
                 type=str,
                 default="default",
@@ -3043,6 +3051,26 @@ def miles_validate_args(args):
         raise ValueError("--custom-rollout-request-hook-path requires --use-session-server")
     if args.custom_rollout_request_hook_args and not args.custom_rollout_request_hook_path:
         raise ValueError("--custom-rollout-request-hook-args requires --custom-rollout-request-hook-path")
+
+    if args.session_server_external_url_map is not None:
+        if not args.use_session_server:
+            raise ValueError("--session-server-external-url-map requires --use-session-server")
+        if not isinstance(args.session_server_external_url_map, dict):
+            raise ValueError(
+                "--session-server-external-url-map must be a JSON object mapping internal addresses to URLs"
+            )
+        normalized_urls = {}
+        for addr, url in args.session_server_external_url_map.items():
+            if not isinstance(addr, str) or not isinstance(url, str):
+                raise ValueError("--session-server-external-url-map keys and values must be strings")
+            url = url.rstrip("/")
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ValueError(
+                    f"Invalid session-server external URL {url!r}; expected an absolute HTTP URL."
+                )
+            normalized_urls[addr] = url
+        args.session_server_external_url_map = normalized_urls
 
     assert not (
         args.use_session_server and args.partial_rollout
