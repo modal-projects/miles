@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import harbor_agent_function as haf
 import pytest
+from miles.rollout.agent_function import InfraAbort
 
 
 class _EnvironmentType(str, enum.Enum):
@@ -302,7 +303,6 @@ def test_verdict_maps_reward_metrics_and_timings():
     ("exc_type", "exit_status"),
     [
         ("AgentTimeoutError", "TimeLimitExceeded"),
-        ("EnvironmentStartTimeoutError", "TimeLimitExceeded"),
         ("SingleTurnMaxSeqLenExceededError", "SequenceLengthLimitExceeded"),
         ("RuntimeError", "AgentError"),
     ],
@@ -314,6 +314,22 @@ def test_harbor_exceptions_map_to_the_exit_status_vocabulary(exc_type, exit_stat
     out = haf.trial_result_to_metadata(result)
     assert out["reward"] == 0.0
     assert out["exit_status"] == exit_status
+
+
+def test_environment_start_timeout_discards_the_sample():
+    result = SimpleNamespace(
+        exception_info=SimpleNamespace(
+            exception_type="EnvironmentStartTimeoutError",
+            exception_message="sandbox allocation timed out",
+        ),
+        verifier_result=None,
+        agent_result=None,
+    )
+
+    with pytest.raises(InfraAbort, match="sandbox allocation timed out") as exc_info:
+        haf.trial_result_to_metadata(result)
+
+    assert exc_info.value.exit_status == "EnvironmentUnavailable"
 
 
 # --- entry -----------------------------------------------------------------
