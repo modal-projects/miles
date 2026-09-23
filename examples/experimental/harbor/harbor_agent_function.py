@@ -59,11 +59,12 @@ Env vars (read on the rollout worker):
 Failure semantics: a verdict is returned as-is; every episode that ends
 without one scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
-path. Configuration errors (missing task dir, bad env vars) raise instead:
-they would fail every sample, and a loud stop beats training on silent
-all-zero rewards. Nothing is discarded here yet; see the tracking issue for
-wiring the platform-side Harbor exceptions to ``InfraAbort`` once that
-contract lands.
+path. Failures outside policy control -- sandbox allocation and typed transient
+model-service failures -- discard the sample through ``InfraAbort`` instead.
+Ambiguous failures remain reward-zero so the policy cannot learn to trigger a
+discard. Configuration errors (missing task dir, bad env vars) raise: they
+would fail every sample, and a loud stop beats training on silent all-zero
+rewards.
 """
 
 import asyncio
@@ -77,6 +78,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from miles.rollout.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
 from miles.rollout.agentic.session import resolve_session_url
 
@@ -86,8 +88,14 @@ _DEFAULT_AGENT_TRIAL_TIMEOUT_S = 7200
 _SAFE_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # Harbor exception class names -> the exit_status vocabulary the reward path reads.
-_TIMEOUT_EXCEPTIONS = {"AgentTimeoutError", "VerifierTimeoutError", "EnvironmentStartTimeoutError"}
+_TIMEOUT_EXCEPTIONS = {"AgentTimeoutError", "VerifierTimeoutError"}
 _OUTPUT_LIMIT_EXCEPTIONS = {"MaxSeqLenExceededError", "SingleTurnMaxSeqLenExceededError"}
+_MODEL_SERVICE_EXCEPTIONS = {
+    "ApiConnectionClosedError",
+    "ApiInternalServerError",
+    "ApiOverloadedError",
+    "ApiResponseStalledError",
+}
 
 
 def _trial_timeout_s() -> int:
@@ -401,6 +409,17 @@ def trial_result_to_metadata(result) -> dict[str, Any]:
     exc = getattr(result, "exception_info", None)
     if exc is not None:
         exc_type = getattr(exc, "exception_type", "")
+        message = getattr(exc, "exception_message", "")
+        if exc_type == "EnvironmentStartTimeoutError":
+            raise InfraAbort(
+                "SandboxUnavailable",
+                f"Harbor environment failed to start ({exc_type}): {message}",
+            )
+        if exc_type in _MODEL_SERVICE_EXCEPTIONS:
+            raise InfraAbort(
+                "ServerUnreachable",
+                f"Harbor agent lost the model service ({exc_type}): {message}",
+            )
         if exc_type in _TIMEOUT_EXCEPTIONS:
             exit_status = "TimeLimitExceeded"
         elif exc_type in _OUTPUT_LIMIT_EXCEPTIONS:
