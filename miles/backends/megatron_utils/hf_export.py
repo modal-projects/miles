@@ -17,6 +17,7 @@ from pathlib import Path
 import safetensors.torch
 import torch
 from megatron.core.distributed import DistributedDataParallel as DDP
+from safetensors import safe_open
 
 from miles.backends.megatron_utils.lora.utils import is_lora_model, save_lora_checkpoint
 from miles.backends.megatron_utils.named_weights import named_params_and_buffers
@@ -35,7 +36,66 @@ HF_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
 def _is_hf_metadata_file(path: Path) -> bool:
     """Tokenizer/config files worth copying into an export — not weights, and not the
     base checkpoint's weight index, which would clobber the one the export writes."""
-    return path.is_file() and path.suffix not in HF_WEIGHT_SUFFIXES and not path.name.endswith(".index.json")
+    return (
+        path.is_file()
+        and path.name != HF_EXPORT_COMPLETE_MARKER
+        and path.suffix not in HF_WEIGHT_SUFFIXES
+        and not path.name.endswith(".index.json")
+    )
+
+
+def _source_weight_map(base_checkpoint: Path) -> dict[str, str]:
+    index_path = base_checkpoint / "model.safetensors.index.json"
+    if index_path.is_file():
+        index = json.loads(index_path.read_text())
+        return index["weight_map"]
+
+    checkpoint_path = base_checkpoint / "model.safetensors"
+    if checkpoint_path.is_file():
+        with safe_open(checkpoint_path, framework="pt", device="cpu") as checkpoint:
+            return {name: checkpoint_path.name for name in checkpoint.keys()}
+
+    raise ValueError(
+        "--hf-export-source-tensor-prefixes requires a local safetensors "
+        f"checkpoint, but none was found in {base_checkpoint}"
+    )
+
+
+def _copy_source_tensors(
+    base_checkpoint: Path,
+    output_path: Path,
+    weight_map: dict[str, str],
+    prefixes: Sequence[str],
+) -> int:
+    """Fill trainer-absent HF tensors from the immutable source checkpoint."""
+    if isinstance(prefixes, (str, bytes)) or not prefixes or any(
+        not isinstance(prefix, str) or not prefix for prefix in prefixes
+    ):
+        raise ValueError("hf_export_source_tensor_prefixes must be a nonempty sequence of nonempty strings")
+
+    prefixes = tuple(prefixes)
+    source_weight_map = _source_weight_map(base_checkpoint)
+    for prefix in prefixes:
+        if not any(name.startswith(prefix) for name in source_weight_map):
+            raise ValueError(f"HF export source prefix has no matching weights: {prefix!r}")
+
+    weights_by_shard: dict[str, list[str]] = {}
+    for name, shard_name in source_weight_map.items():
+        if name not in weight_map and name.startswith(prefixes):
+            weights_by_shard.setdefault(shard_name, []).append(name)
+
+    total_size = 0
+    num_output_shards = len(weights_by_shard)
+    for shard_index, (source_shard, names) in enumerate(weights_by_shard.items(), start=1):
+        output_shard = f"model-source-{shard_index:05d}-of-{num_output_shards:05d}.safetensors"
+        with safe_open(base_checkpoint / source_shard, framework="pt", device="cpu") as checkpoint:
+            tensors = {name: checkpoint.get_tensor(name).contiguous() for name in names}
+        safetensors.torch.save_file(tensors, output_path / output_shard)
+        for name, tensor in tensors.items():
+            weight_map[name] = output_shard
+            total_size += tensor.numel() * tensor.element_size()
+
+    return total_size
 
 
 def export_hf_model_direct(
@@ -89,10 +149,22 @@ def export_hf_model_direct(
             assert weight_map, f"HF export to {path} produced no weights"
             base_checkpoint = Path(args.hf_checkpoint)
             if base_checkpoint.is_dir():
+                source_tensor_prefixes = args.hf_export_source_tensor_prefixes
+                if source_tensor_prefixes:
+                    total_size += _copy_source_tensors(
+                        base_checkpoint,
+                        path,
+                        weight_map,
+                        source_tensor_prefixes,
+                    )
                 for meta_file in base_checkpoint.iterdir():
                     if _is_hf_metadata_file(meta_file):
                         shutil.copy2(meta_file, path / meta_file.name)
             else:
+                if args.hf_export_source_tensor_prefixes:
+                    raise ValueError(
+                        "--hf-export-source-tensor-prefixes requires --hf-checkpoint to be a local directory"
+                    )
                 logger.warning(f"hf_checkpoint {args.hf_checkpoint} is not a local dir; metadata not copied to {path}")
             index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
             (path / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
