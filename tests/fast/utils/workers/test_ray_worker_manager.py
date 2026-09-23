@@ -117,10 +117,11 @@ class _AllocPortsGate:
 
 class TestLaunchEntryPoint:
     async def test_the_manager_is_registered_under_its_well_known_name(self, fake_ray_cluster: FakeRayCluster):
-        """Consumers find the manager by a fixed actor name, so it must be launched under that name."""
+        """The named manager stays on the head where it launches head-pinned workers."""
         handle = RayWorkerManager.launch([], {})
 
         assert handle.options["name"] == "ray_worker_manager"
+        assert handle.options["scheduling_strategy"] == "head-affinity"
         assert handle.actor_class is RayWorkerManager
         assert [call.method for call in fake_ray_cluster.calls] == ["init"]
 
