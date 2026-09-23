@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
+    if getattr(args, "use_score_centering", False):
+        return torch.float32
     if getattr(args, "true_on_policy_mode", False):
         if getattr(args, "bf16", False):
             return torch.bfloat16

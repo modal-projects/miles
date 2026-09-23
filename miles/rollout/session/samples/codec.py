@@ -16,6 +16,7 @@ import safetensors.numpy
 import torch
 
 from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.score_centering import RolloutScoreCenteringHead
 from miles.utils.types import Sample, WeightVersionsPerCall
 
 
@@ -23,7 +24,7 @@ from miles.utils.types import Sample, WeightVersionsPerCall
 class ValueSpec:
     """Wire contract of one computed field."""
 
-    codec: str  # "tensor" | "tensor_list" | "sampling_mask" | "json"
+    codec: str  # "tensor" | "tensor_list" | "sampling_mask" | "score_centering_head" | "json"
     dtype: np.dtype | None = None  # tensor codecs: pinned on both sides; a mismatch raises instead of converting
     strict: bool = False  # encode never converts, only validates (R3 replay tensors must arrive as int32)
     null: object = None  # decoded value for a null-marked field; copied per sample so no instance is shared
@@ -38,6 +39,7 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "loss_mask": ValueSpec("tensor_list", np.dtype(np.uint8)),
     "rollout_log_probs": ValueSpec("tensor_list", np.dtype(np.float64)),
     "rollout_sampling_mask": ValueSpec("sampling_mask"),
+    "rollout_score_centering_head": ValueSpec("score_centering_head"),
     "rollout_routed_experts": ValueSpec("tensor", np.dtype(np.int32), strict=True),
     "rollout_indexer_topk": ValueSpec("tensor", np.dtype(np.int32), strict=True),
     "status": ValueSpec("json"),
@@ -54,17 +56,20 @@ SAMPLES_VALUE_SPEC_V2: dict[str, ValueSpec] = {
 }
 
 ROLLOUT_SAMPLING_MASK_FIELDS = ("rollout_sampling_mask",)
+ROLLOUT_SCORE_CENTERING_FIELDS = ("rollout_score_centering_head",)
+_OPTIONAL_DISTRIBUTION_FIELDS = ROLLOUT_SAMPLING_MASK_FIELDS + ROLLOUT_SCORE_CENTERING_FIELDS
 
 # The wire allowlists, derived: only table fields cross the samples wire.
-COMPUTED_FIELDS = tuple(field for field in SAMPLES_VALUE_SPEC if field not in ROLLOUT_SAMPLING_MASK_FIELDS)
-COMPUTED_FIELDS_V2 = tuple(field for field in SAMPLES_VALUE_SPEC_V2 if field not in ROLLOUT_SAMPLING_MASK_FIELDS)
+COMPUTED_FIELDS = tuple(field for field in SAMPLES_VALUE_SPEC if field not in _OPTIONAL_DISTRIBUTION_FIELDS)
+COMPUTED_FIELDS_V2 = tuple(field for field in SAMPLES_VALUE_SPEC_V2 if field not in _OPTIONAL_DISTRIBUTION_FIELDS)
 
 assert all(
-    spec.codec in ("tensor", "tensor_list", "sampling_mask", "json") for spec in SAMPLES_VALUE_SPEC_V2.values()
+    spec.codec in ("tensor", "tensor_list", "sampling_mask", "score_centering_head", "json")
+    for spec in SAMPLES_VALUE_SPEC_V2.values()
 ), "unknown codec in SAMPLES_VALUE_SPEC"
 
 _TENSOR_FIELDS = frozenset(field for field, spec in SAMPLES_VALUE_SPEC_V2.items() if spec.codec != "json")
-assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS)
+assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS + _OPTIONAL_DISTRIBUTION_FIELDS)
 
 _SAMPLES_META_KEY = "_samples_meta"
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
@@ -129,9 +134,19 @@ def encode_samples(
             if spec.codec == "sampling_mask":
                 if not isinstance(value, RolloutSamplingMask):
                     raise TypeError(f"{field} must be a RolloutSamplingMask, got {type(value).__name__}")
-                ids, offsets = value._as_tensors()
+                ids, offsets, logprobs = value._as_distribution_tensors()
                 tensors[f"{field}.ids.{sample_index}"] = np.ascontiguousarray(ids.numpy())
                 tensors[f"{field}.offsets.{sample_index}"] = np.ascontiguousarray(offsets.numpy())
+                if logprobs is not None:
+                    tensors[f"{field}.logprobs.{sample_index}"] = np.ascontiguousarray(logprobs.numpy())
+                continue
+            if spec.codec == "score_centering_head":
+                if not isinstance(value, RolloutScoreCenteringHead):
+                    raise TypeError(f"{field} must be a RolloutScoreCenteringHead, got {type(value).__name__}")
+                ids, offsets, logprobs = value._as_tensors()
+                tensors[f"{field}.ids.{sample_index}"] = np.ascontiguousarray(ids.numpy())
+                tensors[f"{field}.offsets.{sample_index}"] = np.ascontiguousarray(offsets.numpy())
+                tensors[f"{field}.logprobs.{sample_index}"] = np.ascontiguousarray(logprobs.numpy())
                 continue
             if spec.strict:
                 arr = np.asarray(value)
@@ -205,14 +220,39 @@ def decode_samples_and_merge_input_sample(
             if spec.codec == "sampling_mask":
                 ids = tensors.pop(f"{field}.ids.{sample_index}")
                 offsets = tensors.pop(f"{field}.offsets.{sample_index}")
+                logprobs = tensors.pop(f"{field}.logprobs.{sample_index}", None)
                 if ids.dtype != np.int32 or offsets.dtype != np.int64:
                     raise ValueError(
                         f"{field} must use int32 ids and int64 offsets, got {ids.dtype} and {offsets.dtype}"
                     )
+                if logprobs is not None and logprobs.dtype != np.float32:
+                    raise ValueError(f"{field} logprobs must use float32, got {logprobs.dtype}")
                 setattr(
                     sample,
                     field,
-                    RolloutSamplingMask(ids=torch.from_numpy(ids), offsets=torch.from_numpy(offsets)),
+                    RolloutSamplingMask(
+                        ids=torch.from_numpy(ids),
+                        offsets=torch.from_numpy(offsets),
+                        logprobs=None if logprobs is None else torch.from_numpy(logprobs),
+                    ),
+                )
+                continue
+            if spec.codec == "score_centering_head":
+                ids = tensors.pop(f"{field}.ids.{sample_index}")
+                offsets = tensors.pop(f"{field}.offsets.{sample_index}")
+                logprobs = tensors.pop(f"{field}.logprobs.{sample_index}")
+                if ids.dtype != np.int32 or offsets.dtype != np.int64 or logprobs.dtype != np.float32:
+                    raise ValueError(
+                        f"{field} must use int32 ids, int64 offsets, and float32 logprobs; got {ids.dtype}, {offsets.dtype}, and {logprobs.dtype}"
+                    )
+                setattr(
+                    sample,
+                    field,
+                    RolloutScoreCenteringHead(
+                        ids=torch.from_numpy(ids),
+                        offsets=torch.from_numpy(offsets),
+                        logprobs=torch.from_numpy(logprobs),
+                    ),
                 )
                 continue
             arr = tensors.pop(f"{field}.{sample_index}")  # KeyError propagates: a promised tensor must exist

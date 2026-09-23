@@ -6,6 +6,7 @@ import numpy
 import torch
 
 from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.score_centering import RolloutScoreCenteringHead
 
 
 LEGACY_WEIGHT_VERSIONS_KEY = "legacy_weight_versions"
@@ -88,6 +89,7 @@ class Sample:
     weight_versions: list[WeightVersionsPerCall] = field(default_factory=list)
     rollout_log_probs: list[float] | None = None  # Log probabilities from rollout engine
     rollout_sampling_mask: RolloutSamplingMask | None = None
+    rollout_score_centering_head: RolloutScoreCenteringHead | None = None
     rollout_routed_experts: numpy.ndarray | None = (
         None  # Routed experts from rollout engine. shape: (num_tokens-1, num_layers, moe_router_topk), dtype=int32
     )
@@ -254,6 +256,10 @@ class Sample:
                 f"rollout_sampling_mask length ({len(self.rollout_sampling_mask)}) "
                 f"!= response_length ({self.response_length})"
             )
+        if self.rollout_score_centering_head is not None:
+            assert (
+                len(self.rollout_score_centering_head) == self.response_length
+            ), f"rollout_score_centering_head length ({len(self.rollout_score_centering_head)}) != response_length ({self.response_length})"
         if self.teacher_log_probs is not None:
             assert (
                 len(self.teacher_log_probs) == self.response_length
@@ -298,6 +304,8 @@ class Sample:
             self.rollout_log_probs = self.rollout_log_probs[:-n]
         if self.rollout_sampling_mask is not None:
             self.rollout_sampling_mask = self.rollout_sampling_mask.prefix(self.response_length)
+        if self.rollout_score_centering_head is not None:
+            self.rollout_score_centering_head = self.rollout_score_centering_head.prefix(self.response_length)
         if self.teacher_log_probs is not None:
             self.teacher_log_probs = self.teacher_log_probs[:-n]
         if self.opd_reverse_kl is not None:
@@ -334,6 +342,7 @@ class Sample:
         self.weight_versions = []
         self.rollout_log_probs = None
         self.rollout_sampling_mask = None
+        self.rollout_score_centering_head = None
         self.rollout_routed_experts = None
         self.rollout_indexer_topk = None
         self.status = Sample.Status.ABORTED

@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 from typing import Any
 from urllib.parse import urlparse
@@ -1674,6 +1675,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Path to the custom TIS/RS function (e.g., examples/infra_features/train_infer_mismatch_helper/mis.py:compute_mis_weights_with_cp).",
             )
             parser.add_argument(
+                "--use-score-centering",
+                action="store_true",
+                default=False,
+                help="Use the score-centered off-policy policy-gradient estimator from arXiv:2609.20807.",
+            )
+            parser.add_argument(
+                "--score-centering-top-k",
+                type=int,
+                default=128,
+                help="Sampler head size for modeled-tail score centering without sampling-support replay.",
+            )
+            parser.add_argument(
                 "--custom-pg-loss-reducer-function-path",
                 type=str,
                 default=None,
@@ -3101,6 +3114,8 @@ def miles_validate_args(args):
                 "sampling-support replay cannot currently be combined with reference KL or teacher distillation; "
                 "those objectives require a separate full-policy actor score"
             )
+    if args.use_score_centering:
+        validate_score_centering_args(args)
 
     if not args.use_session_server and args.tito_model != TITOTokenizerType.DEFAULT.value:
         raise ValueError(
@@ -3776,6 +3791,62 @@ def validate_skip_actor_forward_only(args) -> None:
         )
 
 
+def validate_score_centering_args(args) -> None:
+    option = "--use-score-centering"
+    if args.loss_type != "policy_loss":
+        raise ValueError(f"{option} only supports --loss-type policy_loss")
+    if args.advantage_estimator == "gspo":
+        raise ValueError(f"{option} does not support the sequence-level GSPO objective")
+    if args.score_centering_top_k < 1:
+        raise ValueError(f"--score-centering-top-k must be at least 1, got {args.score_centering_top_k}")
+    if (vocab_size := getattr(args, "vocab_size", None)) is not None and args.score_centering_top_k > vocab_size:
+        raise ValueError(
+            f"--score-centering-top-k cannot exceed the tokenizer vocab size {vocab_size}; "
+            f"got {args.score_centering_top_k}"
+        )
+    if not math.isfinite(args.rollout_temperature) or args.rollout_temperature <= 0:
+        raise ValueError(f"{option} requires --rollout-temperature greater than zero")
+    if not args.use_miles_router and not args.rollout_endpoint_url:
+        raise ValueError(
+            f"{option} requires --use-miles-router or --rollout-endpoint-url so its typed training metadata reaches SGLang"
+        )
+    if not sampling_support_replay_enabled(args) and (args.rollout_top_p, args.rollout_top_k) != (1.0, -1):
+        raise ValueError(f"{option} without sampling-support replay requires --rollout-top-p 1 and --rollout-top-k -1")
+
+    incompatible_options = [
+        name
+        for name, enabled in (
+            ("--use-opsm", args.use_opsm),
+            ("--use-opd", args.use_opd),
+            ("--get-mismatch-metrics", args.get_mismatch_metrics),
+            ("--use-unbiased-kl", args.use_unbiased_kl),
+            ("--custom-pg-loss-reducer-function-path", args.custom_pg_loss_reducer_function_path is not None),
+            ("--recompute-logprobs-via-prefill", args.recompute_logprobs_via_prefill),
+        )
+        if enabled
+    ]
+    if incompatible_options:
+        raise ValueError(f"{option} is incompatible with: {', '.join(incompatible_options)}")
+
+    icepop_paths = {
+        "miles.backends.training_utils.loss_hub.corrections.icepop_function",
+        "miles.backends.training_utils.loss_hub.corrections:icepop_function",
+    }
+    if args.custom_tis_function_path is not None:
+        if not args.use_tis:
+            raise ValueError(f"{option} requires --use-tis when --custom-tis-function-path is set")
+        if args.custom_tis_function_path not in icepop_paths:
+            raise ValueError(
+                f"{option} only supports the built-in IcePop custom TIS function; "
+                f"got {args.custom_tis_function_path!r}"
+            )
+    if args.use_tis:
+        if not all(math.isfinite(value) for value in (args.tis_clip_low, args.tis_clip)):
+            raise ValueError(f"{option} requires finite TIS clipping bounds")
+        if not 0 <= args.tis_clip_low <= args.tis_clip or args.tis_clip <= 0:
+            raise ValueError(f"{option} requires 0 <= --tis-clip-low <= --tis-clip and --tis-clip > 0")
+
+
 def validate_async_off_policy_correction(args) -> None:
     """Require an explicit behavior-policy choice for async PPO training.
 
@@ -3788,12 +3859,15 @@ def validate_async_off_policy_correction(args) -> None:
     """
     if not args.use_critic:
         return
-    assert args.use_rollout_logprobs or args.use_tis or args.keep_old_actor, (
+    assert (
+        args.use_rollout_logprobs or args.use_tis or args.keep_old_actor or getattr(args, "use_score_centering", False)
+    ), (
         "Async PPO training requires an explicit behavior-policy correction, because rollouts are "
         "generated before the current weight update while log probs are recomputed by the current "
         "actor by default. Pass one of: --use-rollout-logprobs (use the rollout engine's log probs "
-        "as the ratio denominator), --use-tis (truncated importance sampling correction), or "
-        "--keep-old-actor (recompute the denominator with the weights the rollout engines used)."
+        "as the ratio denominator), --use-tis (truncated importance sampling correction), "
+        "--use-score-centering (score-centered off-policy correction), or --keep-old-actor "
+        "(recompute the denominator with the weights the rollout engines used)."
     )
 
 

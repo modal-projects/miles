@@ -19,6 +19,8 @@ _ARGS_TO_CONFIG_FIELD = {
     "rollout_temperature": "rollout_temperature",
     "rollout_top_p": "rollout_top_p",
     "rollout_top_k": "rollout_top_k",
+    "use_score_centering": "use_score_centering",
+    "score_centering_top_k": "score_centering_top_k",
     "sglang_speculative_algorithm": "sglang_speculative_algorithm",
     "num_layers": "num_layers",
     "moe_router_topk": "moe_router_topk",
@@ -60,6 +62,8 @@ _DISTINCT_ARGS_VALUES = dict(
     rollout_temperature=0.7,
     rollout_top_p=0.95,
     rollout_top_k=32,
+    use_score_centering=True,
+    score_centering_top_k=64,
     sglang_speculative_algorithm="EAGLE",
     num_layers=61,
     moe_router_topk=8,
@@ -126,7 +130,9 @@ class TestComputeSessionServerConfig:
         config = compute_session_server_config(
             Namespace(**present), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
         )
-        assert [getattr(config, name) for name in _OPTIONAL_ARGS_ATTRS] == [None] * len(_OPTIONAL_ARGS_ATTRS)
+        expected = [None] * len(_OPTIONAL_ARGS_ATTRS)
+        expected[_OPTIONAL_ARGS_ATTRS.index("custom_rollout_request_hook_args")] = {}
+        assert [getattr(config, name) for name in _OPTIONAL_ARGS_ATTRS] == expected
 
 
 _COMPLETE_CONFIG_KWARGS = dict(
@@ -144,6 +150,8 @@ _COMPLETE_CONFIG_KWARGS = dict(
     rollout_temperature=1.0,
     rollout_top_p=1.0,
     rollout_top_k=-1,
+    use_score_centering=False,
+    score_centering_top_k=128,
     sglang_speculative_algorithm=None,
     num_layers=None,
     moe_router_topk=None,

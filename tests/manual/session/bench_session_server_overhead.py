@@ -357,6 +357,8 @@ def _build_server_config(
         rollout_temperature=1.0,
         rollout_top_p=1.0,
         rollout_top_k=-1,
+        use_score_centering=False,
+        score_centering_top_k=128,
         sglang_speculative_algorithm=None,
         num_layers=None,
         moe_router_topk=None,

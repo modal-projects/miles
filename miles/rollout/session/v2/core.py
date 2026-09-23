@@ -16,7 +16,12 @@ from miles.rollout.session.core import (
 )
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
-from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
+from miles.rollout.session.samples.codec import (
+    COMPUTED_FIELDS_V2,
+    ROLLOUT_SAMPLING_MASK_FIELDS,
+    ROLLOUT_SCORE_CENTERING_FIELDS,
+    encode_samples,
+)
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY, build_session_rollout_metrics
 from miles.rollout.session.v2.session_state import (
@@ -27,6 +32,7 @@ from miles.rollout.session.v2.session_state import (
 from miles.rollout.session.v2.utils import build_leaf_material, tree_metadata
 from miles.utils.function_registry import load_function
 from miles.utils.sampling_mask import sampling_support_replay_enabled
+from miles.utils.score_centering import score_centering_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,8 @@ class SessionCoreV2(SessionCore):
         self.samples_wire_fields = COMPUTED_FIELDS_V2
         if sampling_support_replay_enabled(config):
             self.samples_wire_fields += ROLLOUT_SAMPLING_MASK_FIELDS
+        elif score_centering_enabled(config):
+            self.samples_wire_fields += ROLLOUT_SCORE_CENTERING_FIELDS
         # Import-path only in production: function_registry is process-local.
         self.sample_picker = load_function(config.session_sample_picker_path, sync_required=True)
         self.sample_postprocessor = load_function(config.session_sample_postprocessor_path, sync_required=True)

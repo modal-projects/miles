@@ -63,6 +63,40 @@ class TestResolveRequestArgsByConfig:
         assert "top_p" not in wire
         assert "top_k" not in wire
 
+    def test_score_centering_requests_a_raw_sampler_head(self):
+        config = make_session_server_config(use_score_centering=True, score_centering_top_k=64)
+
+        wire, _ = resolve_request_args_by_config({}, config)
+
+        assert wire["top_logprobs"] == 64
+        assert wire["return_flat_raw_output_top_logprobs"] is True
+        assert wire["return_flat_raw_output_top_logprobs_b64"] is True
+        assert "return_sampling_mask_logprobs" not in wire
+
+    def test_score_centering_with_replay_requests_the_full_behavior_distribution(self):
+        config = make_session_server_config(
+            use_score_centering=True,
+            rollout_top_p=0.95,
+            rollout_top_k=32,
+            rollout_temperature=0.7,
+        )
+
+        wire, _ = resolve_request_args_by_config({}, config)
+
+        assert wire["return_sampling_mask"] is True
+        assert wire["return_sampling_mask_logprobs"] is True
+        assert "return_flat_raw_output_top_logprobs" not in wire
+        assert "top_logprobs" not in wire
+
+    def test_score_centering_validation_is_a_client_error(self):
+        config = make_session_server_config(use_score_centering=True)
+
+        with pytest.raises(MessageValidationError, match="constrained sampling"):
+            resolve_request_args_by_config({"regex": "[a-z]+"}, config)
+
+        with pytest.raises(MessageValidationError, match="min_tokens"):
+            resolve_request_args_by_config({"min_tokens": 3}, config)
+
     @pytest.mark.parametrize("field", ["input_ids", "routed_experts_start_len", "logprob_start_len", "lora_path"])
     def test_client_tito_control_fields_are_rejected(self, field):
         with pytest.raises(MessageValidationError, match=f"{field}="):
@@ -265,6 +299,30 @@ def test_eval_keeps_sampling_resolution_and_overrides_model_replay(sampling):
     )
     assert "routed_experts_start_len" not in prepared.body
     assert client_args == original and history == original_history
+
+
+def test_eval_disables_model_score_centering_outputs():
+    class Model(TITOTokenizer):
+        def resolve_request_args(self, request_args, *, turn_args):
+            request_args = super().resolve_request_args(request_args, turn_args=turn_args)
+            request_args.update(
+                return_sampling_mask_logprobs=True,
+                return_flat_raw_output_top_logprobs=True,
+                return_flat_raw_output_top_logprobs_b64=True,
+            )
+            return request_args
+
+    prepared = prepare_chat_request(
+        {},
+        Model(MagicMock()),
+        config=make_session_server_config(use_score_centering=True),
+        turn_args=None,
+        evaluation=True,
+    )
+
+    assert prepared.body["return_sampling_mask_logprobs"] is False
+    assert prepared.body["return_flat_raw_output_top_logprobs"] is False
+    assert prepared.body["return_flat_raw_output_top_logprobs_b64"] is False
 
 
 @pytest.mark.parametrize("evaluation", [False, True])

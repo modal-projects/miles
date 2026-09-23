@@ -18,9 +18,15 @@ from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-_ARGS = SimpleNamespace(save_debug_trajectory_data=None, sglang_speculative_algorithm=None)
+_ARGS = SimpleNamespace(
+    save_debug_trajectory_data=None,
+    sglang_speculative_algorithm=None,
+    score_centering_top_k=2,
+)
 _ARGS_RECORDING = SimpleNamespace(
-    save_debug_trajectory_data="/unused/{rollout_id}.jsonl", sglang_speculative_algorithm=None
+    save_debug_trajectory_data="/unused/{rollout_id}.jsonl",
+    sglang_speculative_algorithm=None,
+    score_centering_top_k=2,
 )
 
 
@@ -202,6 +208,50 @@ class TestComputeSamplesFromRecords:
         ids, offsets = sample.rollout_sampling_mask._as_tensors()
         assert ids.tolist() == [10, 4, 7, 11, 3]
         assert offsets.tolist() == [0, 3, 5]
+        sample.validate()
+
+    def test_single_record_keeps_replay_support_probabilities_for_score_centering(self):
+        tok = _mock_tokenizer()
+        record = _make_record(
+            prompt_token_ids=[1, 2, 3],
+            output_token_ids=[10, 11],
+            sampling_masks=[[10, 4], [11, 3]],
+            sampling_log_probs=[-0.2, -0.3],
+        )
+        record.request["return_sampling_mask_logprobs"] = True
+        record.response["choices"][0]["meta_info"]["output_token_sampling_mask_logprobs"] = [
+            [-0.4, -1.1096329],
+            [-0.6, -0.7958704],
+        ]
+
+        (sample,) = compute_samples_from_openai_records(_ARGS, [record], tok)
+
+        ids, offsets, logprobs = sample.rollout_sampling_mask._as_distribution_tensors()
+        assert ids.tolist() == [10, 4, 11, 3]
+        assert offsets.tolist() == [0, 2, 4]
+        np.testing.assert_allclose(logprobs.numpy(), [-0.4, -1.1096329, -0.6, -0.7958704])
+        sample.validate()
+
+    def test_single_record_builds_score_centering_head_from_flat_metadata(self):
+        tok = _mock_tokenizer()
+        record = _make_record(
+            prompt_token_ids=[1, 2, 3],
+            output_token_ids=[10, 11],
+        )
+        record.request["return_flat_raw_output_top_logprobs"] = True
+        record.response["choices"][0]["meta_info"].update(
+            output_top_logprobs_temperature_scaled=True,
+            output_top_logprobs_shape=[2, 2],
+            output_top_logprobs_idx_flat=[10, 4, 11, 3],
+            output_top_logprobs_val_flat=[-0.4, -1.2, -0.6, -1.0],
+        )
+
+        (sample,) = compute_samples_from_openai_records(_ARGS, [record], tok)
+
+        ids, offsets, logprobs = sample.rollout_score_centering_head._as_tensors()
+        assert ids.tolist() == [10, 4, 11, 3]
+        assert offsets.tolist() == [0, 2, 4]
+        np.testing.assert_allclose(logprobs.numpy(), [-0.4, -1.2, -0.6, -1.0])
         sample.validate()
 
     def test_abort_without_sampling_metadata_is_non_trainable(self):

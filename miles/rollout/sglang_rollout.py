@@ -34,6 +34,7 @@ from miles.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
+from miles.utils.score_centering import score_centering_enabled
 from miles.utils.types import Sample
 
 from .generate_utils.generate_endpoint_utils import (
@@ -44,6 +45,7 @@ from .generate_utils.generate_endpoint_utils import (
 from .generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
 from .generate_utils.sample_utils import reward_log_summary, sample_text_preview
 from .generate_utils.sampling_mask import append_sampling_metadata, should_return_sampling_mask
+from .generate_utils.score_centering import append_score_centering_metadata, score_centering_request_fields
 from .rm_hub import async_rm, batched_async_rm
 
 __all__ = ["generate_rollout", "get_model_url"]
@@ -189,6 +191,13 @@ async def generate(
     }
     if return_sampling_mask:
         payload["return_sampling_mask"] = True
+    payload.update(
+        score_centering_request_fields(
+            args,
+            sampling_params,
+            evaluation=evaluation,
+        )
+    )
     opd_top_k = getattr(args, "opd_log_prob_top_k", 0) or 0
     opd_top_k_strategy = getattr(args, "opd_top_k_strategy", "only-student")
     if getattr(args, "use_opd", False) and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":
@@ -237,7 +246,19 @@ async def generate(
         new_response_tokens, new_response_log_probs = [], []
 
     if payload.get("return_sampling_mask", False):
-        new_response_log_probs = append_sampling_metadata(sample, new_response_tokens, output["meta_info"])
+        new_response_log_probs = append_sampling_metadata(
+            sample,
+            new_response_tokens,
+            output["meta_info"],
+            require_support_logprobs=score_centering_enabled(args),
+        )
+    elif payload.get("return_flat_raw_output_top_logprobs", False):
+        append_score_centering_metadata(
+            sample,
+            new_response_tokens,
+            output["meta_info"],
+            top_k=args.score_centering_top_k,
+        )
 
     # Update sample with tokens directly - avoiding re-tokenization
     sample.tokens = sample.tokens + new_response_tokens

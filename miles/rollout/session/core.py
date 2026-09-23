@@ -26,7 +26,12 @@ from miles.rollout.session.errors import (
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
-from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
+from miles.rollout.session.samples.codec import (
+    COMPUTED_FIELDS,
+    ROLLOUT_SAMPLING_MASK_FIELDS,
+    ROLLOUT_SCORE_CENTERING_FIELDS,
+    encode_samples,
+)
 from miles.rollout.session.samples.merge import (
     compute_samples_from_openai_records,
     merge_samples_with_addition_r3,
@@ -34,6 +39,7 @@ from miles.rollout.session.samples.merge import (
 )
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.sampling_mask import sampling_support_replay_enabled
+from miles.utils.score_centering import score_centering_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +85,17 @@ _CLIENT_STRIPPED_META_KEYS = (
     "routed_experts",
     "indexer_topk",
     "output_token_sampling_mask",
+    "output_token_sampling_mask_logprobs",
     "output_token_sampling_logprobs",
     "output_token_sampling_mask_length",
+    "output_top_logprobs_idx_flat",
+    "output_top_logprobs_idx_flat_b64",
+    "output_top_logprobs_idx_flat_b64_dtype",
+    "output_top_logprobs_val_flat",
+    "output_top_logprobs_val_flat_b64",
+    "output_top_logprobs_val_flat_b64_dtype",
+    "output_top_logprobs_shape",
+    "output_top_logprobs_temperature_scaled",
 )
 
 
@@ -224,6 +239,8 @@ class SessionCore:
         self.samples_wire_fields = COMPUTED_FIELDS
         if sampling_support_replay_enabled(config):
             self.samples_wire_fields += ROLLOUT_SAMPLING_MASK_FIELDS
+        elif score_centering_enabled(config):
+            self.samples_wire_fields += ROLLOUT_SCORE_CENTERING_FIELDS
 
     def _maybe_request_addition_r3(
         self, request_body: dict, checkpoint_token_ids: list[int], prompt_token_ids: list[int]

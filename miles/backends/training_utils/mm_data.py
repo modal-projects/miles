@@ -261,6 +261,14 @@ def expand_multimodal_rollout_data_in_place(
         expanded_response_lengths != old_response_lengths
     )
     if metadata_changed:
+        if expanded_response_lengths != old_response_lengths and any(
+            key in rollout_data
+            for key in (
+                "rollout_sampling_mask_ids",
+                "rollout_score_centering_head_ids",
+            )
+        ):
+            raise ValueError("sampling-distribution replay does not support media placeholders in response tokens")
         parallel_state = get_parallel_state()
         cp_size = parallel_state.cp.size
         if cp_size > 1 and qkv_format == "thd":

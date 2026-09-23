@@ -19,6 +19,7 @@ from miles.ray.rollout.train_data_conversion import (
 )
 from miles.utils import object_store
 from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.score_centering import RolloutScoreCenteringHead
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -135,6 +136,44 @@ class TestConvertSamplesToTrainData:
         )
         assert out["rollout_sampling_mask_ids"][0].tolist() == [0, 7, 1, 8, 2, 9, 3, 10]
         assert out["rollout_sampling_mask_offsets"][0].tolist() == [0, 2, 4, 6, 8]
+
+    def test_sampling_mask_distribution_passed_through(self):
+        args = make_args(rewards_normalization=False)
+        sample = make_sample()
+        sample.rollout_sampling_mask = RolloutSamplingMask.from_mask_list(
+            [[0, 7], [1, 8], [2, 9], [3, 10]],
+            [[-0.4, -1.109632], [-0.5, -0.932752], [-0.6, -0.79587], [-0.7, -0.686341]],
+        )
+
+        out = convert_samples_to_train_data(
+            args,
+            [sample],
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        assert out["rollout_sampling_mask_logprobs"][0].shape == (8,)
+
+    def test_score_centering_head_passed_through(self):
+        args = make_args(rewards_normalization=False)
+        sample = make_sample()
+        sample.rollout_score_centering_head = RolloutScoreCenteringHead.from_rows(
+            [[0, 7], [1, 8], [2, 9], [3, 10]],
+            [[-0.4, -1.2], [-0.5, -1.1], [-0.6, -1.0], [-0.7, -0.9]],
+        )
+
+        out = convert_samples_to_train_data(
+            args,
+            [sample],
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        assert out["rollout_score_centering_head_ids"][0].tolist() == [0, 7, 1, 8, 2, 9, 3, 10]
+        assert out["rollout_score_centering_head_offsets"][0].tolist() == [0, 2, 4, 6, 8]
+        assert out["rollout_score_centering_head_logprobs"][0].shape == (8,)
 
     def test_sampling_mask_requires_complete_batch(self):
         args = make_args(rewards_normalization=False)

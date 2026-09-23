@@ -15,10 +15,12 @@ from miles.rollout.session.samples.codec import (
     COMPUTED_FIELDS,
     COMPUTED_FIELDS_V2,
     ROLLOUT_SAMPLING_MASK_FIELDS,
+    ROLLOUT_SCORE_CENTERING_FIELDS,
     decode_samples_and_merge_input_sample,
     encode_samples,
 )
 from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.score_centering import RolloutScoreCenteringHead
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -30,6 +32,7 @@ def _per_call(*spans: tuple[str, int, int]) -> WeightVersionsPerCall:
 
 
 _FIELDS_WITH_SAMPLING_MASK = COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS
+_FIELDS_WITH_SCORE_CENTERING = COMPUTED_FIELDS + ROLLOUT_SCORE_CENTERING_FIELDS
 
 
 def _versions(version: str) -> WeightVersionsPerCall:
@@ -209,6 +212,28 @@ class TestSamplesWireCodec:
         assert not any(name.startswith("rollout_sampling_mask.") for name in tensors)
         (out,) = decode_samples_and_merge_input_sample(payload, Sample()).samples
         assert out.rollout_sampling_mask is None
+
+    def test_score_centering_head_round_trips_only_when_selected(self):
+        head = RolloutScoreCenteringHead.from_rows(
+            [[10, 4], [11]],
+            [[-0.3, -1.35], [0.0]],
+        )
+        sample = _computed_sample(rollout_score_centering_head=head)
+
+        payload = encode_samples([sample], {}, fields=_FIELDS_WITH_SCORE_CENTERING)
+        (out,) = decode_samples_and_merge_input_sample(
+            payload,
+            Sample(),
+            fields=_FIELDS_WITH_SCORE_CENTERING,
+        ).samples
+        ids, offsets, logprobs = out.rollout_score_centering_head._as_tensors()
+        assert ids.tolist() == [10, 4, 11]
+        assert offsets.tolist() == [0, 2, 3]
+        np.testing.assert_allclose(logprobs.numpy(), [-0.3, -1.35, 0.0])
+
+        default_payload = encode_samples([sample], {})
+        (default_out,) = decode_samples_and_merge_input_sample(default_payload, Sample()).samples
+        assert default_out.rollout_score_centering_head is None
 
     def test_zero_size_tensor_is_distinct_from_none(self):
         sample = _computed_sample(

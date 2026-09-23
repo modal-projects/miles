@@ -17,6 +17,7 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
 )
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata
+from miles.rollout.generate_utils.score_centering import append_score_centering_metadata
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
 from miles.utils.types import Sample, WeightVersionsPerCall
@@ -118,7 +119,15 @@ def _compute_sample_from_openai_record(
             sample,
             output_token_ids,
             choice["meta_info"],
+            require_support_logprobs=record.request.get("return_sampling_mask_logprobs", False),
             aborted=finish_reason == "abort",
+        )
+    elif record.request.get("return_flat_raw_output_top_logprobs", False):
+        append_score_centering_metadata(
+            sample,
+            output_token_ids,
+            choice["meta_info"],
+            top_k=args.score_centering_top_k,
         )
     sample.tokens = prompt_token_ids + output_token_ids
     sample.rollout_log_probs = output_log_probs

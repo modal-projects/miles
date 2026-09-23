@@ -40,6 +40,7 @@ from miles.rollout.agent_function import InfraAbort
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.generate_utils.sampling_mask import should_return_sampling_mask
+from miles.rollout.generate_utils.score_centering import score_centering_request_fields
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.function_registry import load_function
 from miles.utils.sampling_mask import sampling_support_replay_enabled
@@ -95,6 +96,14 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         elif input.evaluation and sampling_support_replay_enabled(input.args):
             # The session server otherwise fills the run's training defaults.
             request_kwargs["return_sampling_mask"] = False
+        request_kwargs.update(
+            score_centering_request_fields(
+                input.args,
+                input.sampling_params,
+                evaluation=input.evaluation,
+                openai=True,
+            )
+        )
         agent_metadata = await custom_agent_function(
             base_url=tracer.base_url,
             prompt=input.sample.prompt,

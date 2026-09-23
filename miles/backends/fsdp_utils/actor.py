@@ -114,6 +114,8 @@ class FSDPTrainRayActor(TrainRayActor):
                 self.tokenizer = load_tokenizer(
                     self.args.hf_checkpoint, chat_template_path=self.args.chat_template_path, trust_remote_code=True
                 )
+                if getattr(self.args, "vocab_size", None) is None:
+                    self.args.vocab_size = self.tokenizer.vocab_size
                 if hasattr(self.hf_config, "vision_config"):
                     self.processor = load_processor(self.args.hf_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
@@ -515,6 +517,17 @@ class FSDPTrainRayActor(TrainRayActor):
                 if sampling_support_replay_enabled(self.args)
                 else ()
             )
+            score_centering_keys = ()
+            if getattr(self.args, "use_score_centering", False):
+                score_centering_keys = (
+                    ("rollout_sampling_mask_logprobs",)
+                    if sampling_support_replay_enabled(self.args)
+                    else (
+                        "rollout_score_centering_head_ids",
+                        "rollout_score_centering_head_offsets",
+                        "rollout_score_centering_head_logprobs",
+                    )
+                )
 
             for step_id in range(num_steps_per_rollout):
                 self.optimizer.zero_grad(set_to_none=True)
@@ -538,6 +551,7 @@ class FSDPTrainRayActor(TrainRayActor):
                             "ref_log_probs",
                             "rollout_log_probs",
                             *sampling_mask_keys,
+                            *score_centering_keys,
                         ],
                         self.args.data_pad_size_multiplier,
                         self.args.qkv_format,

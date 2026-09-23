@@ -9,8 +9,13 @@ import numpy as np
 import pybase64
 
 from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata, should_return_sampling_mask
+from miles.rollout.generate_utils.score_centering import (
+    append_score_centering_metadata,
+    score_centering_request_fields,
+)
 from miles.utils.lora import LORA_ADAPTER_NAME, lora_rollout_enabled
 from miles.utils.processing_utils import encode_image_for_rollout_engine, extract_multimodal_train_inputs
+from miles.utils.score_centering import score_centering_enabled
 from miles.utils.types import Sample
 
 
@@ -76,6 +81,13 @@ def compute_request_payload(
     }
     if return_sampling_mask:
         payload["return_sampling_mask"] = True
+    payload.update(
+        score_centering_request_fields(
+            args,
+            sampling_params,
+            evaluation=evaluation,
+        )
+    )
     if lora_rollout_enabled(args):
         payload["lora_path"] = LORA_ADAPTER_NAME
     if image_data := (multimodal_inputs or {}).get("images"):
@@ -98,7 +110,19 @@ async def update_sample_from_response(
         new_response_tokens, new_response_log_probs = [], []
 
     if payload.get("return_sampling_mask", False):
-        new_response_log_probs = append_sampling_metadata(sample, new_response_tokens, output["meta_info"])
+        new_response_log_probs = append_sampling_metadata(
+            sample,
+            new_response_tokens,
+            output["meta_info"],
+            require_support_logprobs=score_centering_enabled(args),
+        )
+    elif payload.get("return_flat_raw_output_top_logprobs", False):
+        append_score_centering_metadata(
+            sample,
+            new_response_tokens,
+            output["meta_info"],
+            top_k=args.score_centering_top_k,
+        )
 
     # Update sample with tokens directly - avoiding re-tokenization
     sample.tokens = sample.tokens + new_response_tokens

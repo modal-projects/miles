@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from miles.rollout.generate_utils.sampling_mask import should_return_sampling_mask
+from miles.rollout.generate_utils.score_centering import score_centering_request_fields
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer, extract_template_args
@@ -73,7 +74,14 @@ def prepare_chat_request(
         raise MessageValidationError(str(e)) from e
     if evaluation:
         # Model rules must not re-enable training replay outputs for evaluation.
-        request_args.update(return_sampling_mask=False, return_routed_experts=False, return_indexer_topk=False)
+        request_args.update(
+            return_sampling_mask=False,
+            return_sampling_mask_logprobs=False,
+            return_flat_raw_output_top_logprobs=False,
+            return_flat_raw_output_top_logprobs_b64=False,
+            return_routed_experts=False,
+            return_indexer_topk=False,
+        )
         request_args.pop("routed_experts_start_len", None)
     return PreparedChatRequest(
         body=request_args, template_args=extract_template_args(request_args), client_stream=client_stream
@@ -121,13 +129,29 @@ def resolve_request_args_by_config(
                 if request_args.get(name) is None:
                     request_args[name] = value
         try:
-            return_sampling_mask = should_return_sampling_mask(config, request_args)
+            return_sampling_mask = should_return_sampling_mask(
+                config,
+                request_args,
+                evaluation=evaluation,
+            )
         except ValueError as exc:
             raise MessageValidationError(str(exc)) from exc
-    if sampling_mask_requested is True and not return_sampling_mask:
+    if not evaluation and sampling_mask_requested is True and not return_sampling_mask:
         raise MessageValidationError("return_sampling_mask requires bounded rollout sampling")
     if return_sampling_mask:
         request_args["return_sampling_mask"] = True
+    try:
+        score_centering_fields = score_centering_request_fields(
+            config,
+            request_args,
+            evaluation=evaluation,
+            openai=True,
+        )
+    except ValueError as exc:
+        raise MessageValidationError(str(exc)) from exc
+    if score_centering_fields.get("return_sampling_mask_logprobs") and not return_sampling_mask:
+        raise MessageValidationError("score centering with sampling replay requires return_sampling_mask")
+    request_args.update(score_centering_fields)
 
     # Must be False so stop-token text is trimmed from assistant content;
     # token IDs still come from logprobs below.

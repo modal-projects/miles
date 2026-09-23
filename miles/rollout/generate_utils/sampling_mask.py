@@ -61,16 +61,23 @@ def should_return_sampling_mask(
 def _sampling_mask_from_supports(
     token_ids: Sequence[int],
     supports: Sequence[Sequence[int]],
+    support_logprobs: Sequence[Sequence[float]] | None = None,
 ) -> RolloutSamplingMask:
     if len(token_ids) != len(supports):
         raise ValueError(f"sampling support length {len(supports)} != token length {len(token_ids)}")
+    if support_logprobs is not None and len(support_logprobs) != len(supports):
+        raise ValueError("sampling support logprob rows must align with support rows")
 
-    for token_id, support in zip(token_ids, supports, strict=True):
+    for row_index, (token_id, support) in enumerate(zip(token_ids, supports, strict=True)):
         if not support:
             raise ValueError("sampling support must contain at least one token")
         if int(token_id) not in support:
             raise ValueError(f"sampled token {token_id} is absent from its sampling support")
-    return RolloutSamplingMask.from_mask_list(supports)
+        if len(set(int(value) for value in support)) != len(support):
+            raise ValueError("sampling support must not contain duplicate token ids")
+        if support_logprobs is not None and len(support_logprobs[row_index]) != len(support):
+            raise ValueError("sampling support logprobs must align with support ids")
+    return RolloutSamplingMask.from_mask_list(supports, support_logprobs)
 
 
 def append_sampling_metadata(
@@ -79,14 +86,19 @@ def append_sampling_metadata(
     meta_info: dict,
     *,
     aborted: bool = False,
+    require_support_logprobs: bool = False,
 ) -> list[float]:
     """Append SGLang's realized support and return its normalized log-probs."""
     supports = meta_info.get("output_token_sampling_mask")
+    support_logprobs = meta_info.get("output_token_sampling_mask_logprobs")
     log_probs = meta_info.get("output_token_sampling_logprobs")
     if supports is None or log_probs is None:
         finish_reason = meta_info.get("finish_reason") or {}
         if (aborted or finish_reason.get("type") == "abort") and not output_token_ids:
-            _append_sampling_mask(sample, RolloutSamplingMask.from_mask_list([]))
+            _append_sampling_mask(
+                sample,
+                RolloutSamplingMask.from_mask_list([], [] if require_support_logprobs else None),
+            )
             return []
         raise ValueError(
             "SGLang response is missing output_token_sampling_mask or "
@@ -95,14 +107,26 @@ def append_sampling_metadata(
         )
     if len(log_probs) != len(output_token_ids):
         raise ValueError(f"sampling log-prob length {len(log_probs)} != output token length {len(output_token_ids)}")
+    if require_support_logprobs and support_logprobs is None:
+        raise ValueError(
+            "SGLang response is missing output_token_sampling_mask_logprobs; score centering with sampling replay requires normalized probabilities for the complete sampling support"
+        )
 
-    _append_sampling_mask(sample, _sampling_mask_from_supports(output_token_ids, supports))
+    _append_sampling_mask(
+        sample,
+        _sampling_mask_from_supports(output_token_ids, supports, support_logprobs),
+    )
     return [float(value) for value in log_probs]
 
 
 def append_forced_sampling_tokens(sample: Sample, token_ids: Sequence[int]) -> None:
     """Record singleton support for non-sampled tokens inserted by the environment."""
-    sampling_mask = RolloutSamplingMask.from_mask_list([[int(token_id)] for token_id in token_ids])
+    _, _, existing_logprobs = sample.rollout_sampling_mask._as_distribution_tensors()
+    logprobs = [[0.0] for _ in token_ids] if existing_logprobs is not None else None
+    sampling_mask = RolloutSamplingMask.from_mask_list(
+        [[int(token_id)] for token_id in token_ids],
+        logprobs,
+    )
     _append_sampling_mask(sample, sampling_mask)
 
 
@@ -119,7 +143,15 @@ def merge_sampling_masks(
             return None
         raise ValueError("cannot merge samples unless both turns carry a complete rollout sampling mask")
 
-    observation_mask = RolloutSamplingMask.from_mask_list([[int(token_id)] for token_id in observation_token_ids])
+    _, _, first_logprobs = first_mask._as_distribution_tensors()
+    _, _, second_logprobs = second_mask._as_distribution_tensors()
+    if (first_logprobs is None) != (second_logprobs is None):
+        raise ValueError("cannot merge sampling masks with incomplete support logprobs")
+    observation_logprobs = [[0.0] for _ in observation_token_ids] if first_logprobs is not None else None
+    observation_mask = RolloutSamplingMask.from_mask_list(
+        [[int(token_id)] for token_id in observation_token_ids],
+        observation_logprobs,
+    )
     return RolloutSamplingMask.concatenate((first_mask, observation_mask, second_mask))
 
 

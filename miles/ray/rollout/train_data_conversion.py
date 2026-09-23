@@ -20,6 +20,10 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
     "rollout_log_probs": "float32",
     "rollout_sampling_mask_ids": "int32",
     "rollout_sampling_mask_offsets": "int64",
+    "rollout_sampling_mask_logprobs": "float32",
+    "rollout_score_centering_head_ids": "int32",
+    "rollout_score_centering_head_offsets": "int64",
+    "rollout_score_centering_head_logprobs": "float32",
     "teacher_log_probs": "float32",
     "opd_reverse_kl": "float32",
     "rollout_routed_experts": "int32",
@@ -119,6 +123,8 @@ def convert_samples_to_train_data(
     if has_sampling_mask:
         sampling_mask_ids = []
         sampling_mask_offsets = []
+        sampling_mask_logprobs = []
+        has_sampling_mask_logprobs = None
         for position, sample in enumerate(samples):
             sample.validate()
             if sample.rollout_sampling_mask is None:
@@ -126,13 +132,40 @@ def convert_samples_to_train_data(
                     "sampling-mask data must be present for every training sample; "
                     f"missing at position={position}, sample_index={sample.index}, status={sample.status}"
                 )
-            ids, offsets = sample.rollout_sampling_mask._as_tensors()
+            ids, offsets, logprobs = sample.rollout_sampling_mask._as_distribution_tensors()
+            if has_sampling_mask_logprobs is None:
+                has_sampling_mask_logprobs = logprobs is not None
+            elif has_sampling_mask_logprobs != (logprobs is not None):
+                raise ValueError("sampling-mask support logprobs must be present for every training sample or none")
 
             sampling_mask_ids.append(ids)
             sampling_mask_offsets.append(offsets)
+            if logprobs is not None:
+                sampling_mask_logprobs.append(logprobs)
 
         train_data["rollout_sampling_mask_ids"] = sampling_mask_ids
         train_data["rollout_sampling_mask_offsets"] = sampling_mask_offsets
+        if has_sampling_mask_logprobs:
+            train_data["rollout_sampling_mask_logprobs"] = sampling_mask_logprobs
+
+    has_score_centering_head = any(sample.rollout_score_centering_head is not None for sample in samples)
+    if has_score_centering_head:
+        head_ids = []
+        head_offsets = []
+        head_logprobs = []
+        for position, sample in enumerate(samples):
+            sample.validate()
+            if sample.rollout_score_centering_head is None:
+                raise ValueError(
+                    f"score-centering head data must be present for every training sample; missing at position={position}, sample_index={sample.index}, status={sample.status}"
+                )
+            ids, offsets, logprobs = sample.rollout_score_centering_head._as_tensors()
+            head_ids.append(ids)
+            head_offsets.append(offsets)
+            head_logprobs.append(logprobs)
+        train_data["rollout_score_centering_head_ids"] = head_ids
+        train_data["rollout_score_centering_head_offsets"] = head_offsets
+        train_data["rollout_score_centering_head_logprobs"] = head_logprobs
 
     if samples[0].rollout_routed_experts is not None:
         train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
@@ -375,6 +408,10 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "rollout_log_probs",
             "rollout_sampling_mask_ids",
             "rollout_sampling_mask_offsets",
+            "rollout_sampling_mask_logprobs",
+            "rollout_score_centering_head_ids",
+            "rollout_score_centering_head_offsets",
+            "rollout_score_centering_head_logprobs",
             "rollout_routed_experts",
             "rollout_indexer_topk",
             "prompt",

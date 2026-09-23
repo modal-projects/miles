@@ -22,6 +22,7 @@ from miles.utils.arguments import (
     miles_validate_args,
     resolve_rollout_function_paths,
     validate_async_off_policy_correction,
+    validate_score_centering_args,
     validate_skip_actor_forward_only,
 )
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
@@ -1366,6 +1367,7 @@ def _make_async_ppo_args(**overrides) -> SimpleNamespace:
         use_rollout_logprobs=False,
         use_tis=False,
         keep_old_actor=False,
+        use_score_centering=False,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -1376,12 +1378,88 @@ class TestValidateAsyncOffPolicyCorrection:
         with pytest.raises(AssertionError, match="behavior-policy correction"):
             validate_async_off_policy_correction(_make_async_ppo_args())
 
-    @pytest.mark.parametrize("flag", ["use_rollout_logprobs", "use_tis", "keep_old_actor"])
+    @pytest.mark.parametrize(
+        "flag",
+        ["use_rollout_logprobs", "use_tis", "keep_old_actor", "use_score_centering"],
+    )
     def test_ppo_with_any_correction_passes(self, flag):
         validate_async_off_policy_correction(_make_async_ppo_args(**{flag: True}))
 
     def test_non_ppo_estimators_are_unaffected(self):
         validate_async_off_policy_correction(_make_async_ppo_args(use_critic=False))
+
+
+def _make_score_centering_args(**overrides) -> SimpleNamespace:
+    defaults = dict(
+        loss_type="policy_loss",
+        advantage_estimator="grpo",
+        score_centering_top_k=128,
+        vocab_size=1024,
+        rollout_temperature=1.0,
+        rollout_top_p=1.0,
+        rollout_top_k=-1,
+        use_miles_router=True,
+        rollout_endpoint_url=None,
+        use_opsm=False,
+        use_opd=False,
+        get_mismatch_metrics=False,
+        use_unbiased_kl=False,
+        custom_pg_loss_reducer_function_path=None,
+        recompute_logprobs_via_prefill=False,
+        use_tis=False,
+        custom_tis_function_path=None,
+        tis_clip_low=0.0,
+        tis_clip=2.0,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestValidateScoreCentering:
+    def test_modeled_tail_and_exact_replay_configs_pass(self):
+        validate_score_centering_args(_make_score_centering_args())
+        validate_score_centering_args(_make_score_centering_args(rollout_top_p=0.95, rollout_top_k=32))
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"score_centering_top_k": 0}, "at least 1"),
+            ({"score_centering_top_k": 1025}, "cannot exceed"),
+            ({"rollout_temperature": 0.0}, "greater than zero"),
+            ({"use_miles_router": False}, "requires --use-miles-router or --rollout-endpoint-url"),
+            ({"use_opd": True}, "incompatible with: --use-opd"),
+            (
+                {"use_tis": True, "tis_clip_low": 2.0, "tis_clip": 1.0},
+                "requires 0 <= --tis-clip-low",
+            ),
+        ],
+    )
+    def test_invalid_configs_fail_closed(self, overrides, message):
+        with pytest.raises(ValueError, match=message):
+            validate_score_centering_args(_make_score_centering_args(**overrides))
+
+    def test_only_builtin_icepop_is_accepted_as_mis(self):
+        validate_score_centering_args(
+            _make_score_centering_args(
+                use_tis=True,
+                custom_tis_function_path=("miles.backends.training_utils.loss_hub.corrections:icepop_function"),
+            )
+        )
+        with pytest.raises(ValueError, match="only supports the built-in IcePop"):
+            validate_score_centering_args(
+                _make_score_centering_args(
+                    use_tis=True,
+                    custom_tis_function_path="some.other:function",
+                )
+            )
+
+    def test_external_endpoint_owns_score_centering_forwarding(self):
+        validate_score_centering_args(
+            _make_score_centering_args(
+                use_miles_router=False,
+                rollout_endpoint_url="https://rollout.example.test",
+            )
+        )
 
 
 class TestValidateRematerializeParamFromMasterWeight:
