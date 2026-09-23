@@ -11,8 +11,8 @@ class Box:
         return self._inner
 
 
-def compute_ray_pin_head_options():
-    head_node_id = _get_head_node_id()
+def compute_ray_pin_head_options(head_node_id: str | None = None):
+    head_node_id = head_node_id or get_head_node_id()
     return {
         "scheduling_strategy": NodeAffinitySchedulingStrategy(
             node_id=head_node_id,
@@ -21,7 +21,7 @@ def compute_ray_pin_head_options():
     }
 
 
-def _get_head_node_id() -> str:
+def get_head_node_id() -> str:
     for node in list_nodes():
         if node.is_head_node:
             return node.node_id
