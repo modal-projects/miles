@@ -46,7 +46,7 @@ class RayWorkerManager:
 
     @staticmethod
     def launch(specs: list[BaseWorkerSpec], pgs: dict[str, PlacementGroupInfo]):
-        obj = ray.remote(RayWorkerManager).options(name=_ACTOR_NAME).remote()
+        obj = ray.remote(RayWorkerManager).options(name=_ACTOR_NAME, **compute_ray_pin_head_options()).remote()
         ray.get(obj.init.remote(specs, pgs))
         return obj
 
