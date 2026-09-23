@@ -4,6 +4,7 @@ import pytest
 
 import miles.rollout.generate_hub.agentic_tool_call as agentic_tool_call
 from miles.ray.rollout.rollout_data_conversion import validate_compact_rollout_ids
+from miles.rollout.agent_function import InfraAbort
 from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.session.samples.codec import SamplesReply
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
@@ -154,6 +155,22 @@ async def test_transport_collection_error_has_no_metrics_owner(monkeypatch):
     (sample,) = output.samples
     assert sample.status == Sample.Status.ABORTED
     assert SESSION_ROLLOUT_METRICS_KEY not in sample.metadata
+
+
+@pytest.mark.asyncio
+async def test_infrastructure_abort_discards_the_sample(monkeypatch):
+    tracer = _Tracer(SamplesReply(samples=[Sample()], session_metadata={}, empty_reason=None))
+    _patch_agent(monkeypatch, tracer)
+
+    async def aborting_agent(**kwargs):
+        raise InfraAbort("SandboxUnavailable", "sandbox allocation failed")
+
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: aborting_agent)
+    output = await agentic_tool_call.generate(_generate_input())
+
+    (sample,) = output.samples
+    assert sample.status == Sample.Status.ABORTED
+    assert sample.metadata["exit_status"] == "SandboxUnavailable"
 
 
 @pytest.mark.asyncio
