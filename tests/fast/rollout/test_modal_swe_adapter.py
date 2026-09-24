@@ -14,6 +14,7 @@ import modal_swe_agent_function as agent_function_module  # noqa: E402
 from modal_swe_agent_function import (  # noqa: E402
     _OBSERVATION_TEMPLATE,
     _AgentWorker,
+    _EpisodeAbortState,
     _attach_client_model_timings,
     _environment_metrics,
     _EnvironmentSnapshot,
@@ -715,6 +716,83 @@ async def test_worker_pool_queues_excess_episodes_before_ray_submission():
     finishes[1].set()
     await second
     assert pool.in_flight == [0]
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_abort_stops_active_and_rejects_queued_episodes():
+    finish = asyncio.Event()
+    submitted = []
+    aborted = []
+
+    class RemoteMethod:
+        def remote(self, payload):
+            submitted.append(payload["_abort_generation"])
+
+            async def run():
+                await finish.wait()
+                return {"reward": 0}
+
+            return run()
+
+    class AbortMethod:
+        def remote(self, generation):
+            async def run():
+                aborted.append(generation)
+                finish.set()
+
+            return run()
+
+    worker = _FakeWorker()
+    worker.run_episode = RemoteMethod()
+    worker.abort_episodes = AbortMethod()
+    pool = _RayAgentWorkerPool([worker], per_worker_capacity=1)
+
+    first = asyncio.create_task(pool.run_episode({}))
+    second = asyncio.create_task(pool.run_episode({}))
+    await asyncio.sleep(0)
+
+    await pool.abort()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert submitted == [0]
+    assert aborted == [1]
+    assert first_result == {"reward": 0}
+    assert second_result["exit_status"] == "rollout_cancelled"
+    assert pool.in_flight == [0]
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_abort_cancels_active_sandboxes(monkeypatch):
+    terminated = []
+
+    async def fake_terminate(sandbox_ids):
+        terminated.extend(sandbox_ids)
+
+    monkeypatch.setattr(agent_function_module, "_terminate_sandboxes", fake_terminate)
+    worker = _AgentWorker(worker_index=0, threads=1)
+    episode_id, cancelled = worker._abort_state.start()
+    worker._abort_state.attach_sandbox(episode_id, "sb-123")
+
+    await worker.abort_episodes(4)
+
+    assert cancelled.is_set()
+    assert terminated == ["sb-123"]
+    assert worker._abort_generation == 4
+
+    await worker.abort_episodes(3)
+
+    assert terminated == ["sb-123"]
+    assert worker._abort_generation == 4
+    worker._abort_state.finish(episode_id)
+
+
+def test_episode_abort_state_cancels_pre_sandbox_work():
+    state = _EpisodeAbortState()
+    episode_id, cancelled = state.start()
+
+    assert state.cancel_all() == []
+    assert cancelled.is_set()
+    state.finish(episode_id)
 
 
 @pytest.mark.asyncio

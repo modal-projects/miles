@@ -31,6 +31,48 @@ from modal_swe_sandbox import (
 logger = logging.getLogger(__name__)
 
 
+class _EpisodeCancelled(Exception):
+    pass
+
+
+@dataclass
+class _ActiveEpisode:
+    cancelled: threading.Event
+    sandbox_id: str | None = None
+
+
+class _EpisodeAbortState:
+    """Thread-safe ownership of the episodes running in one worker process."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: dict[str, _ActiveEpisode] = {}
+
+    def start(self) -> tuple[str, threading.Event]:
+        episode_id = uuid.uuid4().hex
+        cancelled = threading.Event()
+        with self._lock:
+            self._active[episode_id] = _ActiveEpisode(cancelled=cancelled)
+        return episode_id, cancelled
+
+    def attach_sandbox(self, episode_id: str, sandbox_id: str) -> None:
+        with self._lock:
+            episode = self._active.get(episode_id)
+            if episode is not None:
+                episode.sandbox_id = sandbox_id
+
+    def finish(self, episode_id: str) -> None:
+        with self._lock:
+            self._active.pop(episode_id, None)
+
+    def cancel_all(self) -> list[str]:
+        with self._lock:
+            episodes = list(self._active.values())
+            for episode in episodes:
+                episode.cancelled.set()
+        return [episode.sandbox_id for episode in episodes if episode.sandbox_id]
+
+
 # The agent keeps complete command output in its in-memory trajectory. Emitting
 # every tool observation (often full test tracebacks) and every successful HTTP
 # request to the cluster console adds substantial log I/O without improving
@@ -710,6 +752,7 @@ def _instrument_model_requests(
     model: Any,
     durations: list[float],
     phase_callback: Callable[[str], None] | None = None,
+    cancelled: threading.Event | None = None,
 ) -> None:
     """Measure each real LiteLLM HTTP attempt as perceived by the agent."""
     query = getattr(model, "_query", None)
@@ -721,11 +764,14 @@ def _instrument_model_requests(
         return
 
     def timed_query(*args: Any, **kwargs: Any) -> Any:
+        _raise_if_cancelled(cancelled)
         started = time.perf_counter()
         if phase_callback is not None:
             phase_callback("model_generation")
         try:
-            return query(*args, **kwargs)
+            result = query(*args, **kwargs)
+            _raise_if_cancelled(cancelled)
+            return result
         finally:
             durations.append(time.perf_counter() - started)
             if phase_callback is not None:
@@ -740,6 +786,35 @@ def _instrument_model_requests(
         )
 
 
+def _raise_if_cancelled(cancelled: threading.Event | None) -> None:
+    if cancelled is not None and cancelled.is_set():
+        raise _EpisodeCancelled
+
+
+async def _terminate_sandboxes(sandbox_ids: list[str]) -> None:
+    if not sandbox_ids:
+        return
+
+    import modal
+
+    async def terminate(sandbox_id: str) -> None:
+        sandbox = await modal.Sandbox.from_id.aio(sandbox_id)
+        await sandbox.terminate.aio()
+
+    results = await asyncio.gather(
+        *(terminate(sandbox_id) for sandbox_id in sandbox_ids),
+        return_exceptions=True,
+    )
+    for sandbox_id, result in zip(sandbox_ids, results, strict=True):
+        if isinstance(result, Exception):
+            logger.warning(
+                "Failed to terminate cancelled Modal Sandbox %s: %s: %s",
+                sandbox_id,
+                type(result).__name__,
+                result,
+            )
+
+
 def _run_episode_sync(
     *,
     base_url: str,
@@ -749,6 +824,8 @@ def _run_episode_sync(
     queued_at: float,
     dispatch_queue_time: float = 0.0,
     phase_callback: Callable[[str], None] | None = None,
+    cancelled: threading.Event | None = None,
+    sandbox_started: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     from minisweagent.agents import get_agent
     from minisweagent.config import get_config_from_spec
@@ -775,11 +852,14 @@ def _run_episode_sync(
     started = time.perf_counter()
     boot_semaphore = _sandbox_boot_semaphore()
     set_phase("sandbox_boot_queue")
-    boot_semaphore.acquire()
-    boot_slot_held = True
+    boot_slot_held = False
     env: ModalSWEEnvironment | None = None
 
     try:
+        while not boot_semaphore.acquire(timeout=0.1):
+            _raise_if_cancelled(cancelled)
+        boot_slot_held = True
+        _raise_if_cancelled(cancelled)
         set_phase("sandbox_boot")
         env = ModalSWEEnvironment(
             task_dir,
@@ -788,8 +868,12 @@ def _run_episode_sync(
             exec_timeout=int(settings["exec_timeout"]),
             app_name=str(settings["app_name"]),
         )
+        if sandbox_started is not None:
+            sandbox_started(str(env.sandbox.object_id))
+        _raise_if_cancelled(cancelled)
         set_phase("sandbox_setup")
         _prepare_environment(env, task_dir)
+        _raise_if_cancelled(cancelled)
         boot_semaphore.release()
         boot_slot_held = False
         set_phase("agent_setup")
@@ -830,6 +914,7 @@ def _run_episode_sync(
             model,
             client_model_request_durations,
             set_phase,
+            cancelled,
         )
         # BadRequest errors are deterministic for a fixed request. Retrying a
         # TITO validation or context-limit 400 ten times only burns rollout
@@ -864,6 +949,7 @@ def _run_episode_sync(
         context_limit_exceeded = False
         generation_limit_exceeded = False
         try:
+            _raise_if_cancelled(cancelled)
             set_phase("interaction")
             result = agent.run(str(prompt))
         except SandboxCommandTimeoutError:
@@ -888,6 +974,8 @@ def _run_episode_sync(
                 agent_metrics=agent_metrics,
             )
         except Exception as error:
+            if cancelled is not None and cancelled.is_set():
+                raise _EpisodeCancelled from None
             if _is_context_limit_error(error):
                 # Reaching the configured context budget is a normal policy
                 # limit, not an infrastructure failure. Grade the current
@@ -949,6 +1037,7 @@ def _run_episode_sync(
 
         agent_snapshot = _EnvironmentSnapshot.capture(env)
         verify_started = time.perf_counter()
+        _raise_if_cancelled(cancelled)
         set_phase("verification")
         try:
             verifier = run_verifier(
@@ -1063,7 +1152,21 @@ def _run_episode_sync(
             "verifier_timeout_sec": verifier["timeout_sec"],
             "agent_metrics": agent_metrics,
         }
+    except _EpisodeCancelled:
+        return _failure(
+            "rollout_cancelled",
+            total_time=time.perf_counter() - started,
+            agent_queue_time=agent_queue_time,
+            failure_phase=current_phase,
+        )
     except Exception as error:
+        if cancelled is not None and cancelled.is_set():
+            return _failure(
+                "rollout_cancelled",
+                total_time=time.perf_counter() - started,
+                agent_queue_time=agent_queue_time,
+                failure_phase=current_phase,
+            )
         if not _is_infrastructure_error(error):
             raise
         logger.warning(
@@ -1133,6 +1236,8 @@ class _AgentWorker:
         )
         self._phase_lock = threading.Lock()
         self._episode_phases: dict[str, tuple[str, float, float]] = {}
+        self._abort_state = _EpisodeAbortState()
+        self._abort_generation = 0
 
     async def ping(self) -> dict[str, Any]:
         """Prove the controller actor imported and started before rollout."""
@@ -1166,12 +1271,15 @@ class _AgentWorker:
         }
 
     async def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        generation = int(payload.pop("_abort_generation", 0))
+        if generation != self._abort_generation:
+            return _failure("rollout_cancelled")
         dispatch_queue_time = max(
             0.0,
             time.time() - float(payload.pop("submitted_at_unix")),
         )
         queued_at = time.perf_counter()
-        episode_id = uuid.uuid4().hex
+        episode_id, cancelled = self._abort_state.start()
         episode_started = time.monotonic()
         current_phase = "executor_queue"
         phase_started = episode_started
@@ -1206,6 +1314,11 @@ class _AgentWorker:
                     queued_at=queued_at,
                     dispatch_queue_time=dispatch_queue_time,
                     phase_callback=set_phase,
+                    cancelled=cancelled,
+                    sandbox_started=partial(
+                        self._abort_state.attach_sandbox,
+                        episode_id,
+                    ),
                 ),
             )
         except Exception as error:
@@ -1230,6 +1343,7 @@ class _AgentWorker:
             phase_durations[current_phase] += max(0.0, now - phase_started)
             with self._phase_lock:
                 self._episode_phases.pop(episode_id, None)
+            self._abort_state.finish(episode_id)
         if isinstance(result, dict):
             metrics = result.setdefault("agent_metrics", {})
             metrics["agent_worker_index"] = self.worker_index
@@ -1237,6 +1351,12 @@ class _AgentWorker:
                 metrics[f"phase_{phase}_seconds"] = duration
             metrics["phase_accounted_seconds"] = sum(phase_durations.values())
         return result
+
+    async def abort_episodes(self, generation: int) -> None:
+        if generation <= self._abort_generation:
+            return
+        self._abort_generation = generation
+        await _terminate_sandboxes(self._abort_state.cancel_all())
 
 
 class _RayAgentWorkerPool:
@@ -1249,6 +1369,7 @@ class _RayAgentWorkerPool:
         self.progress_reporter: asyncio.Task | None = None
         self.capacity = len(workers) * per_worker_capacity
         self._available = asyncio.Semaphore(self.capacity)
+        self.generation = 0
 
     def _acquire(self) -> tuple[int, Any]:
         minimum = min(self.in_flight)
@@ -1264,14 +1385,23 @@ class _RayAgentWorkerPool:
         self.in_flight[index] -= 1
         assert self.in_flight[index] >= 0
 
-    async def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def run_episode(
+        self,
+        payload: dict[str, Any],
+        *,
+        generation: int | None = None,
+    ) -> dict[str, Any]:
+        generation = self.generation if generation is None else generation
         # Keep excess episode coroutines in this process. Submitting them to
         # Ray would put them ahead of lightweight stats RPCs in each actor's
         # mailbox and eventually exhaust max_pending_calls.
         await self._available.acquire()
+        if generation != self.generation:
+            self._available.release()
+            return _failure("rollout_cancelled")
         index, worker = self._acquire()
         try:
-            future = asyncio.ensure_future(worker.run_episode.remote(payload))
+            future = asyncio.ensure_future(worker.run_episode.remote({**payload, "_abort_generation": generation}))
         except Exception:
             self._release(index)
             self._available.release()
@@ -1293,6 +1423,10 @@ class _RayAgentWorkerPool:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
             raise
+
+    async def abort(self) -> None:
+        self.generation += 1
+        await asyncio.gather(*(worker.abort_episodes.remote(self.generation) for worker in self.workers))
 
     def ensure_progress_reporter(self) -> None:
         if self.progress_reporter is None or self.progress_reporter.done():
@@ -1385,6 +1519,19 @@ def _ray_agent_pool() -> _RayAgentWorkerPool:
     return pool
 
 
+@cache
+def _local_abort_state() -> _EpisodeAbortState:
+    return _EpisodeAbortState()
+
+
+async def abort(_args: Any) -> None:
+    """Stop every episode owned by this agent integration."""
+    if _agent_process_count() > 1:
+        await _ray_agent_pool().abort()
+        return
+    await _terminate_sandboxes(_local_abort_state().cancel_all())
+
+
 async def run(
     base_url: str,
     prompt: Any,
@@ -1394,7 +1541,6 @@ async def run(
 ) -> dict[str, Any] | None:
     """Run one repository-repair episode without blocking the rollout event loop."""
     del kwargs
-    await ensure_sandbox_app(str(sandbox_settings()["app_name"]))
     queued_at = time.perf_counter()
     payload = {
         "base_url": base_url,
@@ -1403,11 +1549,20 @@ async def run(
         "metadata": metadata or {},
         "submitted_at_unix": time.time(),
     }
+    agent_pool = None
+    local_episode = None
+    if _agent_process_count() > 1:
+        agent_pool = _ray_agent_pool()
+        generation = agent_pool.generation
+    else:
+        local_state = _local_abort_state()
+        episode_id, cancelled = local_state.start()
+        local_episode = (local_state, episode_id)
     try:
-        if _agent_process_count() > 1:
-            agent_pool = _ray_agent_pool()
+        await ensure_sandbox_app(str(sandbox_settings()["app_name"]))
+        if agent_pool is not None:
             agent_pool.ensure_progress_reporter()
-            episode = agent_pool.run_episode(payload)
+            episode = agent_pool.run_episode(payload, generation=generation)
         else:
             payload.pop("submitted_at_unix")
             episode = asyncio.get_running_loop().run_in_executor(
@@ -1416,6 +1571,11 @@ async def run(
                     _run_episode_sync,
                     **payload,
                     queued_at=queued_at,
+                    cancelled=cancelled,
+                    sandbox_started=partial(
+                        local_state.attach_sandbox,
+                        episode_id,
+                    ),
                 ),
             )
         # The mini-swe-agent wall limit, per-command/verifier deadlines, and
@@ -1437,3 +1597,7 @@ async def run(
             sandbox_error=f"{type(error).__name__}: {error}"[:1000],
             **_exception_metadata(error),
         )
+    finally:
+        if local_episode is not None:
+            local_state, episode_id = local_episode
+            local_state.finish(episode_id)
