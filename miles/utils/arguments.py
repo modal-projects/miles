@@ -80,6 +80,14 @@ def _resolve_rollout_functions(args) -> None:
         assert (
             args.rollout_all_samples_process_path is None
         ), "--fully-async does not support --rollout-all-samples-process-path"
+    if args.async_keep_partial_groups_on_abort:
+        assert args.fully_async, "--async-keep-partial-groups-on-abort requires --fully-async"
+        assert (
+            args.use_dynamic_global_batch_size
+        ), "--async-keep-partial-groups-on-abort requires --use-dynamic-global-batch-size"
+        assert (
+            args.n_samples_per_prompt >= 2
+        ), "--async-keep-partial-groups-on-abort requires --n-samples-per-prompt >= 2"
 
     user_eval_path = args.eval_function_path
     args.rollout_function_path, args.eval_function_path = resolve_rollout_function_paths(args)
@@ -787,6 +795,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "(default) discards the group; retry recycles its prompts into the data "
                     "source for regeneration. Groups rejected by "
                     "--dynamic-sampling-filter-path are always dropped."
+                ),
+            )
+            parser.add_argument(
+                "--async-keep-partial-groups-on-abort",
+                action="store_true",
+                default=False,
+                help=(
+                    "In fully async mode, keep the completed trajectories from a prompt group "
+                    "when at least two trajectories survive an abort. This requires a dynamic "
+                    "global batch size."
                 ),
             )
             parser.add_argument(

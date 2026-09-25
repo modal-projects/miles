@@ -12,9 +12,9 @@ import logging
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
+from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, iter_samples
 from miles.rollout.filter_hub.common_filters import (
     GroupWeightVersionStats,
     apply_aborted_filter,
@@ -78,7 +78,9 @@ class DefaultDataBuffer(DataBuffer):
 
     Rejected on put, because the verdict is fixed once the group is generated:
 
-    - aborted groups (the generate function gave up, e.g. an agentic collect timeout)
+    - aborted groups (the generate function gave up, e.g. an agentic collect timeout);
+      ``--async-keep-partial-groups-on-abort`` instead retains two or more
+      surviving trajectories
     - groups with a missing reward
     - groups ``--dynamic-sampling-filter-path`` does not keep
 
@@ -113,6 +115,8 @@ class DefaultDataBuffer(DataBuffer):
 
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
+        self._metric_aborted_trajectories = 0
+        self._metric_partial_groups_retained = 0
         self._metric_stale_groups = 0
         self._metric_consumed_staleness: list[int] = []
         self._metric_selected_newest_lag: list[int] = []
@@ -123,7 +127,8 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_versioned_samples = 0
 
     async def put(self, input: DataBufferInput) -> None:
-        if not self._preput_filter(input):
+        input = self._prepare_input(input)
+        if input is None:
             return
 
         async with self._cond:
@@ -132,23 +137,33 @@ class DefaultDataBuffer(DataBuffer):
             self._buffer.append(input)
             self._cond.notify_all()
 
-    def _preput_filter(self, input: DataBufferInput) -> bool:
+    def _prepare_input(self, input: DataBufferInput) -> DataBufferInput | None:
         output = apply_aborted_filter(self._args, input.group)
         if not output.keep:
-            self._metric_aborted_groups += 1
-            self._unused_handler_fn(input.prompt_group)
-            return False
+            survivors = [
+                trajectory
+                for trajectory in input.group
+                if not any(sample.status == Sample.Status.ABORTED for sample in iter_samples([trajectory]))
+            ]
+            self._metric_aborted_trajectories += len(input.group) - len(survivors)
+            if self._args.async_keep_partial_groups_on_abort and len(survivors) >= 2:
+                input = replace(input, group=survivors)
+                self._metric_partial_groups_retained += 1
+            else:
+                self._metric_aborted_groups += 1
+                self._unused_handler_fn(input.prompt_group)
+                return None
 
         output = apply_missing_reward_filter(self._args, input.group)
         if not output.keep:
             self._metric_gatherer.on_dynamic_filter_drop(reason=output.reason)
-            return False
+            return None
 
         output = call_dynamic_filter(self._dynamic_filter, self._args, input.group)
         if not output.keep:
             self._metric_gatherer.on_dynamic_filter_drop(reason=output.reason)
-            return False
-        return True
+            return None
+        return input
 
     async def get(self, current_version: int | None = None, **_) -> DataBufferInput:
         if current_version is not None:
@@ -197,6 +212,8 @@ class DefaultDataBuffer(DataBuffer):
         metrics = {
             f"{prefix}queue_size": len(self._buffer),
             f"{prefix}aborted_groups_filtered": self._metric_aborted_groups,
+            f"{prefix}aborted_trajectories_filtered": self._metric_aborted_trajectories,
+            f"{prefix}partial_groups_retained": self._metric_partial_groups_retained,
             f"{prefix}stale_groups_filtered": self._metric_stale_groups,
             **self._metric_gatherer.collect(),
         }
@@ -232,5 +249,8 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_versioned_tokens = 0
         self._metric_selected_samples = 0
         self._metric_selected_versioned_samples = 0
-        self._metric_aborted_groups = self._metric_stale_groups = 0
+        self._metric_aborted_groups = 0
+        self._metric_aborted_trajectories = 0
+        self._metric_partial_groups_retained = 0
+        self._metric_stale_groups = 0
         return metrics

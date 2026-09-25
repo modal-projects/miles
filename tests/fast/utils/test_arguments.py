@@ -216,6 +216,7 @@ def _fully_async_candidate_args(**overrides) -> SimpleNamespace:
         pause_generation_mode="retract",
         recompute_logprobs_via_prefill=False,
         rollout_all_samples_process_path=None,
+        async_keep_partial_groups_on_abort=False,
         eval_num_gpus=0,
     )
     return SimpleNamespace(**(defaults | overrides))
@@ -270,18 +271,7 @@ def test_an_ordinary_rollout_function_path_stays_untouched():
 
 def test_fully_async_rejects_abort_pause_mode():
     """Generation is always in flight, so aborting on every weight update would kill it."""
-    args = SimpleNamespace(
-        fully_async=True,
-        multi_lora=False,
-        rollout_function_path=None,
-        eval_function_path=None,
-        colocate=False,
-        partial_rollout=False,
-        pause_generation_mode="abort",
-        recompute_logprobs_via_prefill=False,
-        rollout_all_samples_process_path=None,
-        eval_num_gpus=0,
-    )
+    args = _fully_async_candidate_args(fully_async=True, pause_generation_mode="abort")
 
     with pytest.raises(AssertionError, match="pause-generation-mode abort"):
         _resolve_rollout_functions(args)
