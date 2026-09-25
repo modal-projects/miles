@@ -77,6 +77,23 @@ class TestPostprocessRolloutData:
         out, _meta = postprocess_rollout_data(args, nested, train_parallel_config={"dp_size": 1})
         assert len(out) == 3
 
+    def test_partial_groups_keep_group_boundaries_when_aligning_to_dp(self):
+        args = make_args(
+            global_batch_size=64,
+            use_dynamic_global_batch_size=True,
+            async_keep_partial_groups_on_abort=True,
+        )
+        groups = [
+            [make_sample(index=0), make_sample(index=1), make_sample(index=2)],
+            [make_sample(index=3), make_sample(index=4)],
+            [make_sample(index=5), make_sample(index=6), make_sample(index=7)],
+        ]
+
+        out, meta = postprocess_rollout_data(args, groups, train_parallel_config={"dp_size": 3})
+
+        assert [sample.index for sample in out] == [0, 1, 2, 5, 6, 7]
+        assert meta == {"prompt_group_sizes": [3, 3], "dynamic_global_batch_size": 6}
+
 
 class TestValidateRolloutIdAnnotated:
     def test_flat_list_skips_validation(self):

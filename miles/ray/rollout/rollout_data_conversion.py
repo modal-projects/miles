@@ -11,6 +11,18 @@ def postprocess_rollout_data(args, data, train_parallel_config):
 
     validate_compact_rollout_ids(data)
 
+    if args.async_keep_partial_groups_on_abort:
+        data = _select_dp_aligned_prompt_groups(data, train_parallel_config["dp_size"])
+        metadata["prompt_group_sizes"] = [_nested_sample_count(group) for group in data]
+        data = list(itertools.chain.from_iterable(_flatten_group(group) for group in data))
+        metadata["dynamic_global_batch_size"] = len(data)
+        logger.info(
+            "Collected %d samples from %d prompt groups with dynamic global batch size",
+            len(data),
+            len(metadata["prompt_group_sizes"]),
+        )
+        return data, metadata
+
     # flatten the data if it is a list of lists
     while isinstance(data[0], list):
         data = list(itertools.chain.from_iterable(data))
@@ -70,6 +82,41 @@ def _nested_sample_count(group) -> int:
     if not isinstance(group, list):
         return 1
     return sum(_nested_sample_count(item) for item in group)
+
+
+def _flatten_group(group) -> list[Sample]:
+    if isinstance(group, Sample):
+        return [group]
+    return list(itertools.chain.from_iterable(_flatten_group(item) for item in group))
+
+
+def _select_dp_aligned_prompt_groups(groups, dp_size: int):
+    """Keep the largest sample population made of complete prompt groups."""
+    best_by_remainder: dict[int, tuple[int, list[int]]] = {0: (0, [])}
+    for index, group in enumerate(groups):
+        size = _nested_sample_count(group)
+        next_best = dict(best_by_remainder)
+        for total, selected in best_by_remainder.values():
+            candidate_total = total + size
+            remainder = candidate_total % dp_size
+            current = next_best.get(remainder)
+            if current is None or candidate_total > current[0]:
+                next_best[remainder] = (candidate_total, [*selected, index])
+        best_by_remainder = next_best
+
+    selected_total, selected_indices = best_by_remainder[0]
+    if selected_total == 0:
+        raise ValueError(f"No complete prompt groups can form a batch aligned to dp_size={dp_size}")
+    if len(selected_indices) != len(groups):
+        logger.info(
+            "Kept %d/%d complete prompt groups (%d/%d samples) for dp_size=%d alignment",
+            len(selected_indices),
+            len(groups),
+            selected_total,
+            sum(_nested_sample_count(group) for group in groups),
+            dp_size,
+        )
+    return [groups[index] for index in selected_indices]
 
 
 def _compute_dynamic_global_batch_size(args, train_parallel_config, num_samples: int) -> int:
