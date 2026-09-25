@@ -9,7 +9,7 @@ import time
 import pytest
 
 from miles.utils import async_utils
-from miles.utils.async_utils import AsyncioGatherUtils, AsyncLoopThread, eager_create_task
+from miles.utils.async_utils import AsyncioGatherUtils, AsyncLoopThread, eager_create_task, maybe_await
 
 
 @pytest.mark.asyncio
@@ -26,6 +26,15 @@ class TestCreateTaskComparison:
 
         assert isinstance(task, asyncio.Task)
         assert await task == 42
+
+
+@pytest.mark.asyncio
+async def test_maybe_await_supports_sync_and_async_disposal():
+    async def dispose():
+        return "done"
+
+    assert await maybe_await(None) is None
+    assert await maybe_await(dispose()) == "done"
 
     async def test_started_before_next_line(self, create_mode):
         """eager starts immediately; plain does not."""

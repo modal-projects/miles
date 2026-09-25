@@ -60,7 +60,7 @@ class CheckpointFnStub(CheckpointEvalFn):
             raise EvalSkip(self.skip_reason)
         return RolloutFnEvalOutput(data={"ds": {"rewards": [1.0]}})
 
-    def dispose(self):
+    async def dispose(self):
         self.disposed = True
 
 
@@ -646,7 +646,7 @@ async def test_external_eval_fn_pin_failure_retries_then_raises(external_fn_env)
     assert not [c for c in external_fn_env.calls if c[0] == "eval"]
 
 
-def test_external_eval_fn_launches_own_server(external_fn_env, monkeypatch):
+async def test_external_eval_fn_launches_own_server(external_fn_env, monkeypatch):
     """Launch mode is the black-box promise: init prepares everything, pinned to
     the GPUs the user names, extra sglang flags passed through; dispose tears down."""
     procs = []
@@ -666,5 +666,5 @@ def test_external_eval_fn_launches_own_server(external_fn_env, monkeypatch):
     assert proc.cmd[proc.cmd.index("--model-path") + 1] == "/base"
     assert proc.cmd[-2:] == ["--attention-backend", "fa3"]
     assert fn._url == "http://127.0.0.1:31000"
-    fn.dispose()
+    await fn.dispose()
     assert proc.terminated

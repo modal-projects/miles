@@ -640,6 +640,21 @@ class RecordingBuffer(data_buffer.DefaultDataBuffer):
         RecordingBuffer.constructed_with = input
 
 
+class WedgedBuffer(data_buffer.DataBuffer):
+    def __init__(self, input: data_buffer.DataBufferConstructorInput):
+        self._never = asyncio.Event()
+
+    async def put(self, input: data_buffer.DataBufferInput) -> None:
+        await self._never.wait()
+
+    async def get(self, **context) -> data_buffer.DataBufferInput:
+        await self._never.wait()
+        raise AssertionError("the wedged buffer never hands out a group")
+
+    def get_metrics(self) -> dict[str, float]:
+        return {}
+
+
 async def test_custom_data_buffer_path_replaces_default(monkeypatch):
     path = f"{__name__}.RecordingBuffer"
     args = make_args(custom_async_data_buffer_path=path, async_unused_samples_handler="retry")
@@ -650,6 +665,19 @@ async def test_custom_data_buffer_path_replaces_default(monkeypatch):
     assert type(fn._output) is RecordingBuffer
     assert RecordingBuffer.constructed_with.unused_handler_fn == fn._recycle
     assert len(output.samples) == 2
+
+
+async def test_dispose_ends_a_wedged_producer(monkeypatch):
+    args = make_args(rollout_batch_size=1, custom_async_data_buffer_path=f"{__name__}.WedgedBuffer")
+    fn = make_fn(monkeypatch, args, FakeDataSource())
+    step = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+    await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(fn.dispose(), timeout=5)
+
+    assert fn._worker.cancelled()
+    with pytest.raises(RuntimeError, match="disposed while a step waited for groups"):
+        await asyncio.wait_for(step, timeout=5)
 
 
 async def test_worker_defaults_to_sample_granularity(monkeypatch):
