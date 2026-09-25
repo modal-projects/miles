@@ -1,7 +1,6 @@
 """Per-datum outputs belong to their loss pass, including when backward recomputes the loss."""
 
 from argparse import Namespace
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,8 +14,6 @@ from .loss_test_utils import make_parallel_state
 @pytest.mark.parametrize("recompute", [False, True], ids=["direct", "recomputed"])
 def test_loss_passes_return_independent_detached_outputs(monkeypatch, recompute):
     make_parallel_state()
-    parallel = SimpleNamespace(cp=SimpleNamespace(size=1), intra_dp=SimpleNamespace(size=1))
-    monkeypatch.setattr(loss_module, "get_parallel_state", lambda: parallel)
     monkeypatch.setattr(loss_module, "get_sum_of_sample_mean", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tinker_losses, "_target_logprobs", lambda _args, _batch, logits: [logits])
     args = Namespace(
@@ -102,8 +99,6 @@ def test_a_zero_loss_mask_removes_the_datum_from_every_objective(monkeypatch, lo
 )
 def test_nonzero_objectives_and_gradients(monkeypatch, recompute, loss_fn, config, token_losses, gradients):
     make_parallel_state()
-    parallel = SimpleNamespace(cp=SimpleNamespace(size=1), intra_dp=SimpleNamespace(size=1))
-    monkeypatch.setattr(loss_module, "get_parallel_state", lambda: parallel)
     monkeypatch.setattr(loss_module, "get_sum_of_sample_mean", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tinker_losses, "_target_logprobs", lambda _args, _batch, logits: [logits[:3], logits[3:]])
     args = Namespace(

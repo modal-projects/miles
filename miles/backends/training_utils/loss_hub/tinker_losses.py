@@ -11,11 +11,7 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 
-from miles.backends.training_utils.cp_utils import (
-    all_gather_with_cp,
-    get_local_response_loss_masks,
-    slice_log_prob_with_cp,
-)
+from miles.backends.training_utils.cp_utils import get_local_response_loss_masks, slice_log_prob_with_cp
 from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.types import RolloutBatch
@@ -86,38 +82,31 @@ def _gather_per_datum_outputs(
     per_datum_losses: list[torch.Tensor],
 ) -> list[dict]:
     """Per-datum outputs reported back to the client; identical on every CP rank."""
+    if not per_datum_losses:
+        return []
     parallel_state = get_parallel_state()
-    max_seq_lens = batch.get("max_seq_lens", None)
-    full_losses = []
-    if per_datum_losses:
-        loss_sums = torch.stack([local_loss.detach() for local_loss in per_datum_losses])
-        if parallel_state.cp.size > 1:
-            dist.all_reduce(loss_sums, group=parallel_state.cp.group)
-        # clone so each 0-d loss owns its storage; pickling unbind() views serializes the shared buffer
-        full_losses = [full_loss.clone() for full_loss in loss_sums.cpu().unbind()]
+    logprobs = [log_prob.detach() for log_prob in log_probs]
+    if parallel_state.cp.size > 1:
+        # scatter each local shard into a zero response so one all_reduce assembles the whole microbatch
+        response_lengths = batch["response_lengths"]
+        positions = _local_response_values(
+            args, batch, [torch.arange(n, device=logprobs[0].device) for n in response_lengths]
+        )
+        logprobs = [
+            local.new_zeros(n).index_copy_(0, position, local)
+            for local, position, n in zip(logprobs, positions, response_lengths, strict=True)
+        ]
+    flat = torch.cat([torch.stack([local_loss.detach() for local_loss in per_datum_losses]), *logprobs])
+    if parallel_state.cp.size > 1:
+        dist.all_reduce(flat, group=parallel_state.cp.group)
+    # clone so each output owns its storage; pickling views serializes the shared buffer
+    flat = flat.cpu()
+    full_losses = [loss.clone() for loss in flat[: len(logprobs)].unbind()]
+    full_logprobs = [logprob.clone() for logprob in flat[len(logprobs) :].split([lp.numel() for lp in logprobs])]
     return [
-        {
-            "sample_index": sample_index,
-            "logprobs": all_gather_with_cp(
-                log_prob.detach(),
-                total_length,
-                response_length,
-                args.qkv_format,
-                max_seq_lens[i] if max_seq_lens is not None else None,
-            )
-            .detach()
-            .cpu(),
-            "loss": full_loss,
-        }
-        for i, (sample_index, log_prob, total_length, response_length, full_loss) in enumerate(
-            zip(
-                batch["sample_indices"],
-                log_probs,
-                batch["total_lengths"],
-                batch["response_lengths"],
-                full_losses,
-                strict=True,
-            )
+        {"sample_index": sample_index, "logprobs": full_logprob, "loss": full_loss}
+        for sample_index, full_logprob, full_loss in zip(
+            batch["sample_indices"], full_logprobs, full_losses, strict=True
         )
     ]
 
