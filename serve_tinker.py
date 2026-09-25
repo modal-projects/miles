@@ -30,11 +30,11 @@ async def serve(args):
     hf_config = load_hf_config(args.hf_checkpoint).get_text_config()
     max_tokens_per_datum = hf_config.max_position_embeddings
     if args.max_tokens_per_gpu is not None:
-        # The trainer pads each rank's packed microbatch to this multiple.
+        # The trainer pads each packed microbatch to this multiple.
         pad_size = args.tensor_model_parallel_size * args.data_pad_size_multiplier
         local_token_limit = args.max_tokens_per_gpu // pad_size * pad_size
         if args.context_parallel_size > 1:
-            # zigzag CP gives each rank two equal chunks of a datum, so its share is even
+            # each rank holds two equal zigzag chunks per datum
             local_token_limit -= local_token_limit % 2
         trainer_token_limit = local_token_limit * args.context_parallel_size
         max_tokens_per_datum = min(max_tokens_per_datum, trainer_token_limit)

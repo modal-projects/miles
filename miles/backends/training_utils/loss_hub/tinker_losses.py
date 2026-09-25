@@ -44,10 +44,7 @@ def _as_tensor_like(values, reference: torch.Tensor) -> torch.Tensor:
 
 
 def _local_response_values(args: Namespace, batch: RolloutBatch, values: list) -> list:
-    """Slice full-length per-token client vectors into this rank's zigzag CP shard.
-
-    `rollout_log_probs` is not passed here: `get_rollout_data` already slices it.
-    """
+    """This rank's zigzag CP shard of each full-length client vector; `rollout_log_probs` arrives pre-sliced."""
     max_seq_lens = batch.get("max_seq_lens", None)
     return [
         slice_log_prob_with_cp(
@@ -87,22 +84,24 @@ def _gather_per_datum_outputs(
     parallel_state = get_parallel_state()
     logprobs = [log_prob.detach() for log_prob in log_probs]
     if parallel_state.cp.size > 1:
-        # scatter each local shard into a zero response so one all_reduce assembles the whole microbatch
         response_lengths = batch["response_lengths"]
-        positions = _local_response_values(
+        local_positions = _local_response_values(
             args, batch, [torch.arange(n, device=logprobs[0].device) for n in response_lengths]
         )
         logprobs = [
-            local.new_zeros(n).index_copy_(0, position, local)
-            for local, position, n in zip(logprobs, positions, response_lengths, strict=True)
+            logprob.new_zeros(n).index_copy_(0, positions, logprob)
+            for logprob, positions, n in zip(logprobs, local_positions, response_lengths, strict=True)
         ]
-    flat = torch.cat([torch.stack([local_loss.detach() for local_loss in per_datum_losses]), *logprobs])
+    losses_and_logprobs = torch.cat([torch.stack([local_loss.detach() for local_loss in per_datum_losses]), *logprobs])
     if parallel_state.cp.size > 1:
-        dist.all_reduce(flat, group=parallel_state.cp.group)
-    # clone so each output owns its storage; pickling views serializes the shared buffer
-    flat = flat.cpu()
-    full_losses = [loss.clone() for loss in flat[: len(logprobs)].unbind()]
-    full_logprobs = [logprob.clone() for logprob in flat[len(logprobs) :].split([lp.numel() for lp in logprobs])]
+        dist.all_reduce(losses_and_logprobs, group=parallel_state.cp.group)
+    losses_and_logprobs = losses_and_logprobs.cpu()
+    num_datums = len(logprobs)
+    full_losses = [full_loss.clone() for full_loss in losses_and_logprobs[:num_datums].unbind()]
+    full_logprobs = [
+        logprob.clone()
+        for logprob in losses_and_logprobs[num_datums:].split([logprob.numel() for logprob in logprobs])
+    ]
     return [
         {"sample_index": sample_index, "logprobs": full_logprob, "loss": full_loss}
         for sample_index, full_logprob, full_loss in zip(
@@ -121,8 +120,7 @@ def _sum_loss_and_outputs(
     if any(log_prob.numel() for log_prob in log_probs):
         loss = torch.stack(per_datum_losses).sum()
     else:
-        # no response tokens on this rank; backward still needs a loss connected to logits
-        loss = logits[..., :0].sum(dtype=torch.float32)
+        loss = logits[..., :0].sum(dtype=torch.float32)  # zero, but still connected to logits for backward
     per_datum = _gather_per_datum_outputs(args, batch, log_probs, per_datum_losses)
     return loss, {"loss": loss.detach(), "per_datum": per_datum}
 
