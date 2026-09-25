@@ -89,7 +89,8 @@ def _gather_per_datum_outputs(
         losses = torch.stack([sample_loss.detach() for sample_loss in per_datum_losses])
         if parallel_state.cp.size > 1:
             dist.all_reduce(losses, group=parallel_state.cp.group)
-        losses = losses.cpu().unbind()
+        # clone so each 0-d loss owns its storage; pickling unbind() views serializes the shared buffer
+        losses = [loss.clone() for loss in losses.cpu().unbind()]
     else:
         losses = []
     return [
