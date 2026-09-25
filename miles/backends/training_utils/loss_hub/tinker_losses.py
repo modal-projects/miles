@@ -48,7 +48,10 @@ def _as_tensor_like(values, reference: torch.Tensor) -> torch.Tensor:
 
 
 def _local_response_values(args: Namespace, batch: RolloutBatch, values: list) -> list:
-    """Slice full-length per-token client vectors into this rank's zigzag CP shard."""
+    """Slice full-length per-token client vectors into this rank's zigzag CP shard.
+
+    `rollout_log_probs` is not passed here: `get_rollout_data` already slices it.
+    """
     max_seq_lens = batch.get("max_seq_lens", None)
     return [
         slice_log_prob_with_cp(
@@ -129,8 +132,7 @@ def _sum_loss_and_outputs(
     if any(log_prob.numel() for log_prob in log_probs):
         loss = torch.stack(per_datum_losses).sum()
     else:
-        # a rank with no response tokens (empty microbatch, or every CP shard empty)
-        # still needs a loss attached to the graph; an empty view avoids reading logits
+        # no response tokens on this rank; backward still needs a loss connected to logits
         loss = logits[..., :0].sum(dtype=torch.float32)
     per_datum = _gather_per_datum_outputs(args, batch, log_probs, per_datum_losses)
     return loss, {"loss": loss.detach(), "per_datum": per_datum}
