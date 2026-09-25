@@ -47,7 +47,7 @@ def _as_tensor_like(values, reference: torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(values, dtype=reference.dtype, device=reference.device)
 
 
-def _local_shards(args: Namespace, batch: RolloutBatch, values: list) -> list:
+def _local_response_values(args: Namespace, batch: RolloutBatch, values: list) -> list:
     """Slice full-length per-token client vectors into this rank's zigzag CP shard."""
     max_seq_lens = batch.get("max_seq_lens", None)
     return [
@@ -64,8 +64,8 @@ def _local_shards(args: Namespace, batch: RolloutBatch, values: list) -> list:
     ]
 
 
-def _response_masks(args: Namespace, batch: RolloutBatch, log_probs: list[torch.Tensor]) -> list[torch.Tensor]:
-    """Per-datum loss masks; a DP-padding datum is all zeros and must not reach the objective."""
+def _local_response_masks(args: Namespace, batch: RolloutBatch, log_probs: list[torch.Tensor]) -> list[torch.Tensor]:
+    """This CP rank's slice of each loss mask; a DP-padding datum is all zeros and must not reach the objective."""
     local_masks = get_local_response_loss_masks(
         batch["total_lengths"],
         batch["response_lengths"],
@@ -85,17 +85,16 @@ def _gather_per_datum_outputs(
     """Per-datum outputs reported back to the client; identical on every CP rank."""
     parallel_state = get_parallel_state()
     max_seq_lens = batch.get("max_seq_lens", None)
+    full_losses = []
     if per_datum_losses:
-        losses = torch.stack([sample_loss.detach() for sample_loss in per_datum_losses])
+        loss_sums = torch.stack([local_loss.detach() for local_loss in per_datum_losses])
         if parallel_state.cp.size > 1:
-            dist.all_reduce(losses, group=parallel_state.cp.group)
+            dist.all_reduce(loss_sums, group=parallel_state.cp.group)
         # clone so each 0-d loss owns its storage; pickling unbind() views serializes the shared buffer
-        losses = [loss.clone() for loss in losses.cpu().unbind()]
-    else:
-        losses = []
+        full_losses = [full_loss.clone() for full_loss in loss_sums.cpu().unbind()]
     return [
         {
-            "sample_index": index,
+            "sample_index": sample_index,
             "logprobs": all_gather_with_cp(
                 log_prob.detach(),
                 total_length,
@@ -105,15 +104,15 @@ def _gather_per_datum_outputs(
             )
             .detach()
             .cpu(),
-            "loss": sample_loss,
+            "loss": full_loss,
         }
-        for i, (index, log_prob, total_length, response_length, sample_loss) in enumerate(
+        for i, (sample_index, log_prob, total_length, response_length, full_loss) in enumerate(
             zip(
                 batch["sample_indices"],
                 log_probs,
                 batch["total_lengths"],
                 batch["response_lengths"],
-                losses,
+                full_losses,
                 strict=True,
             )
         )
@@ -148,8 +147,8 @@ def cross_entropy_loss_function(
         -(_as_tensor_like(weights, log_prob) * log_prob * mask).sum()
         for log_prob, weights, mask in zip(
             log_probs,
-            _local_shards(args, batch, batch["loss_weights"]),
-            _response_masks(args, batch, log_probs),
+            _local_response_values(args, batch, batch["loss_weights"]),
+            _local_response_masks(args, batch, log_probs),
             strict=True,
         )
     ]
@@ -167,8 +166,8 @@ def importance_sampling_loss_function(
     for log_prob, sampling_log_prob, advantage, mask in zip(
         log_probs,
         batch["rollout_log_probs"],
-        _local_shards(args, batch, batch["advantages"]),
-        _response_masks(args, batch, log_probs),
+        _local_response_values(args, batch, batch["advantages"]),
+        _local_response_masks(args, batch, log_probs),
         strict=True,
     ):
         ratio = torch.exp(log_prob - _as_tensor_like(sampling_log_prob, log_prob))
@@ -190,8 +189,8 @@ def ppo_loss_function(
     for log_prob, sampling_log_prob, advantage, mask in zip(
         log_probs,
         batch["rollout_log_probs"],
-        _local_shards(args, batch, batch["advantages"]),
-        _response_masks(args, batch, log_probs),
+        _local_response_values(args, batch, batch["advantages"]),
+        _local_response_masks(args, batch, log_probs),
         strict=True,
     ):
         ratio = torch.exp(log_prob - _as_tensor_like(sampling_log_prob, log_prob))
@@ -215,8 +214,8 @@ def cispo_loss_function(
     for log_prob, sampling_log_prob, advantage, mask in zip(
         log_probs,
         batch["rollout_log_probs"],
-        _local_shards(args, batch, batch["advantages"]),
-        _response_masks(args, batch, log_probs),
+        _local_response_values(args, batch, batch["advantages"]),
+        _local_response_masks(args, batch, log_probs),
         strict=True,
     ):
         ratio = torch.exp(log_prob - _as_tensor_like(sampling_log_prob, log_prob))
@@ -238,8 +237,8 @@ def dro_loss_function(
     for log_prob, sampling_log_prob, advantage, mask in zip(
         log_probs,
         batch["rollout_log_probs"],
-        _local_shards(args, batch, batch["advantages"]),
-        _response_masks(args, batch, log_probs),
+        _local_response_values(args, batch, batch["advantages"]),
+        _local_response_masks(args, batch, log_probs),
         strict=True,
     ):
         divergence = log_prob - _as_tensor_like(sampling_log_prob, log_prob)
