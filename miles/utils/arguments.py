@@ -2535,6 +2535,21 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--custom-rollout-request-hook-path",
+                type=str,
+                default=None,
+                help=(
+                    "Import path of a hook that may modify each outgoing session rollout request. "
+                    "The hook receives (hook_args, context, request)."
+                ),
+            )
+            parser.add_argument(
+                "--custom-rollout-request-hook-args",
+                type=json.loads,
+                default="{}",
+                help="JSON object passed as hook_args to --custom-rollout-request-hook-path.",
+            )
+            parser.add_argument(
                 "--session-sample-picker-path",
                 type=str,
                 default="miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
@@ -2926,6 +2941,11 @@ def miles_validate_args(args):
 
     if args.update_weight_initial_version < 0:
         raise ValueError("--update-weight-initial-version must be non-negative")
+
+    if args.custom_rollout_request_hook_path and not args.use_session_server:
+        raise ValueError("--custom-rollout-request-hook-path requires --use-session-server")
+    if args.custom_rollout_request_hook_args and not args.custom_rollout_request_hook_path:
+        raise ValueError("--custom-rollout-request-hook-args requires --custom-rollout-request-hook-path")
 
     assert not (
         args.use_session_server and args.partial_rollout
