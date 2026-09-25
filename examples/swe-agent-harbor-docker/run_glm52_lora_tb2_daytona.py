@@ -49,7 +49,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # tilelang the indexer adapter gets no gradient at all — and EXCLUDING the MLP/MoE
 # leaves (gate_proj/up_proj/down_proj): this is the MoE-LoRA-off ablation, so all
 # experts (routed + shared) and the dense MLP stay frozen.
-_DEFAULT_TARGET_MODULES = "q_proj,k_proj,v_proj,o_proj,q_a_proj,kv_a_proj_with_mqa,q_b_proj,kv_b_proj"
+_DEFAULT_TARGET_MODULES = "o_proj,q_a_proj,kv_a_proj_with_mqa,q_b_proj,kv_b_proj"
 
 
 @dataclass
@@ -210,12 +210,12 @@ def _sglang_args(args: ScriptArgs) -> str:
         # deadlock the engines. Plain TP + EP MoE has no such collectives.
         f"--sglang-ep-size {engine} "
         "--sglang-attention-backend nsa "
-        "--sglang-nsa-decode-backend flashmla_kv "
-        "--sglang-nsa-prefill-backend flashmla_sparse "
+        "--sglang-dsa-decode-backend flashmla_kv "
+        "--sglang-dsa-prefill-backend flashmla_sparse "
         "--sglang-page-size 64 "
         "--sglang-kv-cache-dtype fp8_e4m3 "
         f"--sglang-context-length {args.sglang_context_length} "
-        f"--sglang-cuda-graph-max-bs {max_bs} --sglang-max-running-requests {max_bs} "
+        f"--sglang-cuda-graph-max-bs-decode {max_bs} --sglang-max-running-requests {max_bs} "
         f"--sglang-chunked-prefill-size {min(8192, 2048 * engine)} "
         "--sglang-watchdog-timeout 3600 "
         "--sglang-moe-runner-backend triton --sglang-disable-shared-experts-fusion "
