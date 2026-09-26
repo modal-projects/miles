@@ -39,16 +39,5 @@ def validate_score_centering_args(args: Namespace) -> None:
     for option, reason in incompatible.items():
         if getattr(args, option, None):
             raise ValueError(f"Score centering is incompatible with --{option.replace('_', '-')}: {reason}")
-    if (
-        args.rollout_top_logprobs_num > 20
-        and args.rollout_top_p == 1.0
-        and args.rollout_top_k == -1
-        and getattr(args, "use_session_server", None)
-        and not getattr(args, "use_miles_router", False)
-    ):
-        raise ValueError(
-            "Score-centering session rollouts with more than 20 candidates require --use-miles-router: "
-            "the SGLang Rust router caps OpenAI top_logprobs at 20"
-        )
     if os.environ.get("SGLANG_RETURN_ORIGINAL_LOGPROB", "").lower() in ("1", "true"):
         raise ValueError("Score centering requires SGLANG_RETURN_ORIGINAL_LOGPROB=0 on rollout servers")
