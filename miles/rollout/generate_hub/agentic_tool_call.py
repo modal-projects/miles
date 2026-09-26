@@ -93,16 +93,24 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         collect_kwargs = {"max_seq_len": max_seq_len}
         if use_v2:
             collect_kwargs["agent_metadata"] = agent_metadata
+        collect_start = time.monotonic()
         try:
             result = await tracer.collect_samples(input.sample, **collect_kwargs)
         # Costs this sample, not the run; a non-2xx still raises RuntimeError.
         except (TimeoutError, httpx.TransportError) as e:
             collect_failed = True
-            logger.warning(f"{log_prefix} Failed collecting samples: {e!r}", exc_info=True)
+            logger.warning(
+                f"{log_prefix} Failed collecting samples after "
+                f"{time.monotonic() - collect_start:.1f}s: {e!r}",
+                exc_info=True,
+            )
         else:
+            collect_seconds = time.monotonic() - collect_start
+            for sample in result.samples:
+                sample.metadata["session_collect/total_seconds"] = collect_seconds
             logger.debug(
                 f"{log_prefix} collect_samples done: {len(result.samples)} samples, "
-                f"total_time={time.monotonic()-t_start:.1f}s"
+                f"collect_time={collect_seconds:.1f}s, total_time={time.monotonic()-t_start:.1f}s"
             )
 
     if collect_failed:

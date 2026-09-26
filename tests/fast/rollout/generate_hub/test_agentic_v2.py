@@ -91,6 +91,7 @@ async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, eva
     assert tracer.sampling_params == {"temperature": 0.7, "max_new_tokens": 8}
     assert output.samples == [sample]
     assert output.samples[0].rollout_id is None
+    assert output.samples[0].metadata["session_collect/total_seconds"] >= 0
     assert tracer.agent_metadata == {"agent_result": "done"}
 
 
