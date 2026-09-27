@@ -25,49 +25,16 @@ from concurrent.futures import ThreadPoolExecutor
 import safetensors
 import safetensors.torch
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
+
+from miles.utils.fp8_kernel import blockwise_cast_to_fp8_triton
 
 FP8_INFO = torch.finfo(torch.float8_e4m3fn)
 FP8_MAX, FP8_MIN = FP8_INFO.max, FP8_INFO.min
 
 
-def ceildiv(a, b):
-    return -(-a // b)
-
-
 def block_fp8(weight, block_size):
-
-    # per block quant
-    block_n, block_k = block_size[0], block_size[1]
-
-    shape_0, shape_1 = weight.shape
-
-    n_tiles = ceildiv(shape_0, block_n)
-    k_tiles = ceildiv(shape_1, block_k)
-
-    q_weight = F.pad(
-        weight,
-        (0, k_tiles * block_k - shape_1, 0, n_tiles * block_n - shape_0),
-        mode="constant",
-        value=0.0,
-    )
-
-    qweight = q_weight.reshape(n_tiles, block_n, k_tiles, block_k)
-    block_max = torch.max(torch.abs(qweight), dim=1, keepdim=True)[0]
-    block_max = torch.max(block_max, dim=3, keepdim=True)[0]
-
-    scale = block_max.to(torch.float32) / FP8_MAX
-    qweight = (
-        (qweight / scale)
-        .clamp(min=FP8_MIN, max=FP8_MAX)
-        .reshape((n_tiles * block_n, k_tiles * block_k))
-        .to(torch.float8_e4m3fn)
-    )
-    qweight = qweight[:shape_0, :shape_1].clone().detach()
-    scale = scale.reshape(n_tiles, k_tiles)
-
-    return qweight, scale
+    return blockwise_cast_to_fp8_triton(weight, block_size)
 
 
 def channel_fp8(weight):
@@ -181,9 +148,7 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for filename in safetensors_files:
-            future = executor.submit(
-                process_file, input_path, output_path, filename, strategy, block_size, result_collector
-            )
+            future = executor.submit(process_file, input_path, output_path, filename, strategy, block_size, result_collector)
             futures.append(future)
 
         for future in tqdm(futures, desc="Processing files"):

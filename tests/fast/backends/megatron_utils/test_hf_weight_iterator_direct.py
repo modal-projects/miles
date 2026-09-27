@@ -37,10 +37,6 @@ def _install_import_stubs(monkeypatch):
     sys.modules["sglang.srt.utils"].MultiprocessingSerializer = object
     sys.modules["sglang.srt.utils.patch_torch"].monkey_patch_torch_reductions = lambda: None
     sys.modules["sglang.srt.weight_sync.tensor_bucket"].FlattenedTensorBucket = object
-    fp8_utils = sys.modules["sglang.srt.layers.quantization.fp8_utils"]
-    fp8_utils.quant_weight_ue8m0 = lambda *args, **kwargs: None
-    fp8_utils.transform_scale_ue8m0 = lambda x, **kwargs: x
-
     ray = types.ModuleType("ray")
     ray_actor = types.ModuleType("ray.actor")
     ray_util = types.ModuleType("ray.util")
@@ -56,10 +52,12 @@ def _install_import_stubs(monkeypatch):
     for name in [
         "megatron",
         "megatron.core",
+        "megatron.core.utils",
         "megatron.core.transformer",
         "megatron.core.transformer.transformer_layer",
     ]:
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    sys.modules["megatron.core.utils"].unwrap_model = lambda model: model
     sys.modules["megatron.core.transformer.transformer_layer"].get_transformer_layer_offset = lambda *args: 0
 
 
@@ -110,7 +108,5 @@ def test_gather_batches_pack_by_size_only(direct_module, monkeypatch):
     batches = direct_module._pack_param_infos_by_size(Namespace(update_weight_buffer_size=6), params)
     assert [[param.name for param in batch] for batch in batches] == [["layer.a", "layer.b"], ["layer.c"]]
 
-    batches = direct_module._pack_param_infos_by_size(
-        Namespace(update_weight_buffer_size=6), params, size_multiplier=2
-    )
+    batches = direct_module._pack_param_infos_by_size(Namespace(update_weight_buffer_size=6), params, size_multiplier=2)
     assert [[param.name for param in batch] for batch in batches] == [["layer.a"], ["layer.b"], ["layer.c"]]
