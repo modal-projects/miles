@@ -62,11 +62,12 @@ def quant_fp8(weight, strategy, block_size=None):
         return block_fp8(weight, block_size)
 
 
-def should_quantize(name, weight):
+def should_quantize(name, weight, block_size=None):
     """Whether this HF tensor is a matrix weight supported by the FP8 encoder."""
     return (
         name.endswith(".weight")
         and weight.ndim == 2
+        and (block_size is None or all(size % block == 0 for size, block in zip(weight.shape, block_size, strict=True)))
         and "layernorm" not in name
         and "embed" not in name
         and "router" not in name
@@ -79,6 +80,7 @@ def should_quantize(name, weight):
         and "wo_a" not in name
         and "ffn.gate." not in name
         and "compressor." not in name
+        and ".visual." not in f".{name}"
         and "vision_tower" not in name
         and "mm_projector" not in name
     )
@@ -116,7 +118,11 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
 
     modules_to_not_convert = []
     for key in weights.keys():
-        if should_quantize(key, weights[key]):
+        if should_quantize(
+            key,
+            weights[key],
+            block_size if strategy == "block" else None,
+        ):
             qw, s = quant_fp8(weights[key], strategy, block_size)
             q_weights[key] = qw
             if block_size:
