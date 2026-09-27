@@ -1,3 +1,4 @@
+import json
 from argparse import Namespace
 from collections import deque
 from pathlib import Path
@@ -83,9 +84,7 @@ class TestCanonicalCheckpointLayout:
         )
 
         with pytest.raises(ValueError, match="must be produced by the model's weight converter"):
-            self._protocol(tmp_path)._match_checkpoint_layout(
-                "expert.weight", torch.ones((2, 3), dtype=torch.bfloat16)
-            )
+            self._protocol(tmp_path)._match_checkpoint_layout("expert.weight", torch.ones((2, 3), dtype=torch.bfloat16))
 
     def test_rejects_shape_and_name_mismatches(self, tmp_path: Path) -> None:
         safetensors.torch.save_file(
@@ -108,6 +107,7 @@ def test_send_bucket_encodes_a_scalar_tensor(tmp_path: Path) -> None:
     protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
     protocol.args = Namespace(hf_checkpoint=str(tmp_path))
     protocol._use_pinned = False
+    protocol._view_protocols = {}
     protocol._pool = MagicMock()
     protocol._inflight = deque()
     protocol.total_bytes = 0
@@ -146,9 +146,7 @@ class TestReloadEnginesFailureTransitions:
             ),
         ],
     )
-    def test_reload_engine_failure_stops_before_the_next_lifecycle_phase(
-        self, failing_method: str, expected_calls: list[str]
-    ) -> None:
+    def test_reload_engine_failure_stops_before_the_next_lifecycle_phase(self, failing_method: str, expected_calls: list[str]) -> None:
         """A rejected pull never pauses the engine, and a rejected disk reload never resumes it."""
         calls: list[tuple[str, dict]] = []
         protocol = self._make_protocol(calls, failing_method)
@@ -179,3 +177,112 @@ def test_artifact_only_sync_publishes_without_engine_calls() -> None:
 
     protocol._post_write_hook.assert_called_once_with(protocol.args, protocol._version_dir, [])
     dist_mock.barrier.assert_called_once()
+
+
+def test_multiview_parent_manifest_references_every_child_file(tmp_path: Path) -> None:
+    protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    protocol._version_dir = str(tmp_path / "weight_v000007")
+    protocol.delta_encoding = "xor"
+    protocol.checksum_algorithm = "xxh3"
+    protocol._view_protocols = {}
+    for name, files in {
+        "fp8": ("model.safetensors.index.json", "model-00000-of-00001.safetensors"),
+        "nvfp4": ("model.safetensors.index.json", "model-00000-of-00001.safetensors"),
+    }.items():
+        child = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+        child._published_files = files
+        protocol._view_protocols[name] = child
+    Path(protocol._version_dir).mkdir()
+
+    with (
+        patch(f"{_DELTA_MODULE}.dist") as dist_mock,
+        patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=MagicMock()),
+    ):
+        dist_mock.get_rank.return_value = 0
+        protocol._write_view_manifest(7)
+
+    index = json.loads((Path(protocol._version_dir) / "model.safetensors.index.json").read_text())
+    assert index["metadata"]["weight_views"] == ["fp8", "nvfp4"]
+    assert set(index["weight_map"].values()) == {
+        "fp8/model.safetensors.index.json",
+        "fp8/model-00000-of-00001.safetensors",
+        "nvfp4/model.safetensors.index.json",
+        "nvfp4/model-00000-of-00001.safetensors",
+    }
+
+
+def test_multiview_baseline_validates_after_capturing_live_tensors(
+    tmp_path: Path,
+) -> None:
+    checkpoints = tmp_path / "checkpoints"
+    fp8_checkpoint = checkpoints / "fp8"
+    nvfp4_checkpoint = checkpoints / "nvfp4"
+    fp8_checkpoint.mkdir(parents=True)
+    nvfp4_checkpoint.mkdir(parents=True)
+    safetensors.torch.save_file(
+        {"weight": torch.ones((2, 2), dtype=torch.bfloat16)},
+        fp8_checkpoint / "model.safetensors",
+    )
+    safetensors.torch.save_file(
+        {
+            "weight": torch.ones((2, 2), dtype=torch.bfloat16),
+            "expert.input_scale": torch.ones((), dtype=torch.float32),
+        },
+        nvfp4_checkpoint / "model.safetensors",
+    )
+
+    parent = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    parent.delta_dir = str(tmp_path / "deltas")
+    parent._post_write_hook = None
+    parent.is_sender = True
+    parent.args = Namespace()
+    parent._view_protocols = {}
+    for name, checkpoint, source_only_suffixes in (
+        ("fp8", fp8_checkpoint, ()),
+        ("nvfp4", nvfp4_checkpoint, (".input_scale",)),
+    ):
+        child = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+        child.args = Namespace(hf_checkpoint=str(checkpoint))
+        child._snapshot = {}
+        child._source_only_suffixes = source_only_suffixes
+        child._source_tensor_prefixes = ()
+        parent._view_protocols[name] = child
+
+    def iter_buckets(*, materialize: bool):
+        assert materialize
+        yield {
+            "fp8": [("weight", torch.ones((2, 2), dtype=torch.bfloat16))],
+            "nvfp4": [("weight", torch.ones((2, 2), dtype=torch.bfloat16))],
+        }
+
+    def gather_messages(output, message, **_kwargs):
+        output[0] = message
+
+    with (
+        patch(f"{_DELTA_MODULE}.dist") as dist_mock,
+        patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=MagicMock()),
+    ):
+        dist_mock.get_rank.return_value = 0
+        dist_mock.get_world_size.return_value = 1
+        dist_mock.all_gather_object.side_effect = gather_messages
+        parent._capture_view_baselines(iter_buckets)
+
+    assert set(parent._view_protocols["fp8"]._snapshot) == {"weight"}
+    assert set(parent._view_protocols["nvfp4"]._snapshot) == {"weight"}
+
+
+def test_multiview_finalize_does_not_publish_parent_when_a_child_fails(
+    tmp_path: Path,
+) -> None:
+    protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    protocol._version_dir = str(tmp_path / "weight_v000007")
+    Path(protocol._version_dir).mkdir()
+    fp8 = MagicMock()
+    nvfp4 = MagicMock()
+    nvfp4._write_delta_files.side_effect = RuntimeError("failed child")
+    protocol._view_protocols = {"fp8": fp8, "nvfp4": nvfp4}
+
+    with pytest.raises(RuntimeError, match="failed child"):
+        protocol.finalize(7)
+
+    assert not (Path(protocol._version_dir) / "model.safetensors.index.json").exists()

@@ -87,6 +87,11 @@ def checkpoint_tensor_layout(ckpt_dir: str, name: str) -> tuple[str, tuple[int, 
     return dtype, shape
 
 
+def checkpoint_tensor_names(ckpt_dir: str) -> frozenset[str]:
+    """Return the complete tensor namespace declared by a safetensors checkpoint."""
+    return frozenset(_tensor_locations(ckpt_dir))
+
+
 def make_tensor_reader(ckpt_dir: str):
     """Index headers once and return a layout-aware raw tensor reader."""
     locations = _tensor_locations(ckpt_dir)

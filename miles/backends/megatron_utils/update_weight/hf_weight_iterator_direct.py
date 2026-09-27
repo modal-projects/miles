@@ -14,7 +14,7 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import Weigh
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.types import ParamInfo
 
-from ..megatron_to_hf import convert_to_hf
+from ..megatron_to_hf import convert_to_hf, convert_to_hf_views
 from ..named_weights import named_params_and_buffers
 from ..sglang import monkey_patch_torch_reductions
 
@@ -25,15 +25,19 @@ class HfWeightIteratorDirect(MegatronHfWeightIteratorBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        non_expert_infos, expert_infos = _get_megatron_local_param_infos(
-            self.args, self.model, gather_pp=self.placement.gather_pp
-        )
+        non_expert_infos, expert_infos = _get_megatron_local_param_infos(self.args, self.model, gather_pp=self.placement.gather_pp)
         ep_size = get_parallel_state().ep.size
         self._non_expert_batches = _pack_param_infos_by_size(self.args, non_expert_infos)
         # An expert batch materializes ep_size x its metadata size after the EP all_gather.
         self._expert_batches = _pack_param_infos_by_size(self.args, expert_infos, size_multiplier=ep_size)
 
     def _iter_hf_param_units(self, weights, *, materialize):
+        yield from self._iter_converted_units(weights, materialize=materialize, views=None)
+
+    def _iter_hf_param_view_units(self, weights, *, materialize):
+        yield from self._iter_converted_units(weights, materialize=materialize, views=self.weight_views)
+
+    def _iter_converted_units(self, weights, *, materialize, views):
         rank = dist.get_rank()
 
         pbar = tqdm(
@@ -42,23 +46,23 @@ class HfWeightIteratorDirect(MegatronHfWeightIteratorBase):
             desc="Update weights",
         )
         for param_infos in self._non_expert_batches:
-            named_params = _materialize_non_expert_batch(
-                self.args, param_infos, weights, gather_pp=self.placement.gather_pp
-            )
+            named_params = _materialize_non_expert_batch(self.args, param_infos, weights, gather_pp=self.placement.gather_pp)
             if materialize:
-                yield from self._convert_to_hf_param_units(named_params)
+                yield from self._convert_to_hf_param_units(named_params, views=views)
             del named_params
             pbar.update(1)
         for param_infos in self._expert_batches:
-            named_params = _materialize_expert_batch(
-                self.args, param_infos, weights, gather_pp=self.placement.gather_pp
-            )
+            named_params = _materialize_expert_batch(self.args, param_infos, weights, gather_pp=self.placement.gather_pp)
             if materialize:
-                yield from self._convert_to_hf_param_units(named_params)
+                yield from self._convert_to_hf_param_units(named_params, views=views)
             del named_params
             pbar.update(1)
         pbar.close()
-        yield from _iter_mm_tower_units(self.args, materialize=materialize)
+        for unit in _iter_mm_tower_units(self.args, materialize=materialize):
+            if views is None:
+                yield unit
+            else:
+                yield {view.name: list(unit) for view in views}
 
     def _export_pp_local_lora(self, adapter):
         assert adapter is None, "multi-LoRA export requires --megatron-to-hf-mode bridge"
@@ -73,13 +77,21 @@ class HfWeightIteratorDirect(MegatronHfWeightIteratorBase):
             return export_inkling_lora_hf_named(self.model)
         raise NotImplementedError(f"Raw LoRA export is not implemented for model {self.model_name!r}")
 
-    def _convert_to_hf_param_units(self, named_params: Sequence[tuple[str, torch.Tensor]]):
+    def _convert_to_hf_param_units(self, named_params: Sequence[tuple[str, torch.Tensor]], *, views):
         for name, param in named_params:
-            yield list(
-                convert_to_hf(
-                    self.args, self.model_name, name, param, self.quantization_config, self.packed_weight_basenames
+            if views is None:
+                yield list(
+                    convert_to_hf(
+                        self.args,
+                        self.model_name,
+                        name,
+                        param,
+                        self.quantization_config,
+                        self.quantized_weight_basenames,
+                    )
                 )
-            )
+            else:
+                yield convert_to_hf_views(self.args, self.model_name, name, param, views)
 
 
 def _load_or_allocate_params(param_infos: Sequence[ParamInfo], megatron_local_weights) -> list[torch.Tensor]:
@@ -162,9 +174,7 @@ def _materialize_expert_batch(
     all_names: list = [None] * ep.size
     dist.all_gather_object(all_names, names, group=ep.group)
     for ep_names in all_names:
-        assert len(ep_names) == len(
-            names
-        ), f"EP-asymmetric expert batch: {len(names)} params locally vs {len(ep_names)} on a peer rank"
+        assert len(ep_names) == len(names), f"EP-asymmetric expert batch: {len(names)} params locally vs {len(ep_names)} on a peer rank"
 
     all_gathered: list[list[tuple[str, torch.Tensor]]] = [[] for _ in range(ep.size)]
     handles = []
@@ -179,9 +189,7 @@ def _materialize_expert_batch(
     return [named for per_rank in all_gathered for named in per_rank]
 
 
-def _pack_param_infos_by_size(
-    args: Namespace, param_infos: list[ParamInfo], *, size_multiplier: int = 1
-) -> list[list[ParamInfo]]:
+def _pack_param_infos_by_size(args: Namespace, param_infos: list[ParamInfo], *, size_multiplier: int = 1) -> list[list[ParamInfo]]:
     """Greedy size packing into gather batches ≤ update_weight_buffer_size."""
     batches: list[list[ParamInfo]] = [[]]
     buffer_size = 0
@@ -203,9 +211,7 @@ def _get_param_full_size(info: ParamInfo) -> int:
     return info.size * tp_size
 
 
-def _get_megatron_local_param_infos(
-    args: Namespace, model: Sequence[torch.nn.Module], *, gather_pp: bool
-) -> tuple[list[ParamInfo], list[ParamInfo]]:
+def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Module], *, gather_pp: bool) -> tuple[list[ParamInfo], list[ParamInfo]]:
     """Collect param metadata, exchanged across PP when gather_pp.
 
     Returns (non_expert_infos, expert_infos); expert infos stay EP-local.
@@ -235,9 +241,7 @@ def _get_megatron_local_param_infos(
 
     if gather_pp and pp_size > 1:
         param_infos_list = [None] * pp_size
-        dist.all_gather_object(
-            obj=(rank, param_infos), object_list=param_infos_list, group=get_parallel_state().pp.group
-        )
+        dist.all_gather_object(obj=(rank, param_infos), object_list=param_infos_list, group=get_parallel_state().pp.group)
         for src_rank, infos in param_infos_list:
             if src_rank == rank:
                 continue
@@ -267,17 +271,11 @@ def _check_param_infos_consistent(param_infos: list[ParamInfo]) -> None:
     for i, param_info in enumerate(param_infos):
         for infos in all_param_info_list:
             assert infos[i].name == param_info.name, f"Parameter name mismatch: {infos[i].name} != {param_info.name}"
-            assert (
-                infos[i].shape == param_info.shape
-            ), f"Parameter shape mismatch: {infos[i].shape} != {param_info.shape}"
-            assert (
-                infos[i].dtype == param_info.dtype
-            ), f"Parameter dtype mismatch: {infos[i].dtype} != {param_info.dtype}"
+            assert infos[i].shape == param_info.shape, f"Parameter shape mismatch: {infos[i].shape} != {param_info.shape}"
+            assert infos[i].dtype == param_info.dtype, f"Parameter dtype mismatch: {infos[i].dtype} != {param_info.dtype}"
 
 
-def _gather_with_stride(
-    param_partitions: list[torch.Tensor], partition_dim: int, partition_stride: int
-) -> torch.Tensor:
+def _gather_with_stride(param_partitions: list[torch.Tensor], partition_dim: int, partition_stride: int) -> torch.Tensor:
     """Gather partitions respecting partition_stride (strided/interleaved TP sharding)."""
     if partition_stride == 1:
         return torch.cat(param_partitions, dim=partition_dim)
@@ -302,12 +300,7 @@ def _is_unmarked_grouped_expert_weight(name: str, param: torch.nn.Parameter) -> 
     the defaults (tensor_model_parallel=False, partition_dim=-1) and the tensor claims to
     be unsharded. It is expert-TP sharded whenever etp > 1, so the gather must still run.
     """
-    return (
-        is_routed_expert_param(name)
-        and ("linear_fc1.weight" in name or "linear_fc2.weight" in name)
-        and not param.tensor_model_parallel
-        and get_parallel_state().etp.size > 1
-    )
+    return is_routed_expert_param(name) and ("linear_fc1.weight" in name or "linear_fc2.weight" in name) and not param.tensor_model_parallel and get_parallel_state().etp.size > 1
 
 
 def _check_and_fix_partition(args: Namespace, name: str, partition_stride: int, partition_dim: int) -> tuple[int, int]:
@@ -348,9 +341,7 @@ def all_gather_params_async(
         if "expert_bias" in info.name:
             gather_tasks.append((info, param, None, None, None, None))
             handles.append(None)
-        elif getattr(param, "parallel_mode", None) == "duplicated" or (
-            not param.tensor_model_parallel and not _is_unmarked_grouped_expert_weight(info.name, param)
-        ):
+        elif getattr(param, "parallel_mode", None) == "duplicated" or (not param.tensor_model_parallel and not _is_unmarked_grouped_expert_weight(info.name, param)):
             gather_tasks.append((info, param.data, None, None, None, None))
             handles.append(None)
         else:
@@ -385,9 +376,7 @@ def all_gather_params_async(
             # No all_gather needed
             param = direct_param
         else:
-            partition_stride, partition_dim = _check_and_fix_partition(
-                args, info.name, partition_stride, partition_dim
-            )
+            partition_stride, partition_dim = _check_and_fix_partition(args, info.name, partition_stride, partition_dim)
             param = _gather_with_stride(param_partitions, partition_dim, partition_stride)
 
         gathered_params.append(param)

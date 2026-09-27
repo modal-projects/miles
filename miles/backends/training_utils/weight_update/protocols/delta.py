@@ -9,6 +9,7 @@ from argparse import Namespace
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from copy import copy
 
 import numpy as np
 import safetensors.numpy
@@ -22,10 +23,12 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import Weigh
 from miles.backends.training_utils.weight_update.protocol import WeightTransferProtocol
 from miles.backends.training_utils.weight_update.session import check_weight_sync_results
 from miles.backends.training_utils.weight_update.utils import get_data_replica_rank_and_size
+from miles.backends.training_utils.weight_update.views import load_weight_views
 from miles.utils import async_utils
 from miles.utils.disk_delta import (
     NUM_WORKERS,
     checkpoint_tensor_layout,
+    checkpoint_tensor_names,
     checksum,
     make_tensor_reader,
     overwrite_encode,
@@ -92,14 +95,34 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
     # the sync never runs inside the pause/begin session frame.
     use_weight_update_session = False
 
-    def __init__(self, args: Namespace) -> None:
+    def __init__(
+        self,
+        args: Namespace,
+        *,
+        _view_name: str | None = None,
+        _source_only_suffixes: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(args)
+        self._view_name = _view_name
+        self._source_only_suffixes = _source_only_suffixes
+        source_tensor_prefixes = getattr(
+            args, "hf_export_source_tensor_prefixes", ()
+        ) or ()
+        if isinstance(source_tensor_prefixes, (str, bytes)) or any(
+            not isinstance(prefix, str) or not prefix
+            for prefix in source_tensor_prefixes
+        ):
+            raise ValueError(
+                "hf_export_source_tensor_prefixes must be a sequence of nonempty strings"
+            )
+        self._source_tensor_prefixes = tuple(source_tensor_prefixes)
         self._pool: ThreadPoolExecutor | None = None
         self.delta_dir = args.update_weight_disk_dir
         os.makedirs(self.delta_dir, exist_ok=True)
         self.delta_encoding = args.update_weight_delta_encoding
         self.checksum_algorithm = args.update_weight_delta_checksum
         self._snapshot: dict[str, np.ndarray] = {}
+        self._published_files: tuple[str, ...] = ()
         self._baseline_captured = False
         # Post-write hook: object-store-backed shared filesystems lack cross-host
         # read-after-write consistency, so written files need an explicit step
@@ -109,6 +132,18 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
             from miles.utils.function_registry import load_function
 
             self._post_write_hook = load_function(args.custom_update_weight_post_write_path)
+        self._view_protocols: dict[str, UpdateWeightFromDiskDelta] = {}
+        if _view_name is None:
+            for view in load_weight_views(getattr(args, "update_weight_views", None)):
+                view_args = copy(args)
+                view_args.hf_checkpoint = view.checkpoint
+                view_args.update_weight_views = None
+                view_args.custom_update_weight_post_write_path = None
+                self._view_protocols[view.name] = UpdateWeightFromDiskDelta(
+                    view_args,
+                    _view_name=view.name,
+                    _source_only_suffixes=view.source_only_suffixes,
+                )
 
     def connect(
         self,
@@ -121,6 +156,8 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
     ) -> None:
         if rollout_engines and not self.args.update_weight_local_checkpoint_dir:
             raise ValueError("Disk-delta engine reload requires --update-weight-local-checkpoint-dir.")
+        if self._view_protocols and rollout_engines:
+            raise ValueError("multiple rollout weight views require an opaque external endpoint")
 
         # No NCCL groups: the transport is the shared filesystem. The engine lock the NCCL path
         # uses isn't needed either — the engine-side apply is serialized by a per-host flock
@@ -129,18 +166,43 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         self.group_name = "miles-disk-delta"
         replica_rank, _ = get_data_replica_rank_and_size(parallel_state, placement)
         self.is_sender = replica_rank == 0
+        for protocol in self._view_protocols.values():
+            protocol.rollout_engines = ()
+            protocol.group_name = f"miles-disk-delta-{protocol._view_name}"
+            protocol.is_sender = self.is_sender
 
     def begin_sync(self, weight_version: int, iter_buckets) -> bool:
         # The first call only captures the baseline snapshot the next sync diffs against.
         if not self._baseline_captured:
-            self._capture_baseline(iter_buckets)
+            if self._view_protocols:
+                self._capture_view_baselines(iter_buckets)
+            else:
+                self._capture_baseline(iter_buckets)
             self._baseline_captured = True
             return False
-        self._begin_encode(weight_version)
+        if self._view_protocols:
+            self._version_dir = os.path.join(self.delta_dir, f"weight_v{weight_version:06d}")
+            for protocol in self._view_protocols.values():
+                protocol._begin_encode(weight_version)
+        else:
+            self._begin_encode(weight_version)
         return True
 
-    def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
+    def send_bucket(
+        self,
+        bucket: list[tuple[str, torch.Tensor]] | dict[str, list[tuple[str, torch.Tensor]]],
+    ) -> None:
         """Submit each tensor of the bucket to the diff/compress pool (pipelined with the gather)."""
+        if self._view_protocols:
+            if not isinstance(bucket, dict) or set(bucket) != set(self._view_protocols):
+                raise ValueError(
+                    f"multi-view disk-delta received the wrong weight views: {sorted(bucket) if isinstance(bucket, dict) else type(bucket).__name__}"
+                )
+            for name, protocol in self._view_protocols.items():
+                protocol.send_bucket(bucket[name])
+            return
+        if isinstance(bucket, dict):
+            raise ValueError("single-view disk-delta received a multi-view bucket")
         for name, tensor in bucket:
             tensor = self._match_checkpoint_layout(name, tensor)
             # The dtype-view overload requires at least one dimension.
@@ -160,6 +222,10 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
 
     def after_base_weights(self) -> None:
         """Drain the in-flight diff/compress work and shut the pool down."""
+        if self._view_protocols:
+            for protocol in self._view_protocols.values():
+                protocol.after_base_weights()
+            return
         while self._inflight:
             self._collect(self._inflight.popleft())
         self._pool.shutdown()
@@ -167,9 +233,45 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
 
     def finalize(self, weight_version: int) -> None:
         """Publish this version and reload any connected engines."""
+        if self._view_protocols:
+            for protocol in self._view_protocols.values():
+                protocol._write_delta_files(weight_version)
+            self._write_view_manifest(weight_version)
+            self._reload_engines(weight_version)
+            metrics = {}
+            for name, protocol in self._view_protocols.items():
+                protocol._record_metrics(weight_version)
+                metrics.update({f"{key}/{name}": value for key, value in protocol.update_weight_metrics.items()})
+            self.update_weight_metrics = metrics
+            return
         self._write_delta_files(weight_version)
         self._reload_engines(weight_version)
         self._record_metrics(weight_version)
+
+    def _write_view_manifest(self, weight_version: int) -> None:
+        """Write the transaction index after every view has written its child index."""
+        if dist.get_rank() == 0:
+            files = {
+                f"view:{view_name}:{file_index}": f"{view_name}/{file_name}"
+                for view_name, protocol in self._view_protocols.items()
+                for file_index, file_name in enumerate(protocol._published_files)
+            }
+            index = {
+                "metadata": {
+                    "version": f"{weight_version:06d}",
+                    "base_version": f"{weight_version - 1:06d}",
+                    "delta_encoding": self.delta_encoding,
+                    "compression_format": "zstd",
+                    "checksum_format": self.checksum_algorithm,
+                    "weight_views": sorted(self._view_protocols),
+                },
+                "weight_map": files,
+            }
+            _atomic_write(
+                os.path.join(self._version_dir, "model.safetensors.index.json"),
+                json.dumps(index).encode(),
+            )
+        dist.barrier(group=get_gloo_group())
 
     def _capture_baseline(self, iter_buckets) -> None:
         """Capture the baseline snapshot the first delta diffs against (no publish), and clear any
@@ -272,6 +374,93 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
             )
         dist.barrier(group=get_gloo_group())
 
+    def _capture_view_baselines(self, iter_buckets) -> None:
+        """Seed every encoded view from its own canonical checkpoint in one gather pass."""
+        if dist.get_rank() == 0:
+            shutil.rmtree(self.delta_dir, ignore_errors=True)
+            os.makedirs(self.delta_dir, exist_ok=True)
+            if self._post_write_hook is not None:
+                self._post_write_hook(self.args, self.delta_dir, [])
+        dist.barrier(group=get_gloo_group())
+
+        readers = {}
+        local_errors: dict[str, ValueError] = {}
+        if self.is_sender:
+            for name, protocol in self._view_protocols.items():
+                try:
+                    readers[name] = make_tensor_reader(protocol.args.hf_checkpoint)
+                except ValueError as error:
+                    local_errors[name] = error
+
+        for bucket_by_view in iter_buckets(materialize=self.is_sender):
+            if not self.is_sender:
+                continue
+            if set(bucket_by_view) != set(self._view_protocols):
+                raise ValueError(f"baseline iterator returned the wrong weight views: {sorted(bucket_by_view)}")
+            for name, bucket in bucket_by_view.items():
+                if name in local_errors:
+                    continue
+                protocol = self._view_protocols[name]
+                try:
+                    for tensor_name, tensor in bucket:
+                        tensor = protocol._match_checkpoint_layout(tensor_name, tensor)
+                        baseline = readers[name](
+                            tensor_name,
+                            expected_dtype=_safetensors_dtype(tensor.dtype),
+                            expected_shape=tuple(tensor.shape),
+                        )
+                        emitted_nbytes = tensor.numel() * tensor.element_size()
+                        if emitted_nbytes != baseline.nbytes:
+                            raise ValueError(
+                                f"Checkpoint tensor {tensor_name!r} has {baseline.nbytes} bytes; trainer emitted {emitted_nbytes} bytes"
+                            )
+                        protocol._snapshot[tensor_name] = baseline
+                except ValueError as error:
+                    local_errors[name] = error
+
+        if self.is_sender:
+            for name, protocol in self._view_protocols.items():
+                if name in local_errors:
+                    continue
+                canonical_names = checkpoint_tensor_names(protocol.args.hf_checkpoint)
+                missing = canonical_names - protocol._snapshot.keys()
+                unexpected_missing = sorted(
+                    tensor_name
+                    for tensor_name in missing
+                    if not (
+                        tensor_name.endswith(protocol._source_only_suffixes)
+                        or tensor_name.startswith(protocol._source_tensor_prefixes)
+                    )
+                )
+                if unexpected_missing:
+                    local_errors[name] = ValueError(
+                        f"trainer export omitted canonical tensors: {unexpected_missing[:5]}"
+                    )
+
+        local_error_message = None
+        if local_errors:
+            local_error_message = "; ".join(
+                f"{name}: {type(error).__name__}: {error}" for name, error in sorted(local_errors.items())
+            )
+        group = get_gloo_group()
+        error_messages: list[str | None] = [None] * dist.get_world_size(group=group)
+        dist.all_gather_object(error_messages, local_error_message, group=group)
+        if any(error_messages):
+            failed_rank, error_message = next(
+                (rank, message) for rank, message in enumerate(error_messages) if message is not None
+            )
+            raise RuntimeError(f"Disk-delta view baseline validation failed on rank {failed_rank}: {error_message}")
+
+        if dist.get_rank() == 0:
+            for name, protocol in self._view_protocols.items():
+                logger.info(
+                    "[disk delta view=%s] captured baseline snapshot of %d tensors from %s",
+                    name,
+                    len(protocol._snapshot),
+                    protocol.args.hf_checkpoint,
+                )
+        dist.barrier(group=group)
+
     def _match_checkpoint_layout(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
         """Match one emitted tensor to the immutable checkpoint byte layout.
 
@@ -309,7 +498,11 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         compress in parallel (each is a few big GIL-releasing numpy/zstd calls)."""
         if self._pool is not None:
             self._pool.shutdown(wait=False, cancel_futures=True)
-        self._version_dir = os.path.join(self.delta_dir, f"weight_v{weight_version:06d}")
+        self._version_dir = os.path.join(
+            self.delta_dir,
+            f"weight_v{weight_version:06d}",
+            *([self._view_name] if self._view_name is not None else []),
+        )
         if self.is_sender:
             os.makedirs(self._version_dir, exist_ok=True)
         self._delta: dict[str, np.ndarray] = {}  # changed tensor name -> compressed diff
@@ -404,6 +597,8 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
 
         maps: list = [None] * world
         dist.all_gather_object(maps, {name: fname for name in self._delta}, group=group)
+        published_payloads = sorted({file_name for weight_map in maps for file_name in weight_map.values()})
+        self._published_files = ("model.safetensors.index.json", *published_payloads)
         if rank == 0:
             index = {
                 "metadata": {

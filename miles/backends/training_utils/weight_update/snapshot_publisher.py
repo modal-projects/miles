@@ -1,15 +1,19 @@
 import json
 import logging
 import shutil
-from collections.abc import Mapping
+import struct
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import safetensors.torch
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 
 from miles.backends.training_utils.checkpoint_io import write_checkpoint_dir
 from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase
+from miles.utils.hf_utils.config import HF_EXPORT_COMPLETE_MARKER
 from miles.utils.lora.utils import AdapterSpec, get_adapter_target_modules
 
 logger = logging.getLogger(__name__)
@@ -20,7 +24,43 @@ HF_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
 
 def _is_hf_metadata_file(path: Path) -> bool:
     # The base checkpoint's weight index must not overwrite the exported shard mapping.
-    return path.is_file() and path.suffix not in HF_WEIGHT_SUFFIXES and not path.name.endswith(".index.json")
+    return (
+        path.is_file()
+        and path.name != HF_EXPORT_COMPLETE_MARKER
+        and path.suffix not in HF_WEIGHT_SUFFIXES
+        and not path.name.endswith(".index.json")
+    )
+
+
+def _checkpoint_weight_map(checkpoint: Path) -> dict[str, str]:
+    index_path = checkpoint / "model.safetensors.index.json"
+    if index_path.is_file():
+        index = json.loads(index_path.read_text())
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"checkpoint index has no weight map: {index_path}")
+        return {str(name): str(shard) for name, shard in weight_map.items()}
+
+    weight_map = {}
+    for shard in sorted(checkpoint.glob("*.safetensors")):
+        for name in _safetensors_tensor_sizes(shard):
+            if name in weight_map:
+                raise ValueError(f"duplicate tensor {name!r} in {checkpoint}")
+            weight_map[name] = shard.name
+    if not weight_map:
+        raise ValueError(f"checkpoint has no safetensors weights: {checkpoint}")
+    return weight_map
+
+
+def _safetensors_tensor_sizes(path: Path) -> dict[str, int]:
+    with path.open("rb") as file:
+        (header_size,) = struct.unpack("<Q", file.read(8))
+        header = json.loads(file.read(header_size))
+    return {
+        name: int(info["data_offsets"][1]) - int(info["data_offsets"][0])
+        for name, info in header.items()
+        if name != "__metadata__"
+    }
 
 
 class SnapshotPublisher:
@@ -28,6 +68,18 @@ class SnapshotPublisher:
         assert iterator.placement.is_full_gather, "publishing requires full weights on rank 0"
         self._iterator = iterator
         self._adapter_config = adapter_config
+
+    @property
+    def has_weight_views(self) -> bool:
+        return bool(self._iterator.weight_views)
+
+    def mark_weight_views_complete(self, path: str | Path) -> None:
+        """Publish view checkpoints after their enclosing write commits."""
+        if not self._iterator.weight_views or dist.get_rank() != 0:
+            return
+        path = Path(path)
+        for view in self._iterator.weight_views:
+            (path / view.name / HF_EXPORT_COMPLETE_MARKER).touch()
 
     def publish_adapter(self, adapter: AdapterSpec | None, path: str, metadata: dict | None = None) -> None:
         write_checkpoint_dir(
@@ -58,10 +110,26 @@ class SnapshotPublisher:
             (path / "adapter_config.json").write_text(json.dumps(adapter_config))
             (path / "adapter_model.safetensors").write_bytes(adapter_bytes)
 
-    def write_model(self, path: str | Path, *, weights: Mapping[str, torch.Tensor], hf_checkpoint: str) -> None:
+    def write_model(
+        self,
+        path: str | Path,
+        *,
+        weights: Mapping[str, torch.Tensor],
+        hf_checkpoint: str,
+        source_tensor_prefixes: Sequence[str] = (),
+    ) -> None:
         """Collectively write HF model shards into the caller's checkpoint directory."""
         path = Path(path)
         is_writer = dist.get_rank() == 0
+
+        if self._iterator.weight_views:
+            self._write_model_views(
+                path,
+                weights=weights,
+                is_writer=is_writer,
+                source_tensor_prefixes=source_tensor_prefixes,
+            )
+            return
 
         weight_map: dict[str, str] = {}
         total_size = 0
@@ -90,10 +158,155 @@ class SnapshotPublisher:
             assert weight_map, f"HF export to {path} produced no weights"
             base_checkpoint = Path(hf_checkpoint)
             if base_checkpoint.is_dir():
+                if source_tensor_prefixes:
+                    total_size += self._copy_source_only_weights(
+                        base_checkpoint,
+                        path,
+                        weight_map,
+                        source_only_suffixes=(),
+                        source_tensor_prefixes=source_tensor_prefixes,
+                    )
                 for meta_file in base_checkpoint.iterdir():
                     if _is_hf_metadata_file(meta_file):
                         shutil.copy2(meta_file, path / meta_file.name)
             else:
+                if source_tensor_prefixes:
+                    raise ValueError(
+                        "source_tensor_prefixes requires a local HF checkpoint"
+                    )
                 logger.warning(f"hf_checkpoint {hf_checkpoint} is not a local dir; metadata not copied to {path}")
             index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
             (path / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
+
+    def _write_model_views(
+        self,
+        path: Path,
+        *,
+        weights: Mapping[str, torch.Tensor],
+        is_writer: bool,
+        source_tensor_prefixes: Sequence[str],
+    ) -> None:
+        views = {view.name: view for view in self._iterator.weight_views}
+        weight_maps: dict[str, dict[str, str]] = {name: {} for name in views}
+        total_sizes = {name: 0 for name in views}
+        shard_index = 0
+        write_error = None
+
+        for tensors_by_view in self._iterator.iter_hf_weight_views(weights):
+            if not is_writer or write_error is not None:
+                continue
+            shard_index += 1
+            shard_name = f"model-{shard_index:05d}.safetensors"
+            for view_name, hf_named_tensors in tensors_by_view.items():
+                shard_tensors = {name: tensor.detach().to("cpu").contiguous() for name, tensor in hf_named_tensors}
+                for name, tensor in shard_tensors.items():
+                    weight_maps[view_name][name] = shard_name
+                    total_sizes[view_name] += tensor.numel() * tensor.element_size()
+                try:
+                    view_dir = path / view_name
+                    view_dir.mkdir(parents=True, exist_ok=True)
+                    safetensors.torch.save_file(shard_tensors, view_dir / shard_name)
+                except Exception as exc:
+                    write_error = exc
+                del shard_tensors
+
+        if write_error is not None:
+            raise write_error
+        if not is_writer:
+            return
+
+        for view_name, view in views.items():
+            weight_map = weight_maps[view_name]
+            assert weight_map, f"HF export to {path / view_name} produced no weights"
+            view_dir = path / view_name
+            base_checkpoint = Path(view.checkpoint)
+            total_sizes[view_name] += self._copy_source_only_weights(
+                base_checkpoint,
+                view_dir,
+                weight_map,
+                source_only_suffixes=view.source_only_suffixes,
+                source_tensor_prefixes=source_tensor_prefixes,
+            )
+            self._copy_metadata(base_checkpoint, view_dir)
+            index = {
+                "metadata": {"total_size": total_sizes[view_name]},
+                "weight_map": weight_map,
+            }
+            (view_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
+
+    @staticmethod
+    def _copy_source_only_weights(
+        base_checkpoint: Path,
+        path: Path,
+        weight_map: dict[str, str],
+        *,
+        source_only_suffixes: tuple[str, ...],
+        source_tensor_prefixes: Sequence[str] = (),
+    ) -> int:
+        if isinstance(source_tensor_prefixes, (str, bytes)) or any(
+            not isinstance(prefix, str) or not prefix
+            for prefix in source_tensor_prefixes
+        ):
+            raise ValueError(
+                "source_tensor_prefixes must be a sequence of nonempty strings"
+            )
+        source_tensor_prefixes = tuple(source_tensor_prefixes)
+        source_map = _checkpoint_weight_map(base_checkpoint)
+        unexpected = sorted(set(weight_map) - set(source_map))
+        if unexpected:
+            raise ValueError(
+                f"live export contains tensors absent from {base_checkpoint}: {unexpected[:5]}"
+            )
+
+        missing = set(source_map) - set(weight_map)
+        for prefix in source_tensor_prefixes:
+            if not any(name.startswith(prefix) for name in source_map):
+                raise ValueError(
+                    f"source tensor prefix has no matching weights: {prefix!r}"
+                )
+        unexpected_missing = sorted(
+            name
+            for name in missing
+            if not (
+                name.endswith(source_only_suffixes)
+                or name.startswith(source_tensor_prefixes)
+            )
+        )
+        if unexpected_missing:
+            raise ValueError(
+                f"live export omitted canonical tensors from {base_checkpoint}: "
+                f"{unexpected_missing[:5]}"
+            )
+
+        missing_by_shard: dict[str, list[str]] = defaultdict(list)
+        for name in missing:
+            missing_by_shard[source_map[name]].append(name)
+
+        total_size = 0
+        for index, (source_name, names) in enumerate(sorted(missing_by_shard.items()), start=1):
+            source = base_checkpoint / source_name
+            tensor_sizes = _safetensors_tensor_sizes(source)
+            names = sorted(names)
+            total_size += sum(tensor_sizes[name] for name in names)
+            shard_name = f"model-static-{index:05d}.safetensors"
+            if set(names) == set(tensor_sizes):
+                shutil.copy2(source, path / shard_name)
+            else:
+                with safe_open(source, framework="pt", device="cpu") as file:
+                    tensors = {name: file.get_tensor(name) for name in names}
+                safetensors.torch.save_file(tensors, path / shard_name)
+            weight_map.update({name: shard_name for name in names})
+        return total_size
+
+    @staticmethod
+    def _copy_metadata(base_checkpoint: Path, path: Path) -> None:
+        if not base_checkpoint.is_dir():
+            logger.warning(
+                "hf_checkpoint %s is not a local dir; metadata not copied to %s",
+                base_checkpoint,
+                path,
+            )
+            return
+        for meta_file in base_checkpoint.iterdir():
+            if _is_hf_metadata_file(meta_file):
+                shutil.copy2(meta_file, path / meta_file.name)

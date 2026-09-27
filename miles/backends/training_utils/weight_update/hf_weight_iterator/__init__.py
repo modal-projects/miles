@@ -12,7 +12,9 @@ import torch
 from miles.backends.training_utils.weight_update.hf_weight_iterator.bucketing import (
     AtomicUpdateGroup,
     assemble_atomic_update_groups,
+    assemble_atomic_update_group_views,
     pack_units_by_size,
+    pack_view_units_by_size,
 )
 
 
@@ -33,6 +35,17 @@ class WeightUpdatePlacement:
     @property
     def is_full_gather(self) -> bool:
         return self.gather_pp and self.gather_tp and self.gather_ep
+
+
+@dataclasses.dataclass(frozen=True)
+class WeightView:
+    """One serialized representation of the policy consumed by rollout."""
+
+    name: str
+    checkpoint: str
+    quantization_config: dict | None
+    quantized_weight_basenames: frozenset[str] | None = None
+    source_only_suffixes: tuple[str, ...] = ()
 
 
 def resolve_placement(required: WeightUpdatePlacement, forced: WeightUpdatePlacement | None) -> WeightUpdatePlacement:
@@ -68,12 +81,14 @@ class HfWeightIteratorBase(ABC):
         placement: WeightUpdatePlacement,
         model_name: str,
         quantization_config: dict | None,
+        weight_views: Sequence[WeightView] = (),
     ) -> None:
         self.args = args
         self.model = model
         self.placement = placement
         self.model_name = model_name
         self.quantization_config = quantization_config
+        self.weight_views = tuple(weight_views)
 
     def iter_hf_weights(
         self,
@@ -103,6 +118,20 @@ class HfWeightIteratorBase(ABC):
         hf_param_units = assemble_atomic_update_groups(hf_param_units, atomic_update_groups)
         yield from pack_units_by_size(hf_param_units, self.args.update_weight_buffer_size)
 
+    def iter_hf_weight_views(
+        self,
+        weights: Mapping[str, torch.Tensor] | None,
+        *,
+        materialize: bool = True,
+    ) -> Iterator[dict[str, list[tuple[str, torch.Tensor]]]]:
+        """Gather each trainer parameter once and encode it for every rollout view."""
+        if not self.weight_views:
+            raise ValueError("iter_hf_weight_views requires at least one configured view")
+        view_units = self._iter_hf_param_view_units(weights, materialize=materialize)
+        atomic_groups = self._hf_atomic_update_groups() if materialize else []
+        view_units = assemble_atomic_update_group_views(view_units, atomic_groups)
+        yield from pack_view_units_by_size(view_units, self.args.update_weight_buffer_size)
+
     @abstractmethod
     def _iter_hf_param_units(
         self,
@@ -115,6 +144,15 @@ class HfWeightIteratorBase(ABC):
         ``self.placement``. Collectives must run lockstep on every rank;
         ``materialize=False`` joins them but yields nothing."""
 
+    def _iter_hf_param_view_units(
+        self,
+        weights: Mapping[str, torch.Tensor] | None,
+        *,
+        materialize: bool,
+    ) -> Iterator[dict[str, list[tuple[str, torch.Tensor]]]]:
+        """Backend hook for one mapped parameter encoded into every view."""
+        raise NotImplementedError(f"{type(self).__name__} does not support multiple rollout weight views")
+
     def _hf_atomic_update_groups(self) -> list[AtomicUpdateGroup]:
         """Backend hook: HF-namespace atomic groups for this model. Default none."""
         return []
@@ -122,11 +160,7 @@ class HfWeightIteratorBase(ABC):
     def materialize_adapter(self, adapter, *, materialize: bool = True) -> dict[str, torch.Tensor]:
         """One adapter as ``{hf_key: tensor}``, skipping the transport bucketing.
         Collective: ``materialize=False`` joins the gathers, returns {}."""
-        return {
-            name: tensor
-            for unit in self._iter_hf_adapter_units(adapter, materialize=materialize)
-            for name, tensor in unit
-        }
+        return {name: tensor for unit in self._iter_hf_adapter_units(adapter, materialize=materialize) for name, tensor in unit}
 
     @abstractmethod
     def _iter_hf_adapter_units(self, adapter, *, materialize: bool) -> Iterator[list[tuple[str, torch.Tensor]]]:

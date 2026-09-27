@@ -13,12 +13,29 @@ from ...sglang import (
 )
 
 
-def quantize_params_fp8(args, megatron_name, converted_named_params, quantization_config):
+def quantize_params_fp8(
+    args,
+    megatron_name,
+    converted_named_params,
+    quantization_config,
+    quantized_weight_basenames=None,
+):
     assert quantization_config["quant_method"] == "fp8"
     fmt = quantization_config.get("fmt", "e4m3")
     assert fmt == "e4m3", f"Unsupported FP8 format: {fmt}"
     assert quantization_config["activation_scheme"] == "dynamic"
     weight_block_size = quantization_config.get("weight_block_size", None)
+
+    if quantized_weight_basenames is not None:
+        output = []
+        for converted_name, param in converted_named_params:
+            if converted_name.endswith("_scale"):
+                continue
+            if converted_name.endswith(".weight") and converted_name.removesuffix(".weight") in quantized_weight_basenames:
+                output.extend(_quantize_param(args, converted_name, param, weight_block_size))
+            else:
+                output.append((converted_name, param))
+        return output
 
     decoder_layers_pattern = r"module\.module\.decoder\.layers\.(\d+)\.(.+)"
     match = re.match(decoder_layers_pattern, megatron_name)
@@ -118,11 +135,7 @@ def _quantize_param(args, name, weight, weight_block_size):
             qweight, scale = quant_weight_ue8m0(weight, weight_block_size=weight_block_size)
             scale = transform_scale_ue8m0(scale, mn=qweight.shape[-2])
         # TODO: this [128, 128] is hacky. need improve
-        elif (
-            os.environ["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "0"
-            and per_block_cast_to_fp8 is not None
-            and list(weight_block_size) == [128, 128]
-        ):
+        elif os.environ["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "0" and per_block_cast_to_fp8 is not None and list(weight_block_size) == [128, 128]:
             qweight, scale = per_block_cast_to_fp8(weight)
         else:
             qweight, scale = blockwise_cast_to_fp8_triton(weight, weight_block_size)
@@ -137,10 +150,7 @@ def _quantize_param(args, name, weight, weight_block_size):
 
 
 def _get_scale_format(args, name, weight_block_size):
-    if not (
-        should_deepgemm_weight_requant_ue8m0
-        and should_deepgemm_weight_requant_ue8m0(weight_block_size=weight_block_size)
-    ):
+    if not (should_deepgemm_weight_requant_ue8m0 and should_deepgemm_weight_requant_ue8m0(weight_block_size=weight_block_size)):
         return None  # use default fp32 scale format
 
     if ".experts." not in name:
@@ -148,7 +158,5 @@ def _get_scale_format(args, name, weight_block_size):
         return "ue8m0"
 
     # MoE expert weights: only ue8m0 when runner is deep_gemm
-    is_deepgemm_moe_backend = args.sglang_moe_runner_backend == "deep_gemm" or (
-        args.sglang_moe_runner_backend == "auto" and args.sglang_moe_a2a_backend in ["deepep", "mooncake"]
-    )
+    is_deepgemm_moe_backend = args.sglang_moe_runner_backend == "deep_gemm" or (args.sglang_moe_runner_backend == "auto" and args.sglang_moe_a2a_backend in ["deepep", "mooncake"])
     return "ue8m0" if is_deepgemm_moe_backend else None

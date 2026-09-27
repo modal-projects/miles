@@ -95,6 +95,28 @@ def quant_fp8(weight, strategy, block_size=None):
         return block_fp8(weight, block_size)
 
 
+def should_quantize(name, weight):
+    """Whether this HF tensor is a matrix weight supported by the FP8 encoder."""
+    return (
+        name.endswith(".weight")
+        and weight.ndim == 2
+        and "layernorm" not in name
+        and "embed" not in name
+        and "router" not in name
+        and "mlp.gate." not in name
+        and "norm" not in name
+        and "lm_head" not in name
+        and "eh_proj" not in name
+        and "weights_proj" not in name
+        and "head." not in name
+        and "wo_a" not in name
+        and "ffn.gate." not in name
+        and "compressor." not in name
+        and "vision_tower" not in name
+        and "mm_projector" not in name
+    )
+
+
 class ConversionResult:
     def __init__(self):
         self.lock = threading.Lock()
@@ -127,23 +149,7 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
 
     modules_to_not_convert = []
     for key in weights.keys():
-        if (
-            "weight" in key
-            and "layernorm" not in key
-            and "embed" not in key
-            and "router" not in key
-            and "mlp.gate." not in key
-            and "norm" not in key
-            and "lm_head" not in key
-            and "eh_proj" not in key
-            and "weights_proj" not in key
-            and "head." not in key
-            and "wo_a" not in key
-            and "ffn.gate." not in key
-            and "compressor." not in key
-            and "vision_tower" not in key
-            and "mm_projector" not in key
-        ):
+        if should_quantize(key, weights[key]):
             qw, s = quant_fp8(weights[key], strategy, block_size)
             q_weights[key] = qw
             if block_size:

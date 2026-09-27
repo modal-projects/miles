@@ -121,6 +121,16 @@ class TestComputeSamplesFromRecords:
         assert s.loss_mask == [1, 1]
         assert s.status == Sample.Status.COMPLETED
 
+    def test_single_record_preserves_rollout_source(self):
+        record = _make_record(prompt_token_ids=[1, 2], output_token_ids=[10])
+        record.response["choices"][0]["meta_info"]["rollout_source"] = "blackwell-nvfp4"
+
+        (sample,) = compute_samples_from_openai_records(
+            _ARGS, [record], _mock_tokenizer()
+        )
+
+        assert sample.metadata["rollout_source"] == "blackwell-nvfp4"
+
     def test_single_record_scalar_weight_version_becomes_span(self):
         """A scalar weight_version in the record's meta_info synthesizes one span over the output tokens."""
         tok = _mock_tokenizer()
