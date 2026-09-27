@@ -274,6 +274,16 @@ class TestComputeSpecSessionServer:
         assert config.backend_url == "https://rollout.example/api"
         assert config.rollout_session_affinity_header == "Modal-Session-ID"
 
+    def test_materialization_uses_one_native_thread_per_executor_worker(self):
+        spec = spec_session_server(_make_session_server_args())
+
+        assert spec.env_var(None) == {
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+        }
+
     def test_launch_command_wires_the_router_backend_and_roundtrips(self):
         """The session server command targets the router addr from pool_addrs and its config parses back losslessly."""
         args = make_args(

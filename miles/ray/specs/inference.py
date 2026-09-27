@@ -249,7 +249,12 @@ def spec_session_server(args) -> CommandWorkerSpec:
         port_infos=[
             _compute_session_server_primary_port_info(args),
         ],
-        env_var=lambda _ctx: {},
+        env_var=lambda _ctx: {
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+        },
         scheduling=SchedulingSpec(
             num_cells=(
                 args.session_server_workers
