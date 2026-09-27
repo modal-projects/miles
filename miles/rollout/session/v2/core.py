@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -79,11 +80,35 @@ class SessionCoreV2(SessionCore):
         """Samples op: assemble one raw sample per leaf, then run the
         pick/post-process hook pipeline and encode the result.
 
-        Synchronous on the server loop (no await), so the session read cannot
-        interleave with chat commits. Deterministic assembly/hook failures map
-        to 422; unknown exceptions propagate.
+        Assembly holds this session's lock for a consistent tree view, but runs
+        off the shared server event loop so other sessions remain responsive.
         """
         session = self.registry.get_session(session_id)
+        async with session.lock:
+            work = asyncio.create_task(
+                asyncio.to_thread(
+                    self._collect_samples_sync,
+                    session_id,
+                    session,
+                    max_seq_len,
+                    agent_metadata,
+                )
+            )
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # The thread keeps reading the tree after its awaiter is cancelled.
+                # Keep the session locked until that read actually finishes.
+                await work
+                raise
+
+    def _collect_samples_sync(
+        self,
+        session_id: str,
+        session,
+        max_seq_len: int | None,
+        agent_metadata: dict | None,
+    ) -> Response:
         metadata = self._session_metadata(session_id, session)
         fields = COMPUTED_FIELDS_V2
         if session.sampling_support_replay:
