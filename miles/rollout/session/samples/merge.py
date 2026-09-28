@@ -130,6 +130,8 @@ def _compute_sample_from_openai_record(
     )
     sample.rollout_indexer_topk = get_indexer_topk_from_response(args, choice, sample)
     sample.weight_versions = [WeightVersionsPerCall.from_meta_info(choice["meta_info"], output_end=len(sample.tokens))]
+    if rollout_source := choice["meta_info"].get("rollout_source"):
+        sample.metadata["rollout_source"] = rollout_source
 
     if trim_count > 0:
         sample.strip_last_output_tokens(trim_count, tokenizer)

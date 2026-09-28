@@ -25,49 +25,16 @@ from concurrent.futures import ThreadPoolExecutor
 import safetensors
 import safetensors.torch
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
+
+from miles.utils.fp8_kernel import blockwise_cast_to_fp8_triton
 
 FP8_INFO = torch.finfo(torch.float8_e4m3fn)
 FP8_MAX, FP8_MIN = FP8_INFO.max, FP8_INFO.min
 
 
-def ceildiv(a, b):
-    return -(-a // b)
-
-
 def block_fp8(weight, block_size):
-
-    # per block quant
-    block_n, block_k = block_size[0], block_size[1]
-
-    shape_0, shape_1 = weight.shape
-
-    n_tiles = ceildiv(shape_0, block_n)
-    k_tiles = ceildiv(shape_1, block_k)
-
-    q_weight = F.pad(
-        weight,
-        (0, k_tiles * block_k - shape_1, 0, n_tiles * block_n - shape_0),
-        mode="constant",
-        value=0.0,
-    )
-
-    qweight = q_weight.reshape(n_tiles, block_n, k_tiles, block_k)
-    block_max = torch.max(torch.abs(qweight), dim=1, keepdim=True)[0]
-    block_max = torch.max(block_max, dim=3, keepdim=True)[0]
-
-    scale = block_max.to(torch.float32) / FP8_MAX
-    qweight = (
-        (qweight / scale)
-        .clamp(min=FP8_MIN, max=FP8_MAX)
-        .reshape((n_tiles * block_n, k_tiles * block_k))
-        .to(torch.float8_e4m3fn)
-    )
-    qweight = qweight[:shape_0, :shape_1].clone().detach()
-    scale = scale.reshape(n_tiles, k_tiles)
-
-    return qweight, scale
+    return blockwise_cast_to_fp8_triton(weight, block_size)
 
 
 def channel_fp8(weight):
@@ -93,6 +60,29 @@ def quant_fp8(weight, strategy, block_size=None):
         return channel_fp8(weight)
     else:
         return block_fp8(weight, block_size)
+
+
+def should_quantize(name, weight, block_size=None):
+    """Whether this HF tensor is a matrix weight supported by the FP8 encoder."""
+    return (
+        name.endswith(".weight")
+        and weight.ndim == 2
+        and (block_size is None or all(size % block == 0 for size, block in zip(weight.shape, block_size, strict=True)))
+        and "layernorm" not in name
+        and "embed" not in name
+        and "router" not in name
+        and "mlp.gate." not in name
+        and "norm" not in name
+        and "lm_head" not in name
+        and "eh_proj" not in name
+        and "weights_proj" not in name
+        and "head." not in name
+        and "wo_a" not in name
+        and "ffn.gate." not in name
+        and "compressor." not in name
+        and "vision_tower" not in name
+        and "mm_projector" not in name
+    )
 
 
 class ConversionResult:
@@ -127,22 +117,10 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
 
     modules_to_not_convert = []
     for key in weights.keys():
-        if (
-            "weight" in key
-            and "layernorm" not in key
-            and "embed" not in key
-            and "router" not in key
-            and "mlp.gate." not in key
-            and "norm" not in key
-            and "lm_head" not in key
-            and "eh_proj" not in key
-            and "weights_proj" not in key
-            and "head." not in key
-            and "wo_a" not in key
-            and "ffn.gate." not in key
-            and "compressor." not in key
-            and "vision_tower" not in key
-            and "mm_projector" not in key
+        if should_quantize(
+            key,
+            weights[key],
+            block_size if strategy == "block" else None,
         ):
             qw, s = quant_fp8(weights[key], strategy, block_size)
             q_weights[key] = qw

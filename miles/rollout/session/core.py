@@ -202,6 +202,19 @@ def extract_completion(result: dict) -> tuple:
     return response, choice, assistant_message, completion_token_ids
 
 
+def attach_rollout_source(config, result: dict, choice: dict) -> None:
+    """Copy an opaque endpoint's selected source into response metadata."""
+    header = config.rollout_source_header
+    if header is None:
+        return
+    source = next(
+        (value for key, value in result["headers"].items() if key.lower() == header.lower()),
+        None,
+    )
+    if source is not None:
+        choice.setdefault("meta_info", {})["rollout_source"] = source
+
+
 class SessionCore:
     """HTTP session operations over one ``SessionRegistry``."""
 
@@ -405,6 +418,7 @@ class SessionCore:
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        attach_rollout_source(self.config, result, choice)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,

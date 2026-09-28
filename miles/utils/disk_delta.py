@@ -59,6 +59,68 @@ def checksum(algorithm: str, buf) -> str:
     return hasher.hexdigest()
 
 
+def load_delta_lineage_checksums(delta_dir: str, target_version: int) -> dict[str, tuple[str, str]]:
+    """Return each changed tensor's checksum at ``target_version``.
+
+    Every delta index commits one transition from ``version - 1`` to ``version``.
+    Walking those indexes in order reconstructs the checksum state without
+    materializing the model bytes. Tensors absent from the result still have
+    their canonical checkpoint bytes.
+    """
+    if target_version < 0:
+        raise ValueError("target_version must be non-negative")
+
+    locations: dict[str, tuple[str, str]] = {}
+    for version in range(1, target_version + 1):
+        version_dir = os.path.join(delta_dir, f"weight_v{version:06d}")
+        index_path = os.path.join(version_dir, "model.safetensors.index.json")
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"invalid delta lineage at version {version}: {index_path}") from error
+
+        metadata = index.get("metadata") or {}
+        try:
+            published_version = int(metadata["version"])
+            base_version = int(metadata["base_version"])
+            checksum_format = str(metadata["checksum_format"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"invalid delta metadata in {index_path}") from error
+        if published_version != version or base_version != version - 1:
+            raise ValueError(f"non-contiguous delta lineage in {index_path}: base={base_version}, version={published_version}")
+
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict):
+            raise ValueError(f"invalid weight_map in {index_path}")
+        for name, shard in weight_map.items():
+            if not isinstance(name, str) or not isinstance(shard, str):
+                raise ValueError(f"invalid weight_map entry in {index_path}")
+            locations[name] = (os.path.join(version_dir, shard), checksum_format)
+
+    names_by_shard: dict[tuple[str, str], list[str]] = {}
+    for name, location in locations.items():
+        names_by_shard.setdefault(location, []).append(name)
+
+    state = {}
+    for (shard_path, checksum_format), names in names_by_shard.items():
+        try:
+            with open(shard_path, "rb") as f:
+                (header_len,) = struct.unpack("<Q", f.read(8))
+                header = json.loads(f.read(header_len))
+        except (OSError, struct.error, json.JSONDecodeError) as error:
+            raise ValueError(f"invalid delta shard {shard_path}") from error
+        checksums = header.get("__metadata__") or {}
+        for name in names:
+            if name not in header or name not in checksums:
+                raise ValueError(
+                    f"delta shard {shard_path} has no checksum for {name!r}"
+                )
+            state[name] = (checksum_format, str(checksums[name]))
+
+    return state
+
+
 @cache
 def _tensor_locations(ckpt_dir: str) -> dict[str, tuple[str, int, int, str, tuple[int, ...]]]:
     """Index each tensor's byte range and declared safetensors layout."""
@@ -85,6 +147,11 @@ def checkpoint_tensor_layout(ckpt_dir: str, name: str) -> tuple[str, tuple[int, 
     """Return a tensor's declared safetensors dtype and shape."""
     _, _, _, dtype, shape = _tensor_locations(ckpt_dir)[name]
     return dtype, shape
+
+
+def checkpoint_tensor_names(ckpt_dir: str) -> frozenset[str]:
+    """Return tensor names from sharded or single-file safetensors checkpoints."""
+    return frozenset(_tensor_locations(ckpt_dir))
 
 
 def make_tensor_reader(ckpt_dir: str):
