@@ -11,6 +11,7 @@ from miles.rollout.session.core import (
     _chat_client_response,
     _render_json,
     _samples_response,
+    attach_rollout_source,
     extract_completion,
     proxy_result_to_response,
 )
@@ -202,6 +203,7 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        attach_rollout_source(self.config, result, choice)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,

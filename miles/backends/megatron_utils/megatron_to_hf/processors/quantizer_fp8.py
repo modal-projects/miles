@@ -8,12 +8,29 @@ from miles.utils.fp8_kernel import blockwise_cast_to_fp8_triton
 from ...sglang import per_block_cast_to_fp8
 
 
-def quantize_params_fp8(args, megatron_name, converted_named_params, quantization_config):
+def quantize_params_fp8(
+    args,
+    megatron_name,
+    converted_named_params,
+    quantization_config,
+    quantized_weight_basenames=None,
+):
     assert quantization_config["quant_method"] == "fp8"
     fmt = quantization_config.get("fmt", "e4m3")
     assert fmt == "e4m3", f"Unsupported FP8 format: {fmt}"
     assert quantization_config["activation_scheme"] == "dynamic"
     weight_block_size = quantization_config.get("weight_block_size", None)
+
+    if quantized_weight_basenames is not None:
+        output = []
+        for converted_name, param in converted_named_params:
+            if converted_name.endswith("_scale"):
+                continue
+            if converted_name.endswith(".weight") and converted_name.removesuffix(".weight") in quantized_weight_basenames:
+                output.extend(_quantize_param(converted_name, param, weight_block_size))
+            else:
+                output.append((converted_name, param))
+        return output
 
     decoder_layers_pattern = r"module\.module\.decoder\.layers\.(\d+)\.(.+)"
     match = re.match(decoder_layers_pattern, megatron_name)

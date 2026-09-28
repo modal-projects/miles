@@ -30,6 +30,7 @@ def make_session_server_config(**overrides: Any) -> SessionServerConfig:
         session_message_matcher="strict",
         pause_generation_mode=None,
         rollout_session_affinity_header="X-SMG-Routing-Key",
+        rollout_source_header=None,
         custom_rollout_request_hook_path=None,
         custom_rollout_request_hook_args={},
         rollout_request_max_attempts=1,
