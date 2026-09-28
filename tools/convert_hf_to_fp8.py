@@ -80,6 +80,7 @@ def should_quantize(name, weight, block_size=None):
         and "wo_a" not in name
         and "ffn.gate." not in name
         and "compressor." not in name
+        and ".visual." not in f".{name}"
         and "vision_tower" not in name
         and "mm_projector" not in name
     )

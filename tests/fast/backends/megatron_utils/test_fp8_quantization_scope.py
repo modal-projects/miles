@@ -22,6 +22,8 @@ def test_offline_fp8_quantizes_only_matrix_weights() -> None:
     assert should_quantize("model.layers.0.proj.weight", torch.ones((2, 2)))
     assert not should_quantize("model.layers.0.fused_experts.weight", torch.ones((2, 2, 2)))
     assert not should_quantize("model.layers.0.proj.bias", torch.ones(2))
+    assert not should_quantize("model.visual.blocks.0.attn.proj.weight", torch.ones((128, 128)))
+    assert not should_quantize("visual.blocks.0.attn.proj.weight", torch.ones((128, 128)))
     assert not should_quantize(
         "model.layers.0.proj.weight",
         torch.ones((129, 128)),
