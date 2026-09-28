@@ -95,7 +95,13 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
     modules_to_not_convert = []
     for key in weights.keys():
         if (
-            "weight" in key
+            key.endswith(".weight")
+            and weights[key].ndim == 2
+            and (
+                strategy != "block"
+                or block_size is None
+                or all(size % block == 0 for size, block in zip(weights[key].shape, block_size, strict=True))
+            )
             and "layernorm" not in key
             and "embed" not in key
             and "router" not in key
@@ -108,6 +114,7 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
             and "wo_a" not in key
             and "ffn.gate." not in key
             and "compressor." not in key
+            and ".visual." not in f".{key}"
             and "vision_tower" not in key
             and "mm_projector" not in key
         ):
