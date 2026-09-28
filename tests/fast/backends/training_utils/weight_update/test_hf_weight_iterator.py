@@ -17,6 +17,7 @@ import torch
 
 from miles.backends.training_utils.weight_update.hf_weight_iterator import (
     HfWeightIteratorBase,
+    WeightView,
     WeightUpdatePlacement,
     resolve_placement,
 )
@@ -68,6 +69,34 @@ class _StubIterator(HfWeightIteratorBase):
             yield [(name, tensor)]
 
 
+class _ViewIterator(HfWeightIteratorBase):
+    def __init__(self):
+        super().__init__(
+            Namespace(update_weight_buffer_size=1 << 30),
+            [],
+            placement=WeightUpdatePlacement(gather_pp=True),
+            model_name="stub",
+            quantization_config=None,
+            weight_views=(
+                WeightView("fp8", "/fp8", {"quant_method": "fp8"}),
+                WeightView("nvfp4", "/nvfp4", {"quant_method": "nvfp4"}),
+            ),
+        )
+
+    def _iter_hf_param_units(self, weights, *, materialize):
+        raise AssertionError("single-view iterator should not run")
+
+    def _iter_hf_adapter_units(self, adapter, *, materialize):
+        raise AssertionError("multi-view iterator does not support adapters")
+
+    def _iter_hf_param_view_units(self, weights, *, materialize):
+        if materialize:
+            yield {
+                "fp8": [("weight", torch.zeros(4, dtype=torch.uint8))],
+                "nvfp4": [("weight", torch.zeros(2, dtype=torch.uint8))],
+            }
+
+
 class TestIterHfWeightsTemplate:
     @staticmethod
     def _names(buckets):
@@ -103,3 +132,11 @@ class TestIterHfWeightsTemplate:
         names = self._names(iterator.iter_hf_weights(None))
         assert names == [SAMPLE_BASE_ONLY_WEIGHTS[0][0]]
         assert iterator.export_calls == []
+
+
+def test_multiview_template_preserves_view_boundaries() -> None:
+    [bucket] = list(_ViewIterator().iter_hf_weight_views(None))
+
+    assert set(bucket) == {"fp8", "nvfp4"}
+    assert bucket["fp8"][0][1].numel() == 4
+    assert bucket["nvfp4"][0][1].numel() == 2
