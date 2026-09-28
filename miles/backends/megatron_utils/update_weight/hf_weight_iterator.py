@@ -1,10 +1,8 @@
 """Megatron implementations' shared base and factory for the backend-neutral
 HF weight iterator API."""
 
-import json
 import logging
 import math
-import os
 from abc import abstractmethod
 from argparse import Namespace
 from collections.abc import Sequence
@@ -16,10 +14,14 @@ from megatron.core.utils import unwrap_model
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.hf_weight_iterator import (
     HfWeightIteratorBase,
+    WeightView,
     WeightUpdatePlacement,
     resolve_placement,
 )
 from miles.backends.training_utils.weight_update.hf_weight_iterator.atomic_groups import get_hf_atomic_update_groups
+from miles.backends.training_utils.weight_update.views import (
+    get_quantized_weight_basenames,
+)
 from miles.utils.lora.utils import is_lora_weight_name
 
 logger = logging.getLogger(__name__)
@@ -30,12 +32,7 @@ class MegatronHfWeightIteratorBase(HfWeightIteratorBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.packed_weight_basenames = (
-            get_packed_weight_basenames(self.args.hf_checkpoint)
-            if self.quantization_config is not None
-            and self.quantization_config["quant_method"] == "compressed-tensors"
-            else None
-        )
+        self.quantized_weight_basenames = get_quantized_weight_basenames(self.args.hf_checkpoint, self.quantization_config) if self.quantization_config is not None else None
         trainer_has_mtp = bool(unwrap_model(self.model)[0].config.mtp_num_layers)
         if self.args.sglang_speculative_algorithm and not trainer_has_mtp:
             self.weight_update_selector = "target"
@@ -73,6 +70,7 @@ def get_hf_weight_iterator(
     required_placement: WeightUpdatePlacement,
     model_name: str,
     quantization_config: dict | None,
+    weight_views: Sequence[WeightView] = (),
 ) -> HfWeightIteratorBase:
     from miles.backends.megatron_utils.update_weight.hf_weight_iterator_bridge import HfWeightIteratorBridge
     from miles.backends.megatron_utils.update_weight.hf_weight_iterator_direct import HfWeightIteratorDirect
@@ -88,16 +86,8 @@ def get_hf_weight_iterator(
         placement=resolve_placement(required_placement, cls.forced_placement),
         model_name=model_name,
         quantization_config=quantization_config,
+        weight_views=weight_views,
     )
-
-
-def get_packed_weight_basenames(hf_checkpoint: str) -> set[str]:
-    """Base names the checkpoint stores as compressed-tensors `weight_packed`; the quantizer
-    re-quantizes exactly these, since the published `ignore` list is written for loaders and
-    leaves out BF16 weights such as routers, residual projections and the vision tower."""
-    with open(os.path.join(hf_checkpoint, "model.safetensors.index.json")) as index_file:
-        names = json.load(index_file)["weight_map"]
-    return {n.removesuffix(".weight_packed") for n in names if n.endswith(".weight_packed")}
 
 
 def _gather_pp_full_adapter(
@@ -163,11 +153,7 @@ def _iter_mm_tower_units(args, *, materialize):
         ckpt_dir = args.hf_checkpoint
         with open(os.path.join(ckpt_dir, "model.safetensors.index.json"), encoding="utf-8") as f:
             weight_map = json.load(f)["weight_map"]
-        tower_keys = sorted(
-            k
-            for k in weight_map
-            if ".visual." in f".{k}" or ".audio." in f".{k}" or k.startswith(("visual.", "audio."))
-        )
+        tower_keys = sorted(k for k in weight_map if ".visual." in f".{k}" or ".audio." in f".{k}" or k.startswith(("visual.", "audio.")))
         by_shard: dict[str, list[str]] = {}
         for k in tower_keys:
             by_shard.setdefault(weight_map[k], []).append(k)

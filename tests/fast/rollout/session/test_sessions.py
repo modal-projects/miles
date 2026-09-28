@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from tests.fast.fixtures.session_fixtures import make_session_server_config
 
 from miles.rollout.session import sessions
-from miles.rollout.session.core import SessionCore
+from miles.rollout.session.core import SessionCore, attach_rollout_source
 from miles.rollout.session.sessions import setup_session_routes
 
 
@@ -53,3 +53,16 @@ async def test_proxy_uses_the_configured_session_affinity_header():
     await core.proxy("session-1", "health", method="GET", query="", headers={}, body=b"")
 
     assert backend.headers == {"Modal-Session-ID": "session-1"}
+
+
+def test_rollout_source_header_is_copied_case_insensitively():
+    choice = {"meta_info": {}}
+    config = make_session_server_config(rollout_source_header="X-Rollout-Source")
+
+    attach_rollout_source(
+        config,
+        {"headers": {"x-rollout-source": "hopper-fp8"}},
+        choice,
+    )
+
+    assert choice["meta_info"]["rollout_source"] == "hopper-fp8"
