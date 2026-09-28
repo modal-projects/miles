@@ -20,8 +20,6 @@ def quantize_params(
     converted_named_params,
     quantization_config,
     quantized_weight_basenames=None,
-    *,
-    canonical_storage=False,
 ):
     if quantization_config is None:
         return converted_named_params
@@ -32,7 +30,6 @@ def quantize_params(
             converted_named_params,
             quantization_config,
             quantized_weight_basenames,
-            canonical_storage=canonical_storage,
         )
     elif quantization_config["quant_method"] == "mxfp8":
         return quantize_params_mxfp8(args, megatron_name, converted_named_params, quantization_config)

@@ -153,9 +153,7 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for filename in safetensors_files:
-            future = executor.submit(
-                process_file, input_path, output_path, filename, strategy, block_size, result_collector
-            )
+            future = executor.submit(process_file, input_path, output_path, filename, strategy, block_size, result_collector)
             futures.append(future)
 
         for future in tqdm(futures, desc="Processing files"):

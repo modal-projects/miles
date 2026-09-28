@@ -140,7 +140,7 @@ def test_fp8_live_export_follows_the_canonical_module_set() -> None:
     ]
 
 
-def test_fp8_view_uses_canonical_checkpoint_storage() -> None:
+def test_fp8_export_uses_canonical_checkpoint_storage() -> None:
     tensors = [("model.layers.0.proj.weight", torch.ones((2, 2)))]
     config = {
         "quant_method": "fp8",
@@ -153,28 +153,19 @@ def test_fp8_view_uses_canonical_checkpoint_storage() -> None:
         torch.ones((2, 2), dtype=torch.float32),
     )
 
-    with (
-        patch(
-            "miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_fp8.blockwise_cast_to_fp8_triton",
-            return_value=encoded,
-        ) as canonical,
-        patch(
-            "miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_fp8._get_scale_format",
-            return_value="ue8m0",
-        ),
-        patch("miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_fp8.quant_weight_ue8m0") as runtime,
-    ):
+    with patch(
+        "miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_fp8.blockwise_cast_to_fp8_triton",
+        return_value=encoded,
+    ) as canonical:
         output = quantize_params_fp8(
             Namespace(),
             "module.module.decoder.layers.0.self_attention.linear_proj.weight",
             tensors,
             config,
             {"model.layers.0.proj"},
-            canonical_storage=True,
         )
 
     canonical.assert_called_once()
-    runtime.assert_not_called()
     assert [name for name, _tensor in output] == [
         "model.layers.0.proj.weight",
         "model.layers.0.proj.weight_scale_inv",

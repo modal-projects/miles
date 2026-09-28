@@ -44,7 +44,6 @@ def convert_to_hf_views(args, model_name, name, param, views):
                 converted_named_tensors,
                 view.quantization_config,
                 view.quantized_weight_basenames,
-                canonical_storage=True,
             )
         )
         for view in views
