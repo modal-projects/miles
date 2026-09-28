@@ -46,12 +46,13 @@ def save_hf_model(
     path = Path(path if path is not None else args.save_hf.format(rollout_id=rollout_id))
 
     def write_weights(checkpoint_dir: Path):
-        if args.megatron_to_hf_mode == "raw" and not is_lora_model(model):
+        if (publisher.has_weight_views or args.megatron_to_hf_mode == "raw") and not is_lora_model(model):
             # LoRA needs Bridge to merge the adapter into the base weights
             publisher.write_model(
                 checkpoint_dir,
                 weights=dict(named_params_and_buffers(args, model, convert_to_global_name=True)),
                 hf_checkpoint=args.hf_checkpoint,
+                source_tensor_prefixes=args.hf_export_source_tensor_prefixes,
             )
         else:
             bridge = _get_hf_bridge(args.hf_checkpoint)
@@ -76,6 +77,7 @@ def save_hf_model(
         logger.info(f"Saving model in HuggingFace format to {path}")
     try:
         write_checkpoint_dir(path, write_weights, completion_marker=HF_EXPORT_COMPLETE_MARKER)
+        publisher.mark_weight_views_complete(path)
     except Exception as e:
         if raise_on_error:
             raise
