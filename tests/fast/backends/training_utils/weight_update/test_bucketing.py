@@ -11,7 +11,9 @@ import torch
 from miles.backends.training_utils.weight_update.hf_weight_iterator.bucketing import (
     AtomicUpdateGroup,
     assemble_atomic_update_groups,
+    assemble_atomic_update_group_views,
     pack_units_by_size,
+    pack_view_units_by_size,
 )
 
 
@@ -110,3 +112,44 @@ class TestPackUnitsBySize:
 
     def test_empty_stream_yields_nothing(self):
         assert list(pack_units_by_size([], max_bytes=8)) == []
+
+
+def test_multiview_atomic_groups_keep_each_view_independent() -> None:
+    units = [
+        {
+            "fp8": _unit("layers.0.b.weight", "layers.0.b.weight_scale_inv"),
+            "nvfp4": _unit("layers.0.b.weight", "layers.0.b.weight_scale"),
+        },
+        {
+            "fp8": _unit("layers.0.c.weight", "layers.0.c.weight_scale_inv"),
+            "nvfp4": _unit("layers.0.c.weight", "layers.0.c.weight_scale"),
+        },
+    ]
+
+    [grouped] = list(assemble_atomic_update_group_views(units, [PAIR_GROUP]))
+
+    assert [name for name, _tensor in grouped["fp8"]] == [
+        "layers.0.b.weight",
+        "layers.0.b.weight_scale_inv",
+        "layers.0.c.weight",
+        "layers.0.c.weight_scale_inv",
+    ]
+    assert [name for name, _tensor in grouped["nvfp4"]] == [
+        "layers.0.b.weight",
+        "layers.0.b.weight_scale",
+        "layers.0.c.weight",
+        "layers.0.c.weight_scale",
+    ]
+
+
+def test_multiview_packing_bounds_combined_live_bytes() -> None:
+    units = [
+        {"fp8": _unit("a.fp8", numel=4), "nvfp4": _unit("a.nvfp4", numel=2)},
+        {"fp8": _unit("b.fp8", numel=4), "nvfp4": _unit("b.nvfp4", numel=2)},
+    ]
+
+    buckets = list(pack_view_units_by_size(units, max_bytes=10))
+
+    assert len(buckets) == 2
+    assert [name for name, _tensor in buckets[0]["fp8"]] == ["a.fp8"]
+    assert [name for name, _tensor in buckets[1]["nvfp4"]] == ["b.nvfp4"]
