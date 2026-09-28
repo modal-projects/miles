@@ -17,6 +17,7 @@ from tqdm import tqdm
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.backends.training_utils.conn_status import ConnStatusManager
 from miles.backends.training_utils.parallel import ParallelState
+from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightView
 from miles.backends.training_utils.weight_update.protocol import get_weight_transfer_protocol
 from miles.backends.training_utils.weight_update.session import (
     begin_weight_update,
@@ -46,6 +47,7 @@ class WeightUpdater:
         iterator_factory: Callable,
         parallel_state: ParallelState,
         is_lora: bool,
+        weight_views: Sequence[WeightView] = (),
         lora_sync_config: dict | None = None,
         initial_weight_version: int = 0,
     ) -> None:
@@ -62,6 +64,7 @@ class WeightUpdater:
             required_placement=self.protocol.required_placement,
             model_name=model_name,
             quantization_config=quantization_config,
+            weight_views=weight_views,
         )
         self.weights_getter = weights_getter
         if initial_weight_version < 0:
@@ -121,8 +124,7 @@ class WeightUpdater:
             ), "the LoRA checksum manifest is recorded on one rank, which must hold the full adapter"
         with timer("update_weights_implementation"):
             pbar = tqdm(desc=f"[{protocol.group_name}] Update weights", total=0) if protocol.is_sender else None
-            for bucket in self._hf_weight_iterator.iter_hf_weights(
-                self.weights_getter(),
+            for bucket in self._iter_weight_buckets(
                 include_base=sync_base,
                 adapters=adapters,
                 materialize=protocol.is_sender,
@@ -145,7 +147,25 @@ class WeightUpdater:
         protocol.after_engines_resumed()
 
     def _iter_base_buckets(self, *, materialize: bool):
-        return self._hf_weight_iterator.iter_hf_weights(self.weights_getter(), materialize=materialize)
+        return self._iter_weight_buckets(materialize=materialize)
+
+    def _iter_weight_buckets(
+        self,
+        *,
+        include_base: bool = True,
+        adapters: Sequence[tuple[str, object]] = (),
+        materialize: bool,
+    ):
+        if self._hf_weight_iterator.weight_views:
+            if not include_base or adapters:
+                raise ValueError("multiple rollout weight views do not support LoRA updates")
+            return self._hf_weight_iterator.iter_hf_weight_views(self.weights_getter(), materialize=materialize)
+        return self._hf_weight_iterator.iter_hf_weights(
+            self.weights_getter(),
+            include_base=include_base,
+            adapters=adapters,
+            materialize=materialize,
+        )
 
     def _get_updated_adapters(self) -> list[tuple[str, object]]:
         """``(lora_name, adapter_or_None)`` pairs for this sync; the push set is

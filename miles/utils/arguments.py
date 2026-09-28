@@ -1042,6 +1042,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Header carrying the session ID from a session server to its rollout backend.",
             )
             parser.add_argument(
+                "--rollout-source-header",
+                type=str,
+                default=None,
+                help=(
+                    "Optional response header naming the rollout source selected by an opaque "
+                    "endpoint. The session server records it in each sample's metadata."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-external-router-pd",
                 action="store_true",
                 default=False,
@@ -1092,6 +1101,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Filesystem directory where disk-delta publishes one changed-tensor artifact "
                     "per sync. Rollout hosts may read it directly, or a post-write hook may publish "
                     "it to an external consumer. Required for --update-weight-transfer-mode=disk-delta."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-views",
+                type=json.loads,
+                default=None,
+                help=(
+                    "JSON object mapping rollout view names to canonical HF checkpoint directories. "
+                    "Disk-delta gathers trainer tensors once and emits one encoded delta stream per view."
                 ),
             )
             parser.add_argument(
@@ -3748,6 +3766,16 @@ def miles_validate_args(args):
             "--update-weight-transfer-mode=disk-delta requires --hf-checkpoint to be a local directory: "
             "the baseline snapshot is seeded from its safetensors bytes."
         )
+        if args.update_weight_views is not None:
+            assert args.rollout_endpoint_url is not None, (
+                "--update-weight-views requires an opaque --rollout-endpoint-url; miles cannot assign "
+                "individually managed rollout engines to serialized views."
+            )
+            assert args.megatron_to_hf_mode == "raw", (
+                "--update-weight-views currently requires --megatron-to-hf-mode raw"
+            )
+    elif args.update_weight_views is not None:
+        raise ValueError("--update-weight-views requires --update-weight-transfer-mode disk-delta")
 
     if args.colocate:
         if args.offload_train is None:

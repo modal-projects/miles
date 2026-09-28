@@ -116,7 +116,7 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
                     qmegatron_name,
                     [(hf_name, weight)],
                     self.quantization_config,
-                    self.packed_weight_basenames,
+                    self.quantized_weight_basenames,
                 ):
                     yield q_hf_name, q_weight, megatron_param_names
             else:

@@ -24,12 +24,31 @@ def postprocess_hf_param(args, megatron_param_name, hf_param_name, param):
 
 
 # TODO optimize code details
-def convert_to_hf(args, model_name, name, param, quantization_config=None, packed_weight_basenames=None):
+def convert_to_hf(args, model_name, name, param, quantization_config=None, quantized_weight_basenames=None):
     param = remove_padding(name, param, args.vocab_size)
 
     converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
 
-    return quantize_params(args, name, converted_named_tensors, quantization_config, packed_weight_basenames)
+    return quantize_params(args, name, converted_named_tensors, quantization_config, quantized_weight_basenames)
+
+
+def convert_to_hf_views(args, model_name, name, param, views):
+    """Map one Megatron parameter once, then encode it for each rollout view."""
+    param = remove_padding(name, param, args.vocab_size)
+    converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
+    return {
+        view.name: list(
+            quantize_params(
+                args,
+                name,
+                converted_named_tensors,
+                view.quantization_config,
+                view.quantized_weight_basenames,
+                canonical_storage=True,
+            )
+        )
+        for view in views
+    }
 
 
 # TODO optimize code details
@@ -37,12 +56,7 @@ def _convert_to_hf_core(args, model_name, name, param):
     model_name = model_name.lower()
     if "glm5_next" in model_name or "glm5next" in model_name:
         converted_named_tensors = convert_glm5_next_to_hf(args, name, param)
-    elif (
-        "glm4moelite" in model_name
-        or "deepseekv3" in model_name
-        or "glmmoedsa" in model_name
-        or "glm_moe_dsa" in model_name
-    ):
+    elif "glm4moelite" in model_name or "deepseekv3" in model_name or "glmmoedsa" in model_name or "glm_moe_dsa" in model_name:
         converted_named_tensors = convert_deepseekv3_to_hf(args, name, param)
     elif "glm4moe" in model_name:
         converted_named_tensors = convert_glm4moe_to_hf(args, name, param)
@@ -93,8 +107,7 @@ def convert_lora_to_hf(args, model_name, name, param):
     import warnings
 
     warnings.warn(
-        "convert_lora_to_hf uses incorrect hardcoded name mapping for fused layers. "
-        "Use AutoBridge.export_adapter_weights instead.",
+        "convert_lora_to_hf uses incorrect hardcoded name mapping for fused layers. Use AutoBridge.export_adapter_weights instead.",
         DeprecationWarning,
         stacklevel=2,
     )

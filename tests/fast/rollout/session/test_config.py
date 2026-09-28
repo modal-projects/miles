@@ -28,6 +28,7 @@ _ARGS_TO_CONFIG_FIELD = {
     "session_message_matcher": "session_message_matcher",
     "pause_generation_mode": "pause_generation_mode",
     "rollout_session_affinity_header": "rollout_session_affinity_header",
+    "rollout_source_header": "rollout_source_header",
     "custom_rollout_request_hook_path": "custom_rollout_request_hook_path",
     "custom_rollout_request_hook_args": "custom_rollout_request_hook_args",
     "rollout_request_max_attempts": "rollout_request_max_attempts",
@@ -44,6 +45,7 @@ _OPTIONAL_ARGS_ATTRS = (
     "use_session_server",
     "session_sample_picker_path",
     "session_sample_postprocessor_path",
+    "rollout_source_header",
 )
 
 _DISTINCT_ARGS_VALUES = dict(
@@ -66,6 +68,7 @@ _DISTINCT_ARGS_VALUES = dict(
     session_message_matcher="fake.matcher",
     pause_generation_mode="in_place",
     rollout_session_affinity_header="Modal-Session-ID",
+    rollout_source_header="X-Rollout-Source",
     custom_rollout_request_hook_path="fake.request_hook",
     custom_rollout_request_hook_args={"key": "value"},
     rollout_request_max_attempts=7,
@@ -150,6 +153,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     session_message_matcher="strict",
     pause_generation_mode=None,
     rollout_session_affinity_header="X-SMG-Routing-Key",
+    rollout_source_header=None,
     custom_rollout_request_hook_path=None,
     custom_rollout_request_hook_args={},
     rollout_request_max_attempts=1,
