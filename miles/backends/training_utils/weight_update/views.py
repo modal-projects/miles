@@ -23,6 +23,14 @@ def get_quantized_weight_basenames(hf_checkpoint: str, quantization_config: dict
     return None
 
 
+def _source_only_suffixes(quantization_config: dict | None) -> tuple[str, ...]:
+    if quantization_config is None:
+        return ()
+    if quantization_config.get("quant_algo") == "NVFP4" or quantization_config.get("quant_method") == "nvfp4":
+        return (".input_scale",)
+    return ()
+
+
 _VIEW_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
@@ -50,6 +58,7 @@ def load_weight_views(config: object) -> tuple[WeightView, ...]:
                 checkpoint=checkpoint,
                 quantization_config=quantization_config,
                 quantized_weight_basenames=(frozenset(quantized_weight_basenames) if quantized_weight_basenames is not None else None),
+                source_only_suffixes=_source_only_suffixes(quantization_config),
             )
         )
     return tuple(views)

@@ -314,6 +314,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 required_placement=WeightUpdatePlacement(gather_pp=True),
                 model_name=model_name,
                 quantization_config=None if is_lora else quantization_config,
+                weight_views=() if is_lora else self.weight_views,
             )
             self.snapshot_publisher = SnapshotPublisher(
                 iterator, build_lora_config(args, target_modules=args.lora_adapter_targets) if is_lora else None

@@ -45,6 +45,7 @@ class WeightView:
     checkpoint: str
     quantization_config: dict | None
     quantized_weight_basenames: frozenset[str] | None = None
+    source_only_suffixes: tuple[str, ...] = ()
 
 
 def resolve_placement(required: WeightUpdatePlacement, forced: WeightUpdatePlacement | None) -> WeightUpdatePlacement:
