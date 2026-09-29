@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _turn
 
-from miles.rollout.generate_utils.score_centering import (
+from miles.rollout.generate_utils.rollout_topk_logprobs import (
     append_rollout_topk_logprobs,
     configure_rollout_topk_logprobs_request,
     pad_rollout_topk_logprobs,

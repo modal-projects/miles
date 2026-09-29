@@ -2,8 +2,8 @@ from copy import deepcopy
 from dataclasses import fields
 from typing import Any
 
+from miles.rollout.generate_utils.rollout_topk_logprobs import merge_rollout_topk_logprobs_field
 from miles.rollout.generate_utils.sampling_mask import merge_sampling_masks
-from miles.rollout.generate_utils.score_centering import merge_rollout_topk_logprobs_field
 from miles.utils.types import Sample
 
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
