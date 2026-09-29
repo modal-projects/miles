@@ -8,7 +8,6 @@ from miles.utils import object_store
 from miles.utils.dp_schedule import build_dp_schedule, has_full_schedule_config
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.object_store import ValueSpec
-from miles.utils.score_centering import score_centering_top_k
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
@@ -119,7 +118,7 @@ def convert_samples_to_train_data(
     if samples[0].rollout_log_probs is not None:
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
-    if k := score_centering_top_k(args):
+    if k := args.rollout_top_logprobs_num:
         for sample in samples:
             validate_rollout_topk_logprobs_sample(sample, k)
             if sample.multimodal_train_inputs:

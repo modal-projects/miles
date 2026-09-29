@@ -1572,14 +1572,23 @@ class TestCustomConfigAppliedBeforeDerivedArgs:
         )
 
     def test_score_centering_config_is_validated_at_startup(self, tmp_path: Path) -> None:
-        args = self._parse(tmp_path, [], "loss_type: score_centering\nscore_centering_top_k: 0\n")
-        with pytest.raises(ValueError, match="--score-centering-top-k"):
+        args = self._parse(tmp_path, [], "loss_type: score_centering\nrollout_top_logprobs_num: 0\n")
+        with pytest.raises(ValueError, match="--rollout-top-logprobs-num"):
             miles_validate_args(args)
 
     def test_filtered_score_centering_enables_replay_at_startup(self, tmp_path: Path) -> None:
         args = self._parse(
             tmp_path,
-            ["--rollout-top-p", "0.9", "--rollout-top-k", "64", "--score-centering-top-k", "128"],
+            [
+                "--rollout-top-p",
+                "0.9",
+                "--rollout-top-k",
+                "64",
+                "--rollout-top-logprobs-num",
+                "128",
+                "--rollout-sampling-logprobs-mode",
+                "support",
+            ],
             "loss_type: score_centering\n",
         )
         miles_validate_args(args)

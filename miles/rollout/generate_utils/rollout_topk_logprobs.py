@@ -8,13 +8,16 @@ import numpy as np
 
 from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sampling
 from miles.utils.sampling_mask import RolloutSamplingMask
-from miles.utils.score_centering import score_centering_top_k
 from miles.utils.types import Sample
 
 
 def configure_rollout_topk_logprobs_request(args: Namespace, request: dict[str, Any], *, openai: bool = False) -> None:
-    """Request candidate probabilities, validating the actual per-call settings."""
-    k = score_centering_top_k(args)
+    """Request candidate probabilities, validating the actual per-call settings.
+
+    The rollout args own ``top_logprobs_num`` / ``top_logprobs`` and ``sampling_logprobs_mode``
+    on training requests and silently override client-supplied values.
+    """
+    k = args.rollout_top_logprobs_num
     if not k:
         return
     sampling = request if openai else request["sampling_params"]
@@ -23,7 +26,7 @@ def configure_rollout_topk_logprobs_request(args: Namespace, request: dict[str, 
         if sampling.get(key) is None:
             sampling[key] = default
     validate_rollout_topk_logprobs_sampling(sampling, temperature=args.rollout_temperature, candidate_count=k)
-    if sampling["top_p"] < 1.0 or sampling["top_k"] > 0:
+    if args.rollout_sampling_logprobs_mode == "support":
         # SGLang's support mode returns the actual post-filter behavior distribution.
         request.pop("top_logprobs", None)
         request.pop("top_logprobs_num", None)
@@ -33,7 +36,7 @@ def configure_rollout_topk_logprobs_request(args: Namespace, request: dict[str, 
         request["top_logprobs"] = k
     else:
         request.pop("sampling_logprobs_mode", None)
-        request["top_logprobs_num"] = max(k, request.get("top_logprobs_num", 0) or 0)
+        request["top_logprobs_num"] = k
 
 
 def append_rollout_topk_logprobs(

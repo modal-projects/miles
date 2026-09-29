@@ -16,7 +16,11 @@ class _Tokenizer:
 def _args(**overrides: object) -> Namespace:
     values = dict(
         loss_type="score_centering",
-        score_centering_top_k=3,
+        rollout_top_logprobs_num=3,
+        rollout_sampling_logprobs_mode="selected",
+        use_opd=False,
+        opd_log_prob_top_k=0,
+        opd_top_k_strategy="only-student",
         score_centering_is="none",
         score_centering_tis_clip=2.0,
         score_centering_mis_low=0.5,

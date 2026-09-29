@@ -3,18 +3,18 @@
 import math
 import os
 from argparse import Namespace
-from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sampling
 
-
-def score_centering_top_k(args: Namespace) -> int:
-    return args.score_centering_top_k if getattr(args, "loss_type", None) == "score_centering" else 0
+from miles.utils.rollout_topk_logprobs import (
+    validate_rollout_topk_logprobs_args,
+    validate_rollout_topk_logprobs_sampling,
+)
 
 
 def validate_score_centering_args(args: Namespace) -> None:
     if getattr(args, "loss_type", None) != "score_centering":
         return
-    if args.score_centering_top_k <= 0:
-        raise ValueError("--score-centering-top-k must be positive")
+    if args.rollout_top_logprobs_num <= 0:
+        raise ValueError("Score centering requires a positive --rollout-top-logprobs-num")
     if not math.isfinite(args.score_centering_tis_clip) or args.score_centering_tis_clip <= 0:
         raise ValueError("--score-centering-tis-clip must be finite and positive")
     low, high = args.score_centering_mis_low, args.score_centering_mis_high
@@ -23,8 +23,9 @@ def validate_score_centering_args(args: Namespace) -> None:
     validate_rollout_topk_logprobs_sampling(
         {"top_p": args.rollout_top_p, "top_k": args.rollout_top_k},
         temperature=args.rollout_temperature,
-        candidate_count=args.score_centering_top_k,
+        candidate_count=args.rollout_top_logprobs_num,
     )
+    validate_rollout_topk_logprobs_args(args)
     if args.advantage_estimator != "grpo":
         raise ValueError("Score centering currently supports --advantage-estimator grpo (group-centered rewards)")
     incompatible = {
@@ -42,7 +43,7 @@ def validate_score_centering_args(args: Namespace) -> None:
         if getattr(args, option, None):
             raise ValueError(f"Score centering is incompatible with --{option.replace('_', '-')}: {reason}")
     if (
-        args.score_centering_top_k > 20
+        args.rollout_top_logprobs_num > 20
         and args.rollout_top_p == 1.0
         and args.rollout_top_k == -1
         and getattr(args, "use_session_server", None)

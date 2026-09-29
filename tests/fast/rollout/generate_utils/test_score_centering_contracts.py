@@ -40,7 +40,7 @@ def test_observation_padding_retry_and_disabled_wire() -> None:
 @pytest.mark.parametrize("openai", [False, True])
 def test_request_candidates_and_sampler_contract(openai: bool) -> None:
     request = {} if openai else {"sampling_params": {}}
-    configure_rollout_topk_logprobs_request(_args(score_centering_top_k=128), request, openai=openai)
+    configure_rollout_topk_logprobs_request(_args(rollout_top_logprobs_num=128), request, openai=openai)
     assert request["top_logprobs" if openai else "top_logprobs_num"] == 128
     sampling = request if openai else request["sampling_params"]
     assert sampling["temperature"] == 0.7
@@ -48,12 +48,24 @@ def test_request_candidates_and_sampler_contract(openai: bool) -> None:
     with pytest.raises(ValueError, match="positive top_k"):
         configure_rollout_topk_logprobs_request(_args(), request, openai=openai)
     sampling["top_k"] = 64
-    configure_rollout_topk_logprobs_request(_args(score_centering_top_k=128), request, openai=openai)
+    support = _args(rollout_top_logprobs_num=128, rollout_sampling_logprobs_mode="support")
+    configure_rollout_topk_logprobs_request(support, request, openai=openai)
     assert request["sampling_logprobs_mode"] == "support"
     assert "top_logprobs" not in request and "top_logprobs_num" not in request
     original = deepcopy(request)
-    configure_rollout_topk_logprobs_request(_args(loss_type="policy_loss"), request, openai=openai)
+    configure_rollout_topk_logprobs_request(_args(rollout_top_logprobs_num=0), request, openai=openai)
     assert request == original
+
+
+@pytest.mark.parametrize("openai", [False, True])
+def test_rollout_args_override_client_candidate_fields(openai: bool) -> None:
+    field = "top_logprobs" if openai else "top_logprobs_num"
+    request = {field: 5, "sampling_logprobs_mode": "support"}
+    if not openai:
+        request["sampling_params"] = {}
+    configure_rollout_topk_logprobs_request(_args(rollout_top_logprobs_num=3), request, openai=openai)
+    assert request[field] == 3
+    assert "sampling_logprobs_mode" not in request
 
 
 @pytest.mark.parametrize(
@@ -76,7 +88,8 @@ def test_implicit_openai_grammar_constraints_are_rejected(constraint: dict) -> N
         ("rollout_top_p", 0.9),
         ("rollout_temperature", 0),
         ("rollout_top_k", 129),
-        ("score_centering_top_k", 0),
+        ("rollout_top_logprobs_num", 0),
+        ("rollout_sampling_logprobs_mode", "support"),
         ("score_centering_tis_clip", float("inf")),
         ("score_centering_mis_low", 6),
         ("use_tis", True),
@@ -93,7 +106,7 @@ def test_invalid_options_fail_early(field: str, value: object) -> None:
 @pytest.mark.parametrize("session", ["v1", "v2"])
 @pytest.mark.parametrize("top_k", [21, 128])
 def test_large_session_heads_require_miles_router(session: str, top_k: int) -> None:
-    args = _args(use_session_server=session, score_centering_top_k=top_k, use_miles_router=False)
+    args = _args(use_session_server=session, rollout_top_logprobs_num=top_k, use_miles_router=False)
     with pytest.raises(ValueError, match="require --use-miles-router"):
         validate_score_centering_args(args)
 
@@ -103,11 +116,13 @@ def test_large_session_heads_require_miles_router(session: str, top_k: int) -> N
 
 @pytest.mark.parametrize("session", ["v1", "v2"])
 def test_standard_openai_head_size_can_use_sglang_router(session: str) -> None:
-    validate_score_centering_args(_args(use_session_server=session, score_centering_top_k=20, use_miles_router=False))
+    validate_score_centering_args(
+        _args(use_session_server=session, rollout_top_logprobs_num=20, use_miles_router=False)
+    )
 
 
 def test_large_native_heads_can_use_sglang_router() -> None:
-    validate_score_centering_args(_args(use_session_server=None, score_centering_top_k=128, use_miles_router=False))
+    validate_score_centering_args(_args(use_session_server=None, rollout_top_logprobs_num=128, use_miles_router=False))
 
 
 @pytest.mark.parametrize("session", ["v1", "v2"])
@@ -116,9 +131,10 @@ def test_filtered_session_support_does_not_use_top_logprobs_router_cap(session: 
         _args(
             use_session_server=session,
             use_miles_router=False,
-            score_centering_top_k=128,
+            rollout_top_logprobs_num=128,
             rollout_top_p=0.9,
             rollout_top_k=64,
+            rollout_sampling_logprobs_mode="support",
             use_sampling_support_replay=True,
         )
     )
@@ -126,7 +142,7 @@ def test_filtered_session_support_does_not_use_top_logprobs_router_cap(session: 
 
 def test_other_losses_do_not_require_score_centering_router() -> None:
     validate_score_centering_args(
-        _args(loss_type="policy_loss", use_session_server="v2", score_centering_top_k=128, use_miles_router=False)
+        _args(loss_type="policy_loss", use_session_server="v2", rollout_top_logprobs_num=128, use_miles_router=False)
     )
 
 

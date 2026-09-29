@@ -39,6 +39,7 @@ from miles.utils.object_store_config import (
     compute_mooncake_init_kwargs_from_env,
     compute_mooncake_init_kwargs_vanilla,
 )
+from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_args
 from miles.utils.run_uuid import RUN_UUID_LENGTH, generate_run_uuid, validate_run_uuid
 from miles.utils.score_centering import validate_score_centering_args
 from miles.utils.tracking_utils.ci_history import RECORD_DIR_ENV
@@ -683,6 +684,26 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "the top-k for the inference engine during rollout. Positive values enable "
                     "sampling-support replay. SGLang's --sampling-mask-max-tokens is the physical "
                     "returned-support limit because cutoff ties can retain more than top-k tokens."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-top-logprobs-num",
+                type=int,
+                default=0,
+                help=(
+                    "Number of sampler candidate log-probs recorded per generated token in "
+                    "Sample.rollout_topk_token_ids / rollout_topk_log_probs; 0 disables recording. "
+                    "Training requests ask SGLang for them and override any client-supplied value."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-sampling-logprobs-mode",
+                choices=["selected", "support"],
+                default="selected",
+                help=(
+                    "SGLang sampling_logprobs_mode for training requests. 'support' records the "
+                    "post-filter log-probs of the whole realized sampling support as the candidates; "
+                    "it requires filtered rollout sampling and --rollout-top-logprobs-num >= --rollout-top-k."
                 ),
             )
             parser.add_argument(
@@ -1606,12 +1627,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Path to the custom loss function, if the loss_type is `custom_loss`, "
                     "we will use this function to calculate the loss. "
                 ),
-            )
-            parser.add_argument(
-                "--score-centering-top-k",
-                type=int,
-                default=128,
-                help="Number of sampler candidates recorded for --loss-type score_centering.",
             )
             parser.add_argument(
                 "--score-centering-is",
@@ -3302,6 +3317,7 @@ def miles_validate_args(args):
                 "sampling-support replay cannot currently be combined with reference KL or teacher distillation; "
                 "those objectives require a separate full-policy actor score"
             )
+    validate_rollout_topk_logprobs_args(args)
 
     if not args.use_session_server and args.tito_model != TITOTokenizerType.DEFAULT.value:
         raise ValueError(
