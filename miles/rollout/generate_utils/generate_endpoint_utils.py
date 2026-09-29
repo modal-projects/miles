@@ -8,11 +8,13 @@ from typing import Any
 import numpy as np
 import pybase64
 
+from miles.rollout.generate_utils.rollout_topk_logprobs import (
+    append_rollout_topk_logprobs,
+    configure_rollout_topk_logprobs_request,
+)
 from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata, should_return_sampling_mask
-from miles.rollout.generate_utils.score_centering import append_score_centering_topk, configure_score_centering_request
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 from miles.utils.processing_utils import encode_image_for_rollout_engine, extract_multimodal_train_inputs
-from miles.utils.score_centering import score_centering_top_k
 from miles.utils.types import Sample
 
 
@@ -84,7 +86,7 @@ def compute_request_payload(
         payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
 
     if not evaluation:
-        configure_score_centering_request(args, payload)
+        configure_rollout_topk_logprobs_request(args, payload)
     return payload, None
 
 
@@ -118,10 +120,10 @@ async def update_sample_from_response(
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
     if payload.get("top_logprobs_num") or payload.get("sampling_logprobs_mode") == "support":
-        append_score_centering_topk(
+        append_rollout_topk_logprobs(
             sample,
             output["meta_info"],
-            score_centering_top_k(args),
+            args.rollout_top_logprobs_num,
             sampling_logprobs_mode=payload.get("sampling_logprobs_mode", "selected"),
         )
 

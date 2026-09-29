@@ -16,10 +16,10 @@ import pytest
 import requests
 from transformers import AutoTokenizer
 
-from miles.rollout.generate_utils.score_centering import (
-    append_score_centering_topk,
-    configure_score_centering_request,
-    validate_score_centering_sample,
+from miles.rollout.generate_utils.rollout_topk_logprobs import (
+    append_rollout_topk_logprobs,
+    configure_rollout_topk_logprobs_request,
+    validate_rollout_topk_logprobs_sample,
 )
 from miles.utils.types import Sample
 
@@ -57,17 +57,21 @@ def live_responses(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     warmup.raise_for_status()
     outputs: dict[str, Any] = {"prompt": prompt, "top_k": top_k}
     for temperature in (0.7, 1.0, 1.3):
-        args = Namespace(loss_type="score_centering", score_centering_top_k=top_k, rollout_temperature=temperature)
+        args = Namespace(
+            rollout_top_logprobs_num=top_k, rollout_sampling_logprobs_mode="selected", rollout_temperature=temperature
+        )
         payload = {
             "input_ids": prompt,
             "return_logprob": True,
             "sampling_params": {"max_new_tokens": 32, "temperature": temperature},
         }
-        configure_score_centering_request(args, payload)
+        configure_rollout_topk_logprobs_request(args, payload)
         response = requests.post(f"{endpoint}/generate", json=payload, timeout=300)
         response.raise_for_status()
         outputs[str(temperature)] = response.json()
-    args = Namespace(loss_type="score_centering", score_centering_top_k=top_k, rollout_temperature=1.0)
+    args = Namespace(
+        rollout_top_logprobs_num=top_k, rollout_sampling_logprobs_mode="selected", rollout_temperature=1.0
+    )
     payload = {
         "model": os.environ.get("MILES_LIVE_SCORE_CENTERING_SERVED_MODEL", "default"),
         "messages": messages,
@@ -76,7 +80,7 @@ def live_responses(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         "return_meta_info": True,
         "chat_template_kwargs": {"enable_thinking": True, "preserve_thinking": True},
     }
-    configure_score_centering_request(args, payload, openai=True)
+    configure_rollout_topk_logprobs_request(args, payload, openai=True)
     response = requests.post(f"{endpoint}/v1/chat/completions", json=payload, timeout=300)
     response.raise_for_status()
     outputs["openai"] = response.json()
@@ -92,8 +96,8 @@ def _validate_metadata(meta: dict[str, Any], prompt: list[int], top_k: int) -> N
         response_length=len(generated),
         rollout_log_probs=[item[0] for item in generated],
     )
-    append_score_centering_topk(sample, meta, top_k)
-    validate_score_centering_sample(sample, top_k)
+    append_rollout_topk_logprobs(sample, meta, top_k)
+    validate_rollout_topk_logprobs_sample(sample, top_k)
     assert np.all(sample.rollout_topk_token_ids >= 0), "This model should return the requested candidates"
     assert np.all(np.isfinite(sample.rollout_topk_log_probs))
 

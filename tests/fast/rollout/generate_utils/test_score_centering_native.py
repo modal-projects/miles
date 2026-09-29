@@ -7,7 +7,7 @@ import numpy as np
 from tests.fast.fixtures.score_centering_fixtures import _args, _meta
 
 from miles.rollout.generate_utils.generate_endpoint_utils import compute_request_payload, update_sample_from_response
-from miles.rollout.generate_utils.score_centering import validate_score_centering_sample
+from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.utils.types import Sample
 
 
@@ -30,13 +30,14 @@ def test_native_generate_producer_appends_each_call() -> None:
         )
     assert sample.tokens == [0, 1, 2, 3, 4, 5]
     np.testing.assert_array_equal(sample.rollout_topk_token_ids[:, 0], [2, 2, 4, 4])
-    validate_score_centering_sample(sample, 3)
+    validate_rollout_topk_logprobs_sample(sample, 3)
 
 
 def test_filtered_native_generation_records_post_filter_distribution() -> None:
     args = _args(
         rollout_top_p=0.6,
         rollout_top_k=3,
+        rollout_sampling_logprobs_mode="support",
         use_sampling_support_replay=True,
         rollout_max_response_len=20,
         rollout_max_context_len=None,
@@ -56,7 +57,7 @@ def test_filtered_native_generation_records_post_filter_distribution() -> None:
     }
     sample = Sample()
     asyncio.run(update_sample_from_response(args, sample, payload, {"text": "2", "meta_info": meta}, True))
-    validate_score_centering_sample(sample, 3)
+    validate_rollout_topk_logprobs_sample(sample, 3)
     np.testing.assert_array_equal(sample.rollout_topk_token_ids, [[3, 2, -1]])
     np.testing.assert_allclose(np.exp(sample.rollout_topk_log_probs[0, :2]), [3 / 7, 4 / 7])
     np.testing.assert_allclose(sample.rollout_log_probs, [math.log(4 / 7)])
