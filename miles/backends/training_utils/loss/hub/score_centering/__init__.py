@@ -10,6 +10,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+__all__ = ["importance_weights", "score_centering_loss", "selected_log_probs", "selected_log_probs_and_entropy"]
+
 
 def _validate_importance_args(mode: str, tis_clip: float, mis_low: float, mis_high: float) -> None:
     if mode == "tis" and (not math.isfinite(tis_clip) or tis_clip <= 0):
