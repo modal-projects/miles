@@ -12,6 +12,7 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 
 from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean, slice_log_prob_with_cp, slice_with_cp
+from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy
 from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, selected_log_probs_and_entropy
 from miles.backends.training_utils.loss_hub.score_centering_loss import score_centering_loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
@@ -56,6 +57,7 @@ def _check_selected(tp: GroupInfo, dtype: torch.dtype, device: torch.device) -> 
 
 def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: torch.device) -> None:
     args = Namespace(
+        loss_type="score_centering",
         qkv_format="bshd" if layout in ("bshd", "bshd_allgather") else "thd",
         allgather_cp=layout in ("allgather", "bshd_allgather"),
         true_on_policy_mode=False,
@@ -68,7 +70,10 @@ def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: to
         score_centering_mis_high=5.0,
         entropy_coef=0.03,
         observe_training_entropy=True,
-        use_kl_loss=False,
+        use_kl_loss=True,
+        use_unbiased_kl=False,
+        kl_loss_type="k2",
+        kl_loss_coef=0.1,
     )
     generator = torch.Generator().manual_seed(19)
     totals, responses = [5, 9, 3], [2, 3, 0]
@@ -124,10 +129,21 @@ def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: to
             for a, t, r in zip(advantages, totals, responses, strict=True)
         ],
     )
+    # A reference identical to the actor must give zero KL, including with a padded vocabulary.
+    with torch.no_grad():
+        batch["ref_log_probs"] = get_log_probs_and_entropy(
+            local.detach(),
+            args=args,
+            unconcat_tokens=tokens,
+            total_lengths=totals,
+            response_lengths=responses,
+            max_seq_lens=batch["max_seq_lens"],
+        )["log_probs"]
     reduce = get_sum_of_sample_mean(
         totals, responses, masks, qkv_format=args.qkv_format, max_seq_lens=batch["max_seq_lens"]
     )
     loss, metrics = score_centering_loss_function(args, batch, local, reduce)
+    torch.testing.assert_close(metrics["kl_loss"], torch.zeros_like(metrics["kl_loss"]), atol=0, rtol=0)
     loss.backward()
     expected_grad = _layout([part.grad for part in parts], args, cp.rank)[..., tp.rank * 4 : (tp.rank + 1) * 4]
     torch.testing.assert_close(local.grad, expected_grad, atol=2e-6, rtol=2e-5)
