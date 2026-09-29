@@ -34,10 +34,8 @@ def importance_weights(
         raise ValueError("Score-centering importance log-ratio contains NaN")
     if mode == "tis":
         return log_ratio.clamp(max=math.log(tis_clip)).exp()
-    if mode == "mis":
-        inside = (log_ratio >= math.log(mis_low)) & (log_ratio <= math.log(mis_high))
-        return torch.where(inside, log_ratio.clamp(max=math.log(mis_high)).exp(), 0.0)
-    raise ValueError(f"Unknown score-centering importance weighting: {mode}")
+    inside = (log_ratio >= math.log(mis_low)) & (log_ratio <= math.log(mis_high))
+    return torch.where(inside, log_ratio.clamp(max=math.log(mis_high)).exp(), 0.0)
 
 
 def score_centering_loss(
@@ -97,13 +95,11 @@ def score_centering_loss(
         elif mode == "tis":
             # q * min(p/q, c), including q=0, without 0 * inf.
             weighted_q, alpha = torch.minimum(p, tis_clip * q), (tis_clip * rho).clamp_max(1)
-        elif mode == "mis":
+        else:
             log_ratio = head_log_probs - safe_rollout_head
             inside = (log_ratio >= math.log(mis_low)) & (log_ratio <= math.log(mis_high))
             weighted_q = torch.where(inside & head_mask, p, 0.0)
             alpha = ((rho >= 1 / mis_high) & (rho <= 1 / mis_low)).to(p.dtype)
-        else:
-            raise ValueError(f"Unknown score-centering importance weighting: {mode}")
         residual = weighted_q - alpha.unsqueeze(-1) * p
         sample_log_ratio = train_log_probs - rollout_log_probs
         weight = importance_weights(
