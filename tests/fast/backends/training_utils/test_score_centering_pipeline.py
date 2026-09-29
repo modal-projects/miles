@@ -1,5 +1,6 @@
 """Exercise candidate transport through the real rollout and training consumers."""
 
+import threading
 from copy import deepcopy
 
 import numpy as np
@@ -13,6 +14,7 @@ from miles.backends.training_utils.loss import compute_advantages_and_returns, l
 from miles.backends.training_utils.loss_hub.losses import get_loss_function
 from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState
+from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_raw
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.samples.codec import decode_samples_and_merge_input_sample, encode_samples
@@ -141,3 +143,29 @@ def test_shared_advantages_loss_scaling_and_regularization(
     torch.testing.assert_close(logits.grad, reference_logits.grad, atol=1e-6, rtol=1e-5)
     assert normalizer == 1 and "entropy_loss" in metrics["keys"] and "kl_loss" in metrics["keys"]
     assert "train_rollout_kl" in metrics["keys"]
+
+
+def test_parallel_validation_raises_the_first_invalid_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    samples = []
+    for index in range(8):
+        sample = _turn([0, 1], [2, 3], [0.5, 0.25])
+        sample.index, sample.reward = index, float(index % 2)
+        samples.append(sample)
+    samples[3].rollout_log_probs = [np.log(0.4), np.log(0.25)]
+    samples[5].rollout_topk_token_ids[0, 1] = samples[5].rollout_topk_token_ids[0, 0]
+    threads = set()
+    validate = train_data_conversion.validate_score_centering_sample
+
+    def record_thread(sample: Sample, k: int) -> None:
+        threads.add(threading.current_thread().name)
+        validate(sample, k)
+
+    monkeypatch.setattr(train_data_conversion.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(train_data_conversion, "validate_score_centering_sample", record_thread)
+    with pytest.raises(ValueError, match="same sampler distribution"):
+        convert_samples_to_train_data(_args(), samples, {}, None, None)
+    assert any(name.startswith("score-centering-validation") for name in threads)
+
+    del samples[3]
+    with pytest.raises(ValueError, match="Duplicate score-centering candidate"):
+        convert_samples_to_train_data(_args(), samples, {}, None, None)

@@ -1,4 +1,7 @@
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
 from typing import Any
 
 import torch
@@ -52,6 +55,29 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
 }
+
+
+# NumPy releases the GIL for these array checks, so samples validate in parallel.
+_SCORE_CENTERING_VALIDATION_THREADS = 16
+
+
+def _validate_score_centering_sample(sample: Sample, k: int) -> None:
+    validate_score_centering_sample(sample, k)
+    if sample.multimodal_train_inputs:
+        raise ValueError("Score centering does not yet support multimodal token expansion")
+
+
+def _validate_score_centering_samples(samples: list[Sample], k: int) -> None:
+    """Validate every sample and raise the first failure in sample order."""
+    workers = min(_SCORE_CENTERING_VALIDATION_THREADS, os.cpu_count() or 1, len(samples))
+    if workers <= 1:
+        for sample in samples:
+            _validate_score_centering_sample(sample, k)
+        return
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="score-centering-validation") as pool:
+        # map yields in submission order, so the raised error matches the serial loop.
+        for _ in pool.map(_validate_score_centering_sample, samples, repeat(k)):
+            pass
 
 
 def convert_samples_to_train_data(
@@ -120,10 +146,7 @@ def convert_samples_to_train_data(
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
     if k := score_centering_top_k(args):
-        for sample in samples:
-            validate_score_centering_sample(sample, k)
-            if sample.multimodal_train_inputs:
-                raise ValueError("Score centering does not yet support multimodal token expansion")
+        _validate_score_centering_samples(samples, k)
         train_data["rollout_topk_token_ids"] = [sample.rollout_topk_token_ids for sample in samples]
         train_data["rollout_topk_log_probs"] = [sample.rollout_topk_log_probs for sample in samples]
 
