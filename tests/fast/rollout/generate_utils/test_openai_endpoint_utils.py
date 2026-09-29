@@ -408,6 +408,16 @@ async def test_collect_samples_delete_failure_is_tolerated(monkeypatch):
     assert len(result.samples) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_error", [None, RuntimeError("delete failed")])
+async def test_close_only_deletes_session(monkeypatch, delete_error):
+    calls = _CollectCalls(monkeypatch, post_outcome=None, delete_outcome=delete_error)
+
+    await _tracer().close()
+
+    assert calls.calls == ["DELETE http://127.0.0.1:12345/sessions/sid-1"]
+
+
 # ── post_buffer_no_retry primitive ──
 
 

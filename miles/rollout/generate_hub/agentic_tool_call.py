@@ -81,8 +81,8 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     # From the tracer, not args: with multiple instances the owning ip:port is per-session.
     metadata = {**metadata, "session_server_id": tracer.session_server_id}
 
-    agent_metadata = None
-    collect_failed = False
+    agent_succeeded = False
+    result = None
     t_start = time.monotonic()
     try:
         logger.debug(f"{log_prefix} Starting agent function call")
@@ -97,9 +97,8 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         logger.debug(f"{log_prefix} Agent function returned in {time.monotonic()-t_start:.1f}s")
     except Exception as e:
         logger.warning(f"{log_prefix} Agent function failed: {e}", exc_info=True)
-
-    finally:
-        # Collect even if the agent failed.
+    else:
+        agent_succeeded = True
         logger.debug(f"{log_prefix} Calling collect_samples...")
         collect_kwargs = {"max_seq_len": max_seq_len}
         if use_v2:
@@ -108,15 +107,17 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             result = await tracer.collect_samples(input.sample, **collect_kwargs)
         # Costs this sample, not the run; a non-2xx still raises RuntimeError.
         except (TimeoutError, httpx.TransportError) as e:
-            collect_failed = True
             logger.warning(f"{log_prefix} Failed collecting samples: {e!r}", exc_info=True)
         else:
             logger.debug(
                 f"{log_prefix} collect_samples done: {len(result.samples)} samples, "
                 f"total_time={time.monotonic()-t_start:.1f}s"
             )
+    finally:
+        if not agent_succeeded:
+            await tracer.close()
 
-    if collect_failed:
+    if result is None:
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
         if collect_spec_metrics:

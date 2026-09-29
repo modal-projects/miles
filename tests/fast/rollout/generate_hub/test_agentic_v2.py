@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -22,12 +23,18 @@ class _Tracer:
         self.reply = reply
         self.error = error
         self.agent_metadata = None
+        self.collect_calls = 0
+        self.close_calls = 0
 
     async def collect_samples(self, input_sample, *, max_seq_len, agent_metadata=None):
+        self.collect_calls += 1
         self.agent_metadata = agent_metadata
         if self.error is not None:
             raise self.error
         return self.reply
+
+    async def close(self):
+        self.close_calls += 1
 
 
 def _generate_input(*, evaluation=False, sampling_params=None, **args_kwargs) -> GenerateFnInput:
@@ -82,11 +89,59 @@ def _patch_agent(monkeypatch, tracer) -> list[str | None]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_version", ["v1", "v2"])
+async def test_agent_failure_closes_without_collecting(monkeypatch, session_version):
+    sample = Sample(status=Sample.Status.COMPLETED, response="partial", response_length=1, tokens=[1])
+    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
+    _patch_agent(monkeypatch, tracer)
+
+    async def failed_agent(**kwargs):
+        raise RuntimeError("agent unavailable")
+
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: failed_agent)
+    generate_input = _generate_input(use_session_server=session_version)
+
+    output = await agentic_tool_call.generate(generate_input)
+
+    assert tracer.collect_calls == 0
+    assert tracer.close_calls == 1
+    aborted = output.samples[0] if session_version == "v2" else output.samples
+    assert aborted is not generate_input.sample
+    assert aborted.status == Sample.Status.ABORTED
+    assert aborted.tokens == generate_input.sample.tokens
+    assert aborted.index == generate_input.sample.index
+    assert generate_input.sample.status == Sample.Status.PENDING
+
+
+@pytest.mark.asyncio
+async def test_agent_cancellation_closes_without_collecting(monkeypatch):
+    tracer = _empty_tracer()
+    _patch_agent(monkeypatch, tracer)
+
+    async def cancelled_agent(**kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: cancelled_agent)
+
+    with pytest.raises(asyncio.CancelledError):
+        await agentic_tool_call.generate(_generate_input())
+
+    assert tracer.collect_calls == 0
+    assert tracer.close_calls == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("evaluation", [False, True])
-async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, evaluation):
+@pytest.mark.parametrize("agent_metadata", [None, {"agent_result": "done"}])
+async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, evaluation, agent_metadata):
     sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1])
     tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
     _patch_agent(monkeypatch, tracer)
+
+    async def successful_agent(**kwargs):
+        return agent_metadata
+
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: successful_agent)
 
     generate_input = _generate_input(evaluation=evaluation, sampling_params={"temperature": 0.7, "max_new_tokens": 8})
     output = await agentic_tool_call.generate(generate_input)
@@ -96,7 +151,7 @@ async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, eva
     assert tracer.sampling_params == {"temperature": 0.7, "max_new_tokens": 8}
     assert output.samples == [sample]
     assert output.samples[0].rollout_id is None
-    assert tracer.agent_metadata == {"agent_result": "done"}
+    assert tracer.agent_metadata == agent_metadata
 
 
 @pytest.mark.asyncio
