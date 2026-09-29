@@ -7,10 +7,10 @@ import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _turn
 
 from miles.rollout.generate_utils.score_centering import (
-    append_score_centering_observations,
-    append_score_centering_topk,
-    configure_score_centering_request,
-    validate_score_centering_sample,
+    append_rollout_topk_logprobs,
+    configure_rollout_topk_logprobs_request,
+    pad_rollout_topk_logprobs,
+    validate_rollout_topk_logprobs_sample,
 )
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, decode_samples_and_merge_input_sample, encode_samples
 from miles.utils.score_centering import validate_score_centering_args
@@ -19,12 +19,12 @@ from miles.utils.types import Sample
 
 def test_observation_padding_retry_and_disabled_wire() -> None:
     sample = _turn([0], [2, 3], [0.5, 0.25])
-    append_score_centering_observations(sample, 2)
+    pad_rollout_topk_logprobs(sample, 2)
     sample.tokens.extend([6, 6])
     sample.response_length += 2
     sample.rollout_log_probs.extend([0.0, 0.0])
     sample.loss_mask.extend([0, 0])
-    validate_score_centering_sample(sample, 3)
+    validate_rollout_topk_logprobs_sample(sample, 3)
     sample.reset_for_retry()
     assert sample.rollout_topk_token_ids is None and sample.rollout_topk_log_probs is None
     old_fields = tuple(field for field in COMPUTED_FIELDS if not field.startswith("rollout_topk_"))
@@ -40,19 +40,19 @@ def test_observation_padding_retry_and_disabled_wire() -> None:
 @pytest.mark.parametrize("openai", [False, True])
 def test_request_candidates_and_sampler_contract(openai: bool) -> None:
     request = {} if openai else {"sampling_params": {}}
-    configure_score_centering_request(_args(score_centering_top_k=128), request, openai=openai)
+    configure_rollout_topk_logprobs_request(_args(score_centering_top_k=128), request, openai=openai)
     assert request["top_logprobs" if openai else "top_logprobs_num"] == 128
     sampling = request if openai else request["sampling_params"]
     assert sampling["temperature"] == 0.7
     sampling["top_p"] = 0.9
     with pytest.raises(ValueError, match="positive top_k"):
-        configure_score_centering_request(_args(), request, openai=openai)
+        configure_rollout_topk_logprobs_request(_args(), request, openai=openai)
     sampling["top_k"] = 64
-    configure_score_centering_request(_args(score_centering_top_k=128), request, openai=openai)
+    configure_rollout_topk_logprobs_request(_args(score_centering_top_k=128), request, openai=openai)
     assert request["sampling_logprobs_mode"] == "support"
     assert "top_logprobs" not in request and "top_logprobs_num" not in request
     original = deepcopy(request)
-    configure_score_centering_request(_args(loss_type="policy_loss"), request, openai=openai)
+    configure_rollout_topk_logprobs_request(_args(loss_type="policy_loss"), request, openai=openai)
     assert request == original
 
 
@@ -67,7 +67,7 @@ def test_request_candidates_and_sampler_contract(openai: bool) -> None:
 )
 def test_implicit_openai_grammar_constraints_are_rejected(constraint: dict) -> None:
     with pytest.raises(ValueError):
-        configure_score_centering_request(_args(), constraint, openai=True)
+        configure_rollout_topk_logprobs_request(_args(), constraint, openai=True)
 
 
 @pytest.mark.parametrize(
@@ -134,18 +134,18 @@ def test_missing_or_mismatched_probabilities_fail_before_training() -> None:
     sample = _turn([0], [2, 3], [0.5, 0.25])
     sample.rollout_log_probs[0] -= 0.1
     with pytest.raises(ValueError, match="same sampler"):
-        validate_score_centering_sample(sample, 3)
+        validate_rollout_topk_logprobs_sample(sample, 3)
     sample.rollout_topk_token_ids[1] = -1
     with pytest.raises(ValueError, match="Every trained token"):
-        validate_score_centering_sample(sample, 3)
+        validate_rollout_topk_logprobs_sample(sample, 3)
     with pytest.raises(ValueError, match="output_top_logprobs"):
-        append_score_centering_topk(Sample(response_length=1), {"output_token_logprobs": [(-1.0, 2, None)]}, 3)
+        append_rollout_topk_logprobs(Sample(response_length=1), {"output_token_logprobs": [(-1.0, 2, None)]}, 3)
 
 
 @pytest.mark.parametrize("mode", ["selected", "support"])
 def test_zero_token_completion_accepts_missing_candidate_fields(mode: str) -> None:
     sample = Sample(response_length=0)
-    append_score_centering_topk(sample, {}, 3, sampling_logprobs_mode=mode)
+    append_rollout_topk_logprobs(sample, {}, 3, sampling_logprobs_mode=mode)
     assert sample.rollout_topk_token_ids.shape == (0, 3)
     assert sample.rollout_topk_log_probs.shape == (0, 3)
 
@@ -161,7 +161,7 @@ def test_candidate_validation_preserves_order_and_allows_repeated_padding(candid
         sample.loss_mask = [0, 0]
     original_ids = sample.rollout_topk_token_ids.copy()
     original_logps = sample.rollout_topk_log_probs.copy()
-    validate_score_centering_sample(sample, 3)
+    validate_rollout_topk_logprobs_sample(sample, 3)
     np.testing.assert_array_equal(sample.rollout_topk_token_ids, original_ids)
     np.testing.assert_array_equal(sample.rollout_topk_log_probs, original_logps)
 
@@ -174,4 +174,4 @@ def test_candidate_validation_rejects_unsorted_duplicates(masked: bool, token: i
     sample.rollout_topk_log_probs[1] = np.log([0.25, 0.5, 0.25])
     sample.loss_mask[1] = 0 if masked else 1
     with pytest.raises(ValueError, match="Duplicate"):
-        validate_score_centering_sample(sample, 3)
+        validate_rollout_topk_logprobs_sample(sample, 3)

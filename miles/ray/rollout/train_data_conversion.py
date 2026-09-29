@@ -3,7 +3,7 @@ from typing import Any
 
 import torch
 
-from miles.rollout.generate_utils.score_centering import validate_score_centering_sample
+from miles.rollout.generate_utils.score_centering import validate_rollout_topk_logprobs_sample
 from miles.utils import object_store
 from miles.utils.dp_schedule import build_dp_schedule, has_full_schedule_config
 from miles.utils.lora.utils import is_multi_lora_enabled
@@ -121,9 +121,9 @@ def convert_samples_to_train_data(
 
     if k := score_centering_top_k(args):
         for sample in samples:
-            validate_score_centering_sample(sample, k)
+            validate_rollout_topk_logprobs_sample(sample, k)
             if sample.multimodal_train_inputs:
-                raise ValueError("Score centering does not yet support multimodal token expansion")
+                raise ValueError("Rollout top-k logprobs collection does not yet support multimodal token expansion")
         train_data["rollout_topk_token_ids"] = [sample.rollout_topk_token_ids for sample in samples]
         train_data["rollout_topk_log_probs"] = [sample.rollout_topk_log_probs for sample in samples]
 

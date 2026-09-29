@@ -255,9 +255,13 @@ class Sample:
             ), f"rollout_log_probs length ({len(self.rollout_log_probs)}) != response_length ({self.response_length})"
         if self.rollout_topk_token_ids is not None or self.rollout_topk_log_probs is not None:
             ids, logps = self.rollout_topk_token_ids, self.rollout_topk_log_probs
-            assert ids is not None and logps is not None, "Score-centering IDs and probabilities must both be present"
-            assert ids.ndim == 2 and ids.shape == logps.shape, "Score-centering candidate shapes do not match"
-            assert ids.shape[0] == self.response_length, "Score-centering candidates do not match response length"
+            assert (
+                ids is not None and logps is not None
+            ), "Rollout top-k logprobs IDs and probabilities must both be present"
+            assert ids.ndim == 2 and ids.shape == logps.shape, "Rollout top-k logprobs candidate shapes do not match"
+            assert (
+                ids.shape[0] == self.response_length
+            ), "Rollout top-k logprobs candidates do not match response length"
         if self.rollout_sampling_mask is not None:
             assert len(self.rollout_sampling_mask) == self.response_length, (
                 f"rollout_sampling_mask length ({len(self.rollout_sampling_mask)}) "

@@ -4,7 +4,7 @@ from argparse import Namespace
 
 import numpy as np
 
-from miles.rollout.generate_utils.score_centering import append_score_centering_topk
+from miles.rollout.generate_utils.score_centering import append_rollout_topk_logprobs
 from miles.utils.types import Sample
 
 
@@ -55,7 +55,7 @@ def _turn(prompt: list[int], output: list[int], probabilities: list[float]) -> S
         reward=1.0,
     )
     rows = [[(logp, token, None) for logp, token in zip(logps, output, strict=True)]] * len(output)
-    append_score_centering_topk(
+    append_rollout_topk_logprobs(
         sample,
         {
             "output_token_logprobs": [(logp, token, None) for logp, token in zip(logps, output, strict=True)],

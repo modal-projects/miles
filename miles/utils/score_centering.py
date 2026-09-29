@@ -11,7 +11,7 @@ def score_centering_top_k(args: Namespace) -> int:
     return args.score_centering_top_k if getattr(args, "loss_type", None) == "score_centering" else 0
 
 
-def validate_score_centering_sampling(
+def validate_rollout_topk_logprobs_sampling(
     sampling: Mapping[str, Any], *, temperature: float, candidate_count: int
 ) -> None:
     """Require a bounded support covered by the recorded candidates.
@@ -20,26 +20,30 @@ def validate_score_centering_sampling(
     The candidate count must cover the complete realized support.
     """
     if sampling.get("temperature", temperature) != temperature or not math.isfinite(temperature) or temperature <= 0:
-        raise ValueError("Score centering requires the same positive rollout temperature on every generation call")
+        raise ValueError(
+            "Rollout top-k logprobs collection requires the same positive rollout temperature on every generation call"
+        )
     top_p = sampling.get("top_p", 1.0)
     top_k = sampling.get("top_k", -1)
     if not 0 < top_p <= 1 or (top_k != -1 and not 0 < top_k <= candidate_count):
-        raise ValueError("Score centering requires top_p in (0, 1] and top_k=-1 or 1..score_centering_top_k")
+        raise ValueError("Rollout top-k logprobs collection requires top_p in (0, 1] and top_k=-1 or 1..k")
     if top_p < 1 and top_k == -1:
-        raise ValueError("Score centering requires positive top_k with top_p filtering to bound the support")
+        raise ValueError(
+            "Rollout top-k logprobs collection requires positive top_k with top_p filtering to bound the support"
+        )
     if sampling.get("min_p", 0.0) != 0.0:
-        raise ValueError("Score centering requires min_p=0.0")
+        raise ValueError("Rollout top-k logprobs collection requires min_p=0.0")
     for key in ("json_schema", "regex", "ebnf", "structural_tag", "custom_logit_processor", "logit_bias"):
         if sampling.get(key):
-            raise ValueError(f"Score centering does not support constrained/custom sampling ({key})")
+            raise ValueError(f"Rollout top-k logprobs collection does not support constrained/custom sampling ({key})")
     response_format = sampling.get("response_format")
     if response_format and (not isinstance(response_format, Mapping) or response_format.get("type", "text") != "text"):
-        raise ValueError("Score centering does not support constrained response_format")
+        raise ValueError("Rollout top-k logprobs collection does not support constrained response_format")
     tool_choice = sampling.get("tool_choice", "auto")
     if tool_choice not in (None, "auto", "none"):
-        raise ValueError("Score centering does not support constrained tool_choice")
+        raise ValueError("Rollout top-k logprobs collection does not support constrained tool_choice")
     if tool_choice != "none" and any(tool.get("function", {}).get("strict") for tool in sampling.get("tools") or []):
-        raise ValueError("Score centering does not support strict tool schemas")
+        raise ValueError("Rollout top-k logprobs collection does not support strict tool schemas")
 
 
 def validate_score_centering_args(args: Namespace) -> None:
@@ -52,7 +56,7 @@ def validate_score_centering_args(args: Namespace) -> None:
     low, high = args.score_centering_mis_low, args.score_centering_mis_high
     if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
         raise ValueError("Score-centering MIS bounds must be finite with 0 < low <= high")
-    validate_score_centering_sampling(
+    validate_rollout_topk_logprobs_sampling(
         {"top_p": args.rollout_top_p, "top_k": args.rollout_top_k},
         temperature=args.rollout_temperature,
         candidate_count=args.score_centering_top_k,

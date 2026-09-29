@@ -70,7 +70,7 @@ assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS)
 
 _SAMPLES_META_KEY = "_samples_meta"
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
-_SCORE_CENTERING_FIELDS = ("rollout_topk_token_ids", "rollout_topk_log_probs")
+_ROLLOUT_TOPK_LOGPROBS_FIELDS = ("rollout_topk_token_ids", "rollout_topk_log_probs")
 
 
 @dataclasses.dataclass
@@ -127,8 +127,8 @@ def encode_samples(
                 sample_meta[field] = value
                 continue
             if value is None:
-                # Preserve the existing wire format when score centering is disabled.
-                if field in _SCORE_CENTERING_FIELDS:
+                # Preserve the existing wire format when rollout top-k logprobs collection is disabled.
+                if field in _ROLLOUT_TOPK_LOGPROBS_FIELDS:
                     continue
                 nulls.append(field)
                 continue
@@ -208,7 +208,7 @@ def decode_samples_and_merge_input_sample(
             if field in nulls:
                 setattr(sample, field, copy(spec.null))
                 continue
-            if field in _SCORE_CENTERING_FIELDS and f"{field}.{sample_index}" not in tensors:
+            if field in _ROLLOUT_TOPK_LOGPROBS_FIELDS and f"{field}.{sample_index}" not in tensors:
                 # Older producers have no candidate fields; training validates
                 # their presence when the new loss is actually selected.
                 setattr(sample, field, None)
