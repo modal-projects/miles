@@ -28,8 +28,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
     session_sample_postprocessor_path: str | None
-    loss_type: str
-    score_centering_top_k: int
+    rollout_top_logprobs_num: int
+    rollout_sampling_logprobs_mode: str
     rollout_temperature: float
 
 
@@ -61,7 +61,7 @@ def compute_session_server_config(
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),
         session_sample_postprocessor_path=getattr(args, "session_sample_postprocessor_path", None),
-        loss_type=getattr(args, "loss_type", "policy_loss"),
-        score_centering_top_k=getattr(args, "score_centering_top_k", 128),
+        rollout_top_logprobs_num=args.rollout_top_logprobs_num,
+        rollout_sampling_logprobs_mode=args.rollout_sampling_logprobs_mode,
         rollout_temperature=getattr(args, "rollout_temperature", 1.0),
     )

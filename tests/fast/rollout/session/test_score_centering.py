@@ -10,8 +10,8 @@ import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _meta, _Tokenizer
 from tests.fast.fixtures.session_fixtures import make_session_server_config
 
+from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.rollout.generate_utils.sample_utils import merge_samples
-from miles.rollout.generate_utils.score_centering import validate_score_centering_sample
 from miles.rollout.session.core import SessionCore
 from miles.rollout.session.errors import MessageValidationError
 from miles.rollout.session.linear_trajectory import SessionRegistry
@@ -26,7 +26,7 @@ from miles.rollout.session.v2.session_state import SessionRegistryV2
     "registry_type,core_type", [(SessionRegistry, SessionCore), (SessionRegistryV2, SessionCoreV2)]
 )
 def test_score_centering_training_and_evaluation_sessions(registry_type: type, core_type: type) -> None:
-    config = make_session_server_config(loss_type="score_centering", rollout_temperature=0.7)
+    config = make_session_server_config(rollout_top_logprobs_num=128, rollout_temperature=0.7)
     tokenizer = SimpleNamespace(
         create_comparator=lambda: None,
         chat_template_kwargs={},
@@ -79,7 +79,7 @@ def test_session_producer_trims_candidates_with_tito_tokens() -> None:
     assert samples[0].rollout_topk_token_ids.shape == (1, 3)
     merged = merge_samples(samples, _Tokenizer())
     assert merged.loss_mask == [1, 0, 1, 1]
-    validate_score_centering_sample(merged, 3)
+    validate_rollout_topk_logprobs_sample(merged, 3)
 
 
 @pytest.mark.parametrize("evaluation", [False, True])
@@ -106,9 +106,9 @@ def test_evaluation_client_top_logprobs_do_not_collect_training_candidates(evalu
 
 def test_filtered_session_request_and_producer() -> None:
     config = make_session_server_config(
-        loss_type="score_centering",
+        rollout_top_logprobs_num=3,
+        rollout_sampling_logprobs_mode="support",
         rollout_temperature=0.7,
-        score_centering_top_k=3,
         use_sampling_support_replay=True,
     )
     tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
@@ -145,23 +145,31 @@ def test_filtered_session_request_and_producer() -> None:
         max_trim_tokens=0,
     )
     assert len(samples) == 1
-    validate_score_centering_sample(samples[0], 3)
+    validate_rollout_topk_logprobs_sample(samples[0], 3)
     np.testing.assert_array_equal(samples[0].rollout_topk_token_ids, [[2, 3, -1]])
     np.testing.assert_allclose(samples[0].rollout_log_probs, [math.log(4 / 7)])
 
 
-@pytest.mark.parametrize("override", [{"temperature": 0.8}, {"top_p": 0.9}, {"min_p": 0.1}, {"logit_bias": {"1": 2}}])
-def test_final_model_sampling_rules_are_validated(override: dict) -> None:
-    config = make_session_server_config(loss_type="score_centering", rollout_temperature=0.7)
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        ({"temperature": 0.8}, "Rollout top-k logprobs"),
+        ({"top_p": 0.9}, "bounded training-request sampling"),
+        ({"min_p": 0.1}, "Rollout top-k logprobs"),
+        ({"logit_bias": {"1": 2}}, "Rollout top-k logprobs"),
+    ],
+)
+def test_final_model_sampling_rules_are_validated(override: dict, match: str) -> None:
+    config = make_session_server_config(rollout_top_logprobs_num=128, rollout_temperature=0.7)
     tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request | override)
     client_args = {"messages": [{"role": "user", "content": "Solve the problem."}]}
-    with pytest.raises(MessageValidationError, match="Score centering"):
+    with pytest.raises(MessageValidationError, match=match):
         prepare_chat_request(client_args, tokenizer, config=config, turn_args=None)
     assert client_args == {"messages": [{"role": "user", "content": "Solve the problem."}]}
 
 
 def test_nullable_sampling_fields_receive_explicit_defaults() -> None:
-    config = make_session_server_config(loss_type="score_centering", rollout_temperature=0.7)
+    config = make_session_server_config(rollout_top_logprobs_num=128, rollout_temperature=0.7)
     tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
     prepared = prepare_chat_request(
         {"temperature": None, "top_p": None, "top_k": None, "min_p": None},

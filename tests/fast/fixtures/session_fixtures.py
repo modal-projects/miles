@@ -31,8 +31,8 @@ def make_session_server_config(**overrides: Any) -> SessionServerConfig:
         pause_generation_mode=None,
         session_sample_picker_path=None,
         session_sample_postprocessor_path=None,
-        loss_type="policy_loss",
-        score_centering_top_k=128,
+        rollout_top_logprobs_num=0,
+        rollout_sampling_logprobs_mode="selected",
         rollout_temperature=1.0,
     )
     defaults.update(overrides)

@@ -28,8 +28,8 @@ _ARGS_TO_CONFIG_FIELD = {
     "pause_generation_mode": "pause_generation_mode",
     "session_sample_picker_path": "session_sample_picker_path",
     "session_sample_postprocessor_path": "session_sample_postprocessor_path",
-    "loss_type": "loss_type",
-    "score_centering_top_k": "score_centering_top_k",
+    "rollout_top_logprobs_num": "rollout_top_logprobs_num",
+    "rollout_sampling_logprobs_mode": "rollout_sampling_logprobs_mode",
     "rollout_temperature": "rollout_temperature",
 }
 
@@ -64,8 +64,8 @@ _DISTINCT_ARGS_VALUES = dict(
     pause_generation_mode="in_place",
     session_sample_picker_path="fake.picker",
     session_sample_postprocessor_path="fake.postprocessor",
-    loss_type="score_centering",
-    score_centering_top_k=32,
+    rollout_top_logprobs_num=32,
+    rollout_sampling_logprobs_mode="support",
     rollout_temperature=0.7,
 )
 
@@ -120,17 +120,14 @@ class TestComputeSessionServerConfig:
         )
         assert [getattr(config, name) for name in _OPTIONAL_ARGS_ATTRS] == [None] * len(_OPTIONAL_ARGS_ATTRS)
 
-    def test_older_args_disable_score_centering(self):
-        fields = {"loss_type", "score_centering_top_k", "rollout_temperature"}
-        args = Namespace(**{key: value for key, value in _DISTINCT_ARGS_VALUES.items() if key not in fields})
+    def test_older_args_default_rollout_temperature(self):
+        args = Namespace(
+            **{key: value for key, value in _DISTINCT_ARGS_VALUES.items() if key != "rollout_temperature"}
+        )
         config = compute_session_server_config(
             args, host="127.0.0.1", port=5001, instance_id=None, backend_url="http://127.0.0.1:3000"
         )
-        assert (config.loss_type, config.score_centering_top_k, config.rollout_temperature) == (
-            "policy_loss",
-            128,
-            1.0,
-        )
+        assert config.rollout_temperature == 1.0
 
 
 _COMPLETE_CONFIG_KWARGS = dict(
@@ -158,8 +155,8 @@ _COMPLETE_CONFIG_KWARGS = dict(
     pause_generation_mode=None,
     session_sample_picker_path=None,
     session_sample_postprocessor_path=None,
-    loss_type="policy_loss",
-    score_centering_top_k=128,
+    rollout_top_logprobs_num=0,
+    rollout_sampling_logprobs_mode="selected",
     rollout_temperature=1.0,
 )
 

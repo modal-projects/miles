@@ -15,12 +15,11 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
     get_indexer_topk_from_response,
     get_routed_experts_from_response,
 )
+from miles.rollout.generate_utils.rollout_topk_logprobs import append_rollout_topk_logprobs
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata
-from miles.rollout.generate_utils.score_centering import append_score_centering_topk
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
-from miles.utils.score_centering import score_centering_top_k
 from miles.utils.types import Sample, WeightVersionsPerCall
 
 
@@ -138,10 +137,10 @@ def _compute_sample_from_openai_record(
     if not evaluation and (
         record.request.get("top_logprobs") or record.request.get("sampling_logprobs_mode") == "support"
     ):
-        append_score_centering_topk(
+        append_rollout_topk_logprobs(
             sample,
             choice["meta_info"],
-            score_centering_top_k(args),
+            args.rollout_top_logprobs_num,
             sampling_logprobs_mode=record.request.get("sampling_logprobs_mode", "selected"),
         )
     sample.rollout_routed_experts = (

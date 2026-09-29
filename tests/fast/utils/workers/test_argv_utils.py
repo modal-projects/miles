@@ -138,8 +138,8 @@ class TestConfigToArgv:
             pause_generation_mode=None,
             session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
             session_sample_postprocessor_path=("miles.rollout.session.v2.postprocessor_hub.default_postprocess"),
-            loss_type="score_centering",
-            score_centering_top_k=128,
+            rollout_top_logprobs_num=128,
+            rollout_sampling_logprobs_mode="selected",
             rollout_temperature=0.7,
         )
         assert parse_config_argv(SessionServerConfig, config_to_argv(session_config)) == session_config
