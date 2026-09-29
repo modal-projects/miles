@@ -12,7 +12,7 @@ from miles.backends.training_utils.loss_hub.score_centering.masks import (
     sanitize_head_log_probs,
     scored_log_probs,
 )
-from miles.backends.training_utils.loss_hub.score_centering.weights import importance_weighting
+from miles.backends.training_utils.loss_hub.score_centering.weights import importance_sampling
 
 
 def score_centering_loss(
@@ -48,7 +48,7 @@ def score_centering_loss(
         raise ValueError("Score-centering sample tensors must be [tokens] and head tensors [tokens, candidates]")
     if not torch.isfinite(advantages).all():
         raise ValueError("Score-centering advantages must be finite")
-    weighting = importance_weighting(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
+    sampling = importance_sampling(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
     active = advantages.detach() != 0
     train_head = sanitize_head_log_probs(train_head_log_probs, head_mask, active)
     rollout_head = sanitize_head_log_probs(rollout_head_log_probs, head_mask, active)
@@ -56,9 +56,9 @@ def score_centering_loss(
         p, q = head_probs(train_head, head_mask), head_probs(rollout_head, head_mask)
         p_mass, q_mass = p.sum(-1), q.sum(-1)
         rho = (1 - q_mass).clamp_min(eps) / (1 - p_mass).clamp_min(eps)
-        alpha = weighting.tail_scale(rho, p.dtype)
-        residual = weighting.head_mass(p, q, train_head - rollout_head) - alpha.unsqueeze(-1) * p
-        weight = weighting.sample_weight(drop_inactive_nan(train_log_probs - rollout_log_probs, active, 0.0))
+        alpha = sampling.tail_scale(rho, p.dtype)
+        residual = sampling.head_mass(p, q, train_head - rollout_head) - alpha.unsqueeze(-1) * p
+        weight = sampling.sample_weight(drop_inactive_nan(train_log_probs - rollout_log_probs, active, 0.0))
     correction = (residual * scored_log_probs(train_head, residual, active)).sum(-1)
     loss = -advantages.detach() * (weight * scored_log_probs(train_log_probs, weight, active) - correction)
     return loss, {

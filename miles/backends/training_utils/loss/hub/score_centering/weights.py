@@ -1,6 +1,6 @@
-"""Importance weightings for score centering (arXiv:2609.20807, Appendix A.2/A.3).
+"""Importance sampling for score centering (arXiv:2609.20807, Appendix A.2/A.3).
 
-Each weighting is an importance-sampling weight function f of the ratio
+Each scheme applies an importance-sampling weight function f to the ratio
 r = p / q. It supplies the terms of Eq. 12, whose head coefficient is
 q * f(p / q) - alpha * p with tail scale alpha = rho * f(1 / rho), and the
 sampled-token weight of the loss:
@@ -20,7 +20,7 @@ import torch
 
 
 @dataclass(frozen=True)
-class NoWeighting:
+class NoImportanceSampling:
     """Vanilla score centering: f(r) = 1."""
 
     def head_mass(self, p: torch.Tensor, q: torch.Tensor, log_ratio: torch.Tensor) -> torch.Tensor:
@@ -34,7 +34,7 @@ class NoWeighting:
 
 
 @dataclass(frozen=True)
-class TruncatedWeighting:
+class TruncatedImportanceSampling:
     """Truncated importance sampling (TIS): f(r) = min(r, clip)."""
 
     clip: float
@@ -53,7 +53,7 @@ class TruncatedWeighting:
 
 
 @dataclass(frozen=True)
-class MaskedWeighting:
+class MaskedImportanceSampling:
     """Masked importance sampling (MIS): f(r) = r for low <= r <= high, else 0."""
 
     low: float
@@ -75,20 +75,20 @@ class MaskedWeighting:
         return torch.where(self._inside(log_ratio), log_ratio.clamp(max=math.log(self.high)).exp(), 0.0)
 
 
-def importance_weighting(
+def importance_sampling(
     mode: str, *, tis_clip: float, mis_low: float, mis_high: float
-) -> NoWeighting | TruncatedWeighting | MaskedWeighting:
-    """Validate the parameters of ``mode`` and return its weighting."""
+) -> NoImportanceSampling | TruncatedImportanceSampling | MaskedImportanceSampling:
+    """Validate the parameters of ``mode`` and return its importance sampling."""
     if mode == "tis" and (not math.isfinite(tis_clip) or tis_clip <= 0):
         raise ValueError("Score-centering TIS clip must be positive and finite")
     if mode == "mis" and (not math.isfinite(mis_low) or not math.isfinite(mis_high) or not 0 < mis_low <= mis_high):
         raise ValueError("Score-centering MIS bounds must be finite with 0 < low <= high")
     if mode == "none":
-        return NoWeighting()
+        return NoImportanceSampling()
     if mode == "tis":
-        return TruncatedWeighting(clip=tis_clip)
+        return TruncatedImportanceSampling(clip=tis_clip)
     if mode == "mis":
-        return MaskedWeighting(low=mis_low, high=mis_high)
+        return MaskedImportanceSampling(low=mis_low, high=mis_high)
     raise ValueError(f"Unknown score-centering importance weighting: {mode}")
 
 
@@ -101,5 +101,5 @@ def importance_weights(
     mis_high: float = 5.0,
 ) -> torch.Tensor:
     """Evaluate token-level weights without exponentiating unbounded ratios."""
-    weighting = importance_weighting(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
-    return weighting.sample_weight(log_ratio)
+    sampling = importance_sampling(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
+    return sampling.sample_weight(log_ratio)
