@@ -6,13 +6,13 @@ head residual must be detached: differentiating either changes the estimator.
 
 import torch
 
+from miles.backends.training_utils.loss_hub.score_centering.importance_sampling import importance_sampling
 from miles.backends.training_utils.loss_hub.score_centering.masks import (
     drop_inactive_nan,
     head_probs,
     sanitize_head_log_probs,
     scored_log_probs,
 )
-from miles.backends.training_utils.loss_hub.score_centering.weights import importance_sampling
 
 
 def score_centering_loss(
