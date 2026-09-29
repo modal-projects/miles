@@ -7,40 +7,12 @@ head residual must be detached: differentiating either changes the estimator.
 import math
 
 import torch
-
-
-def _token_mask(active: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
-    """Broadcast a per-token mask [tokens] over values [tokens, ...]."""
-    return active.reshape(active.shape + (1,) * (values.ndim - active.ndim))
-
-
-def drop_inactive_nan(values: torch.Tensor, active: torch.Tensor, fill: float) -> torch.Tensor:
-    """Replace NaN on inactive tokens with ``fill``; NaN on active tokens is kept for the caller to reject."""
-    return torch.where(~_token_mask(active, values) & torch.isnan(values), fill, values)
-
-
-def sanitize_head_log_probs(log_probs: torch.Tensor, head_mask: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
-    """Head log-probabilities with inactive NaN mapped to ``-inf`` and padding to the placeholder 0."""
-    if (_token_mask(active, log_probs) & head_mask & torch.isnan(log_probs)).any():
-        raise ValueError("Score centering has a NaN candidate log-probability on an active token")
-    return torch.where(head_mask, drop_inactive_nan(log_probs, active, -torch.inf), 0.0)
-
-
-def head_probs(log_probs: torch.Tensor, head_mask: torch.Tensor) -> torch.Tensor:
-    """Probabilities of the head candidates, zero at padding."""
-    return log_probs.exp().masked_fill(~head_mask, 0.0)
-
-
-def scored_log_probs(log_probs: torch.Tensor, coefficient: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
-    """Log-probabilities that enter the loss, zeroed wherever the coefficient is zero.
-
-    Masking before the multiply keeps ``0 * -inf`` from turning the loss into NaN.
-    """
-    finite = torch.isfinite(log_probs)
-    scored = coefficient != 0
-    if (_token_mask(active, log_probs) & scored & ~finite).any():
-        raise ValueError("Score centering has a non-finite log-probability with nonzero gradient weight")
-    return torch.where(scored & finite, log_probs, 0.0)
+from miles.backends.training_utils.loss_hub.score_centering.masks import (
+    drop_inactive_nan,
+    head_probs,
+    sanitize_head_log_probs,
+    scored_log_probs,
+)
 
 
 def _validate_importance_args(mode: str, tis_clip: float, mis_low: float, mis_high: float) -> None:
