@@ -142,6 +142,9 @@ class TestConfigToArgv:
             custom_rollout_request_hook_args={},
             rollout_request_max_attempts=1,
             rollout_request_retry_interval=1.0,
+            loss_type="score_centering",
+            score_centering_top_k=128,
+            rollout_temperature=0.7,
         )
         assert parse_config_argv(SessionServerConfig, config_to_argv(session_config)) == session_config
 
