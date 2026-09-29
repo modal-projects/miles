@@ -11,7 +11,7 @@ Add these arguments to an existing text-only GRPO training recipe:
 ```bash
 --loss-type score_centering \
 --advantage-estimator grpo \
---score-centering-top-k 128 \
+--rollout-top-logprobs-num 128 \
 --score-centering-is none \
 --rollout-temperature 1.0 \
 --rollout-top-p 1.0 \
@@ -47,13 +47,13 @@ loss  = -A * (stop_gradient(f(p[token] / q[token])) * log(p[token])
 
 Outside `H`, the approximation models `q` as `rho * p`. The sampled token always uses its recorded `q[token]`, including when it is outside `H`. All weights and correction coefficients are detached. Full-distribution centering cancels the expected constant-reward gradient; the top-k version approximates the true tail and does not guarantee exact cancellation for an arbitrary tail.
 
-With top-p/top-k filtering, Miles asks SGLang for log probabilities over the realized sampling support (`sampling_logprobs_mode="support"`). The candidate count must cover that entire support. These are the sampler's post-filter probabilities; Miles stores them directly, while trainer logprobs use the same support. There is then no approximated tail: the correction sums over every token the sampler could emit.
+With top-p/top-k filtering, set `--rollout-sampling-logprobs-mode support`: Miles then asks SGLang for log probabilities over the realized sampling support (`sampling_logprobs_mode="support"`). `--rollout-top-logprobs-num` must cover that entire support. These are the sampler's post-filter probabilities; Miles stores them directly, while trainer logprobs use the same support. There is then no approximated tail: the correction sums over every token the sampler could emit.
 
 The trainer computes only the requested log probabilities from each vocabulary shard, reducing normalization scalars and selected logits across tensor-parallel ranks. It excludes padded vocabulary entries and computes probabilities in float32 for BF16/FP16 models. `--log-probs-chunk-size` controls the temporary computation size; `--recompute-loss-function` can trade computation for saved activations. No full vocabulary is gathered across ranks.
 
 ## Rollout and data contract
 
-Native SGLang generation, the legacy rollout path, and both session-server versions request candidate probabilities at generation time. Each `Sample` carries:
+Native SGLang generation, the legacy rollout path, and both session-server versions request candidate probabilities at generation time, as configured by the generic rollout arguments `--rollout-top-logprobs-num` and `--rollout-sampling-logprobs-mode`. On training requests these arguments override any client-supplied `top_logprobs`, `top_logprobs_num`, or `sampling_logprobs_mode`. Each `Sample` carries:
 
 - `rollout_topk_token_ids`: int32 array shaped `[response_length, k]`.
 - `rollout_topk_log_probs`: float32 array of the same shape.
@@ -63,7 +63,7 @@ For bounded sampling, the candidate arrays contain exactly the surviving tokens 
 
 Evaluation requests skip this collection and may use independent sampling settings, including greedy decoding. The built-in agentic producer marks evaluation sessions when creating them; custom session clients should create them with `POST /sessions` with JSON body `{"evaluation": true}`.
 
-For unfiltered session rollouts, more than 20 candidates require `--use-miles-router`. The SGLang Rust router caps OpenAI `top_logprobs` at 20, while MilesRouter forwards a larger request to SGLang unchanged. To use the SGLang router for unfiltered session rollouts, set `--score-centering-top-k 20` or less. Filtered rollouts request support probabilities instead of `top_logprobs` and do not use that cap. Native `/generate` rollouts support either router.
+For unfiltered session rollouts, more than 20 candidates require `--use-miles-router`. The SGLang Rust router caps OpenAI `top_logprobs` at 20, while MilesRouter forwards a larger request to SGLang unchanged. To use the SGLang router for unfiltered session rollouts, set `--rollout-top-logprobs-num 20` or less. Filtered rollouts request support probabilities instead of `top_logprobs` and do not use that cap. Native `/generate` rollouts support either router.
 
 Unused candidate slots and non-trained observation rows contain token ID `-1` and log probability `-inf`. Tool-observation masks, multi-turn merging, retries, trailing-token trimming, and truncation preserve row alignment. Session serialization and data-parallel sharding retain both arrays. Candidates stay on CPU until the trainer selects its context-parallel rows.
 
@@ -72,7 +72,7 @@ Custom rollout producers must supply these fields with probabilities from the ac
 ## Supported configurations and limits
 
 - The shared loss is wired into Megatron and FSDP. Candidate selection supports tensor parallelism, packed (`thd`) and padded (`bshd`) zigzag context parallelism, and packed all-gather context parallelism.
-- Sampling requires a fixed positive temperature and `min_p=0` on every call. Unfiltered sampling uses `top_p=1`, `top_k=-1`. Filtered sampling requires positive `top_k` no larger than `--score-centering-top-k`; top-p filtering also requires positive top-k. For example, use `--rollout-top-p 0.9 --rollout-top-k 64 --score-centering-top-k 128`. Global filtered rollout settings automatically enable sampling-support replay. Per-request overrides are checked when each request is built. See the sampling-support replay guide for its request and server requirements.
+- Sampling requires a fixed positive temperature and `min_p=0` on every call. Unfiltered sampling uses `top_p=1`, `top_k=-1`. Filtered sampling requires `--rollout-sampling-logprobs-mode support` and positive `top_k` no larger than `--rollout-top-logprobs-num`; top-p filtering also requires positive top-k. For example, use `--rollout-top-p 0.9 --rollout-top-k 64 --rollout-top-logprobs-num 128 --rollout-sampling-logprobs-mode support`. Global filtered rollout settings automatically enable sampling-support replay. Per-request overrides are checked when each request is built. See the sampling-support replay guide for its request and server requirements.
 - Filtered sampling requires SGLang with support log probabilities (SGLang PR [#40932](https://github.com/sgl-project/sglang/pull/40932), included in the `sglang-miles` branch by [#41047](https://github.com/sgl-project/sglang/pull/41047)). The response must include aligned `output_token_sampling_mask` and list-valued `output_token_sampling_logprobs`. Unfiltered sampling still requires `output_top_logprobs`. Miles-managed rollout workers set `SGLANG_RETURN_ORIGINAL_LOGPROB=0`; external servers must use the same setting. OpenAI session responses must expose these fields in `choices[0].meta_info`; a generic OpenAI-compatible server without that metadata is insufficient.
 - Constrained/custom sampling, speculative decoding, true-on-policy mode, OPD, multi-LoRA/Tinker losses, sequence masking, custom policy-loss reducers, and logprob recomputation via prefill are rejected. Multimodal token expansion is not supported. The initial advantage estimator is GRPO.
 - Retaining `k=128` uses about 1 KiB per response position for the two arrays, before transport overhead. Larger `k` improves the tail approximation at additional storage and compute cost.
