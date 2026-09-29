@@ -5,6 +5,7 @@ head residual must be detached: differentiating either changes the estimator.
 """
 
 import math
+from dataclasses import dataclass
 
 import torch
 
@@ -16,13 +17,77 @@ from miles.backends.training_utils.loss_hub.score_centering.masks import (
 )
 
 
-def _validate_importance_args(mode: str, tis_clip: float, mis_low: float, mis_high: float) -> None:
+@dataclass(frozen=True)
+class NoWeighting:
+    """Vanilla score centering: f(r) = 1."""
+
+    def head_mass(self, p: torch.Tensor, q: torch.Tensor, log_ratio: torch.Tensor) -> torch.Tensor:
+        return q
+
+    def tail_scale(self, rho: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        return rho
+
+    def sample_weight(self, log_ratio: torch.Tensor) -> torch.Tensor:
+        return torch.ones_like(log_ratio)
+
+
+@dataclass(frozen=True)
+class TruncatedWeighting:
+    """Truncated importance sampling (TIS): f(r) = min(r, clip)."""
+
+    clip: float
+
+    def head_mass(self, p: torch.Tensor, q: torch.Tensor, log_ratio: torch.Tensor) -> torch.Tensor:
+        # q * min(p/q, c), including q=0, without 0 * inf.
+        return torch.minimum(p, self.clip * q)
+
+    def tail_scale(self, rho: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        return (self.clip * rho).clamp_max(1)
+
+    def sample_weight(self, log_ratio: torch.Tensor) -> torch.Tensor:
+        if torch.isnan(log_ratio).any():
+            raise ValueError("Score-centering importance log-ratio contains NaN")
+        return log_ratio.clamp(max=math.log(self.clip)).exp()
+
+
+@dataclass(frozen=True)
+class MaskedWeighting:
+    """Masked importance sampling (MIS): f(r) = r for low <= r <= high, else 0."""
+
+    low: float
+    high: float
+
+    def _inside(self, log_ratio: torch.Tensor) -> torch.Tensor:
+        """Whether low <= r <= high, tested on log(r)."""
+        return (log_ratio >= math.log(self.low)) & (log_ratio <= math.log(self.high))
+
+    def head_mass(self, p: torch.Tensor, q: torch.Tensor, log_ratio: torch.Tensor) -> torch.Tensor:
+        return torch.where(self._inside(log_ratio), p, 0.0)
+
+    def tail_scale(self, rho: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        return ((rho >= 1 / self.high) & (rho <= 1 / self.low)).to(dtype)
+
+    def sample_weight(self, log_ratio: torch.Tensor) -> torch.Tensor:
+        if torch.isnan(log_ratio).any():
+            raise ValueError("Score-centering importance log-ratio contains NaN")
+        return torch.where(self._inside(log_ratio), log_ratio.clamp(max=math.log(self.high)).exp(), 0.0)
+
+
+def importance_weighting(
+    mode: str, *, tis_clip: float, mis_low: float, mis_high: float
+) -> NoWeighting | TruncatedWeighting | MaskedWeighting:
+    """Validate the parameters of ``mode`` and return its weighting."""
     if mode == "tis" and (not math.isfinite(tis_clip) or tis_clip <= 0):
         raise ValueError("Score-centering TIS clip must be positive and finite")
     if mode == "mis" and (not math.isfinite(mis_low) or not math.isfinite(mis_high) or not 0 < mis_low <= mis_high):
         raise ValueError("Score-centering MIS bounds must be finite with 0 < low <= high")
-    if mode not in ("none", "tis", "mis"):
-        raise ValueError(f"Unknown score-centering importance weighting: {mode}")
+    if mode == "none":
+        return NoWeighting()
+    if mode == "tis":
+        return TruncatedWeighting(clip=tis_clip)
+    if mode == "mis":
+        return MaskedWeighting(low=mis_low, high=mis_high)
+    raise ValueError(f"Unknown score-centering importance weighting: {mode}")
 
 
 def importance_weights(
@@ -34,15 +99,8 @@ def importance_weights(
     mis_high: float = 5.0,
 ) -> torch.Tensor:
     """Evaluate token-level weights without exponentiating unbounded ratios."""
-    _validate_importance_args(mode, tis_clip, mis_low, mis_high)
-    if mode == "none":
-        return torch.ones_like(log_ratio)
-    if torch.isnan(log_ratio).any():
-        raise ValueError("Score-centering importance log-ratio contains NaN")
-    if mode == "tis":
-        return log_ratio.clamp(max=math.log(tis_clip)).exp()
-    inside = (log_ratio >= math.log(mis_low)) & (log_ratio <= math.log(mis_high))
-    return torch.where(inside, log_ratio.clamp(max=math.log(mis_high)).exp(), 0.0)
+    weighting = importance_weighting(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
+    return weighting.sample_weight(log_ratio)
 
 
 def score_centering_loss(
@@ -78,7 +136,7 @@ def score_centering_loss(
         raise ValueError("Score-centering sample tensors must be [tokens] and head tensors [tokens, candidates]")
     if not torch.isfinite(advantages).all():
         raise ValueError("Score-centering advantages must be finite")
-    _validate_importance_args(mode, tis_clip, mis_low, mis_high)
+    weighting = importance_weighting(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
     active = advantages.detach() != 0
     train_head = sanitize_head_log_probs(train_head_log_probs, head_mask, active)
     rollout_head = sanitize_head_log_probs(rollout_head_log_probs, head_mask, active)
@@ -86,24 +144,9 @@ def score_centering_loss(
         p, q = head_probs(train_head, head_mask), head_probs(rollout_head, head_mask)
         p_mass, q_mass = p.sum(-1), q.sum(-1)
         rho = (1 - q_mass).clamp_min(eps) / (1 - p_mass).clamp_min(eps)
-        if mode == "none":
-            weighted_q, alpha = q, rho
-        elif mode == "tis":
-            # q * min(p/q, c), including q=0, without 0 * inf.
-            weighted_q, alpha = torch.minimum(p, tis_clip * q), (tis_clip * rho).clamp_max(1)
-        else:
-            log_ratio = train_head - rollout_head
-            inside = (log_ratio >= math.log(mis_low)) & (log_ratio <= math.log(mis_high))
-            weighted_q = torch.where(inside, p, 0.0)
-            alpha = ((rho >= 1 / mis_high) & (rho <= 1 / mis_low)).to(p.dtype)
-        residual = weighted_q - alpha.unsqueeze(-1) * p
-        weight = importance_weights(
-            drop_inactive_nan(train_log_probs - rollout_log_probs, active, 0.0),
-            mode,
-            tis_clip=tis_clip,
-            mis_low=mis_low,
-            mis_high=mis_high,
-        )
+        alpha = weighting.tail_scale(rho, p.dtype)
+        residual = weighting.head_mass(p, q, train_head - rollout_head) - alpha.unsqueeze(-1) * p
+        weight = weighting.sample_weight(drop_inactive_nan(train_log_probs - rollout_log_probs, active, 0.0))
     correction = (residual * scored_log_probs(train_head, residual, active)).sum(-1)
     loss = -advantages.detach() * (weight * scored_log_probs(train_log_probs, weight, active) - correction)
     return loss, {
