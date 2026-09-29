@@ -41,22 +41,18 @@ def validate_rollout_topk_logprobs_args(args: Any) -> None:
 def validate_rollout_topk_logprobs_sampling(
     sampling: Mapping[str, Any], *, temperature: float, candidate_count: int
 ) -> None:
-    """Require a bounded support covered by the recorded candidates.
+    """Require per-call sampling whose distribution the recorded candidates describe.
 
-    Filtered generation requests SGLang's post-filter support probabilities.
-    The candidate count must cover the complete realized support.
+    Top-p/top-k bounds are checked by the rollout args and sampling-support replay;
+    this adds what recorded candidates need on top of them.
     """
     if sampling.get("temperature", temperature) != temperature or not math.isfinite(temperature) or temperature <= 0:
         raise ValueError(
             "Rollout top-k logprobs collection requires the same positive rollout temperature on every generation call"
         )
-    top_p = sampling.get("top_p", 1.0)
-    top_k = sampling.get("top_k", -1)
-    if not 0 < top_p <= 1 or (top_k != -1 and not 0 < top_k <= candidate_count):
-        raise ValueError("Rollout top-k logprobs collection requires top_p in (0, 1] and top_k=-1 or 1..k")
-    if top_p < 1 and top_k == -1:
+    if sampling.get("top_k", -1) > candidate_count:
         raise ValueError(
-            "Rollout top-k logprobs collection requires positive top_k with top_p filtering to bound the support"
+            "Rollout top-k logprobs collection requires top_k <= --rollout-top-logprobs-num to hold the whole support"
         )
     if sampling.get("min_p", 0.0) != 0.0:
         raise ValueError("Rollout top-k logprobs collection requires min_p=0.0")

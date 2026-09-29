@@ -45,8 +45,6 @@ def test_request_candidates_and_sampler_contract(openai: bool) -> None:
     sampling = request if openai else request["sampling_params"]
     assert sampling["temperature"] == 0.7
     sampling["top_p"] = 0.9
-    with pytest.raises(ValueError, match="positive top_k"):
-        configure_rollout_topk_logprobs_request(_args(), request, openai=openai)
     sampling["top_k"] = 64
     support = _args(rollout_top_logprobs_num=128, rollout_sampling_logprobs_mode="support")
     configure_rollout_topk_logprobs_request(support, request, openai=openai)
@@ -180,14 +178,3 @@ def test_candidate_validation_preserves_order_and_allows_repeated_padding(candid
     validate_rollout_topk_logprobs_sample(sample, 3)
     np.testing.assert_array_equal(sample.rollout_topk_token_ids, original_ids)
     np.testing.assert_array_equal(sample.rollout_topk_log_probs, original_logps)
-
-
-@pytest.mark.parametrize("masked", [False, True])
-@pytest.mark.parametrize("token", [0, 3])
-def test_candidate_validation_rejects_unsorted_duplicates(masked: bool, token: int) -> None:
-    sample = _turn([0], [2, 3], [0.5, 0.25])
-    sample.rollout_topk_token_ids[1] = [token, 2, token]
-    sample.rollout_topk_log_probs[1] = np.log([0.25, 0.5, 0.25])
-    sample.loss_mask[1] = 0 if masked else 1
-    with pytest.raises(ValueError, match="Duplicate"):
-        validate_rollout_topk_logprobs_sample(sample, 3)

@@ -21,7 +21,7 @@ def validate_score_centering_args(args: Namespace) -> None:
     if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
         raise ValueError("Score-centering MIS bounds must be finite with 0 < low <= high")
     validate_rollout_topk_logprobs_sampling(
-        {"top_p": args.rollout_top_p, "top_k": args.rollout_top_k},
+        {"top_k": args.rollout_top_k},
         temperature=args.rollout_temperature,
         candidate_count=args.rollout_top_logprobs_num,
     )
