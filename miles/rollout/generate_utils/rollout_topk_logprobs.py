@@ -6,8 +6,9 @@ from typing import Any
 
 import numpy as np
 
+from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sampling
 from miles.utils.sampling_mask import RolloutSamplingMask
-from miles.utils.score_centering import score_centering_top_k, validate_rollout_topk_logprobs_sampling
+from miles.utils.score_centering import score_centering_top_k
 from miles.utils.types import Sample
 
 
