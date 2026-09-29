@@ -34,6 +34,9 @@ class SessionServerConfig(FrozenStrictBaseModel):
     rollout_request_retry_interval: float
     session_sample_picker_path: str | None
     session_sample_postprocessor_path: str | None
+    loss_type: str
+    score_centering_top_k: int
+    rollout_temperature: float
 
 
 def compute_session_server_config(
@@ -70,4 +73,7 @@ def compute_session_server_config(
         rollout_request_retry_interval=getattr(args, "rollout_request_retry_interval", 1.0),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),
         session_sample_postprocessor_path=getattr(args, "session_sample_postprocessor_path", None),
+        loss_type=getattr(args, "loss_type", "policy_loss"),
+        score_centering_top_k=getattr(args, "score_centering_top_k", 128),
+        rollout_temperature=getattr(args, "rollout_temperature", 1.0),
     )

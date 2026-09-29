@@ -37,6 +37,9 @@ def make_session_server_config(**overrides: Any) -> SessionServerConfig:
         rollout_request_retry_interval=1.0,
         session_sample_picker_path=None,
         session_sample_postprocessor_path=None,
+        loss_type="policy_loss",
+        score_centering_top_k=128,
+        rollout_temperature=1.0,
     )
     defaults.update(overrides)
     return SessionServerConfig(**defaults)
