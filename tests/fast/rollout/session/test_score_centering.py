@@ -150,18 +150,38 @@ def test_filtered_session_request_and_producer() -> None:
     np.testing.assert_allclose(samples[0].rollout_log_probs, [math.log(4 / 7)])
 
 
-def test_training_request_ignores_client_sampling_logprobs_mode() -> None:
-    tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
+@pytest.mark.parametrize("candidate_count", [0, 3])
+@pytest.mark.parametrize("filtered", [False, True])
+@pytest.mark.parametrize("evaluation", [False, True])
+def test_session_request_owns_sampling_logprobs_mode(candidate_count: int, filtered: bool, evaluation: bool) -> None:
+    mode = "support" if filtered else "selected"
+    client_args = {"sampling_logprobs_mode": "selected" if filtered else "support", "top_logprobs": 5}
+    tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request | client_args)
     prepared = prepare_chat_request(
-        {"sampling_logprobs_mode": "support"},
+        client_args,
         tokenizer,
-        config=make_session_server_config(),
+        config=make_session_server_config(
+            rollout_top_logprobs_num=candidate_count,
+            rollout_sampling_logprobs_mode=mode,
+            rollout_temperature=0.7,
+            use_sampling_support_replay=filtered,
+        ),
         turn_args=None,
-        sampling_defaults={"temperature": 0.7, "top_p": 0.6, "top_k": 3},
-        sampling_support_replay=True,
+        evaluation=evaluation,
+        sampling_defaults={"temperature": 0.7, "top_p": 0.6 if filtered else 1.0, "top_k": 3 if filtered else -1},
+        sampling_support_replay=filtered,
     )
-    assert prepared.body["return_sampling_mask"] is True
-    assert "sampling_logprobs_mode" not in prepared.body
+    assert prepared.body.get("return_sampling_mask", False) is (filtered and not evaluation)
+    if candidate_count and not evaluation:
+        if filtered:
+            assert prepared.body["sampling_logprobs_mode"] == "support"
+            assert "top_logprobs" not in prepared.body
+        else:
+            assert "sampling_logprobs_mode" not in prepared.body
+            assert prepared.body["top_logprobs"] == candidate_count
+    else:
+        assert "sampling_logprobs_mode" not in prepared.body
+        assert prepared.body["top_logprobs"] == 5
 
 
 @pytest.mark.parametrize(
