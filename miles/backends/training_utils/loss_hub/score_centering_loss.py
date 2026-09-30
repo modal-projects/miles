@@ -14,6 +14,7 @@ from miles.backends.training_utils.loss_hub.logit_processors import _iter_respon
 from miles.backends.training_utils.loss_hub.math_utils import compute_approx_kl
 from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, selected_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
+from miles.utils.rollout_views import add_rollout_view_metrics
 from miles.utils.types import RolloutBatch
 
 
@@ -122,15 +123,14 @@ def score_centering_loss_function(
             raise ValueError(f"Score centering requires {key} from the rollout producer")
     probabilities = _candidate_log_probs(args, batch, logits)
     selected = torch.cat(probabilities["selected"])
-    active = torch.cat(
-        get_local_response_loss_masks(
-            batch["total_lengths"],
-            batch["response_lengths"],
-            batch["loss_masks"],
-            args.qkv_format,
-            batch.get("max_seq_lens"),
-        )
-    ).bool()
+    local_loss_masks = get_local_response_loss_masks(
+        batch["total_lengths"],
+        batch["response_lengths"],
+        batch["loss_masks"],
+        args.qkv_format,
+        batch.get("max_seq_lens"),
+    )
+    active = torch.cat(local_loss_masks).bool()
     rollout = torch.where(active, torch.cat(batch["rollout_log_probs"]).detach(), 0.0)
     advantages = torch.where(active, torch.cat(batch["advantages"]).detach(), 0.0)
     ids = _local_candidates(args, batch, "rollout_topk_token_ids", logits.device)
@@ -154,7 +154,8 @@ def score_centering_loss_function(
     log.update({key: sum_of_sample_mean(value).detach() for key, value in metrics.items()})
     log.update(loss=loss.detach(), pg_loss=pg_loss.detach())
     train_log_probs = torch.where(active, selected[:, 0].detach(), 0.0)
-    log["train_rollout_logprob_abs_diff"] = sum_of_sample_mean((train_log_probs - rollout).abs()).detach()
+    abs_diff = (train_log_probs - rollout).abs()
+    log["train_rollout_logprob_abs_diff"] = sum_of_sample_mean(abs_diff).detach()
     # Match the policy-loss diagnostic: sampled-token k3 estimate of KL(rollout || train).
     rollout_train_kl = compute_approx_kl(rollout, train_log_probs, kl_loss_type="low_var_kl")
     rollout_train_kl = torch.where(
@@ -163,4 +164,12 @@ def score_centering_loss_function(
         0.0,
     )
     log["train_rollout_kl"] = sum_of_sample_mean(rollout_train_kl).detach()
+    add_rollout_view_metrics(
+        args,
+        batch,
+        log,
+        local_loss_masks,
+        {"train_rollout_logprob_abs_diff": abs_diff, "train_rollout_kl": rollout_train_kl},
+        sum_of_sample_mean,
+    )
     return loss, log

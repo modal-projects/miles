@@ -11,6 +11,7 @@ from miles.utils import object_store
 from miles.utils.dp_schedule import build_dp_schedule, has_full_schedule_config
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.object_store import ValueSpec
+from miles.utils.rollout_views import rollout_view_index, rollout_view_names
 from miles.utils.score_centering import score_centering_top_k
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
@@ -44,6 +45,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "sample_indices": ValueSpec(codec="ndarray", dtype="int64"),
     "rollout_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "rollout_mask_sums": ValueSpec(codec="ndarray", dtype="int64"),
+    "rollout_view_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
     "metadata": ValueSpec(codec="msgpack_ragged"),
@@ -184,6 +186,11 @@ def convert_samples_to_train_data(
             "--use-rollout-indexer-replay is set but the rollout samples carry no "
             "rollout_indexer_topk: the engine response meta_info lacked 'indexer_topk'."
         )
+
+    if view_names := rollout_view_names(args):
+        train_data["rollout_view_ids"] = [
+            rollout_view_index(view_names, (sample.metadata or {}).get("rollout_source")) for sample in samples
+        ]
 
     if samples[0].train_metadata is not None:
         train_data["metadata"] = [sample.train_metadata for sample in samples]
@@ -417,6 +424,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "sample_indices",
             "rollout_ids",
             "rollout_mask_sums",
+            "rollout_view_ids",
             "rollout_log_probs",
             "rollout_topk_token_ids",
             "rollout_topk_log_probs",

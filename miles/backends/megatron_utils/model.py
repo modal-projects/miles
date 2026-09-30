@@ -478,6 +478,7 @@ def run_forward_backward_pass(
                 "witness_ids",
                 "opd_reverse_kl",
                 "rollout_mask_sums",
+                "rollout_view_ids",
                 "loss_weights",
                 "target_tokens",
                 "sample_indices",

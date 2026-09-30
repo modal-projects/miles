@@ -18,6 +18,7 @@ from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_raw
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.samples.codec import decode_samples_and_merge_input_sample, encode_samples
+from miles.utils.rollout_views import NUMERATOR_SUFFIX
 from miles.utils.types import Sample
 
 
@@ -89,6 +90,39 @@ def test_multiturn_wire_dp_split_and_training_gradient(single_rank: None, mode: 
     expected_kl = (delta.exp() - 1 - delta).clamp(-10, 10).mean()
     torch.testing.assert_close(metrics["train_rollout_kl"], expected_kl)
     assert not metrics["train_rollout_kl"].requires_grad
+
+
+@pytest.mark.parametrize("per_token", [False, True])
+def test_rollout_views_travel_to_score_centering_diagnostics(single_rank: None, per_token: bool) -> None:
+    """Each sample's rollout view survives conversion and the DP split, and its share partitions the mismatch."""
+    views = {"bf16": "/checkpoints/bf16", "fp8": "/checkpoints/fp8"}
+    args = _args(update_weight_views=views, calculate_per_token_loss=per_token)
+    fp8 = _turn([0, 1], [2, 3], [0.5, 0.25])
+    bf16 = _turn([0, 1], [3, 2], [0.4, 0.3])
+    fp8.metadata["rollout_source"] = "ServerH100FP8:fp8"
+    bf16.metadata["rollout_source"] = "ServerH200BF16:bf16"
+    fp8.index, fp8.reward = 0, 1.0
+    bf16.index, bf16.reward = 1, -1.0
+
+    data = convert_samples_to_train_data(args, [fp8, bf16], {}, None, None)
+    assert data["rollout_view_ids"] == [1, 0]
+    [batch] = split_train_data_by_dp_raw(args, data, dp_size=1)
+    assert dict(zip(batch["sample_indices"], batch["rollout_view_ids"], strict=True)) == {0: 1, 1: 0}
+
+    rows = [{0: fp8, 1: bf16}[index] for index in batch["sample_indices"]]
+    batch["total_lengths"] = [len(sample.tokens) for sample in rows]
+    batch["unconcat_tokens"] = [torch.tensor(sample.tokens) for sample in rows]
+    batch["loss_masks"] = [torch.tensor(sample.loss_mask) for sample in rows]
+    batch["rollout_log_probs"] = [torch.tensor(sample.rollout_log_probs) for sample in rows]
+    batch["advantages"] = [torch.full((sample.response_length,), sample.reward) for sample in rows]
+    logits = torch.randn(1, sum(batch["total_lengths"]), 10, generator=torch.Generator().manual_seed(5))
+    reduce = get_sum_of_sample_mean(batch["total_lengths"], batch["response_lengths"], batch["loss_masks"], per_token)
+    _, metrics = get_loss_function(args)(args, batch, logits.requires_grad_(), reduce)
+
+    for metric in ("train_rollout_logprob_abs_diff", "train_rollout_kl"):
+        parts = [metrics[f"{metric}/{view}{NUMERATOR_SUFFIX}"] for view in views]
+        torch.testing.assert_close(sum(parts), metrics[metric])
+    assert all(metrics[f"train_rollout_logprob_abs_diff/{view}{NUMERATOR_SUFFIX}"] > 0 for view in views)
 
 
 @pytest.mark.parametrize("per_token", [False, True])

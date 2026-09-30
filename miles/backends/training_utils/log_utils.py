@@ -11,6 +11,7 @@ from miles.utils import train_metric_utils
 from miles.utils.flops_utils import fwd_tflops_per_gpu
 from miles.utils.ft_utils.process_group_utils import MultiPGUtil
 from miles.utils.metric_utils import compute_rollout_step, namespace_metrics, strip_metrics_namespace
+from miles.utils.rollout_views import resolve_ratio_metrics
 from miles.utils.tracking_utils.structured_log import log_structured
 from miles.utils.types import RolloutBatch
 
@@ -494,7 +495,7 @@ def aggregate_train_losses(
     for key, value in zip(keys, values[1:], strict=False):
         loss_reduced[key] = value * cp_factor / num_samples_or_tokens
 
-    return loss_reduced
+    return resolve_ratio_metrics(loss_reduced)
 
 
 def log_train_step(
