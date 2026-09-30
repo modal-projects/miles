@@ -113,6 +113,9 @@ def validate_rollout_topk_logprobs_sample(sample: Sample, k: int) -> None:
     if ids.shape[1] != k:
         raise ValueError("Rollout top-k logprobs candidates must have --rollout-top-logprobs-num columns")
     valid = ids >= 0
+    sorted_ids = np.sort(ids, axis=-1)
+    if ((sorted_ids[:, 1:] >= 0) & (sorted_ids[:, 1:] == sorted_ids[:, :-1])).any():
+        raise ValueError("Duplicate rollout top-k logprobs candidate token IDs")
     active = np.asarray(sample.loss_mask if sample.loss_mask is not None else [1] * sample.response_length, dtype=bool)
     if (active & ~valid.any(-1)).any():
         raise ValueError("Every trained token needs rollout top-k logprobs candidates")

@@ -14,6 +14,7 @@ from miles.rollout.generate_utils.rollout_topk_logprobs import (
 )
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, decode_samples_and_merge_input_sample, encode_samples
 from miles.utils.score_centering import validate_score_centering_args
+from miles.utils.sampling_mask import RolloutSamplingMask
 from miles.utils.types import Sample
 
 
@@ -172,6 +173,17 @@ def test_zero_token_completion_accepts_missing_candidate_fields(mode: str) -> No
     append_rollout_topk_logprobs(sample, {}, 3, sampling_logprobs_mode=mode)
     assert sample.rollout_topk_token_ids.shape == (0, 3)
     assert sample.rollout_topk_log_probs.shape == (0, 3)
+
+
+@pytest.mark.parametrize("support", [False, True])
+@pytest.mark.parametrize("candidates", [[2, 2, -1], [-1, 3, 3], [2, 3, 2]])
+def test_duplicate_candidates_are_rejected(support: bool, candidates: list[int]) -> None:
+    sample = _turn([0], [2, 3], [0.5, 0.25])
+    sample.rollout_topk_token_ids[:] = candidates
+    if support:
+        sample.rollout_sampling_mask = RolloutSamplingMask.from_mask_list([[2, 3], [2, 3]])
+    with pytest.raises(ValueError, match="Duplicate.*candidate token IDs"):
+        validate_rollout_topk_logprobs_sample(sample, 3)
 
 
 @pytest.mark.parametrize("candidates", [[2, 3, -1], [-1, 3, 2], [-1, 2, -1], [-1, -1, -1]])
