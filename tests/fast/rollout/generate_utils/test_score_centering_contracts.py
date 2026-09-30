@@ -117,6 +117,7 @@ def test_implicit_openai_grammar_constraints_are_rejected(constraint: dict) -> N
         ("advantage_estimator", "gspo"),
         ("recompute_logprobs_via_prefill", True),
         ("sglang_speculative_algorithm", "EAGLE"),
+        ("custom_convert_samples_to_train_data_path", "pkg.convert"),
     ],
 )
 def test_invalid_options_fail_early(field: str, value: object) -> None:

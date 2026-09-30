@@ -117,9 +117,6 @@ def score_centering_loss_function(
     logits: torch.Tensor,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    for key in ("rollout_topk_token_ids", "rollout_topk_log_probs", "rollout_log_probs"):
-        if batch.get(key) is None:
-            raise ValueError(f"Score centering requires {key} from the rollout producer")
     probabilities = _candidate_log_probs(args, batch, logits)
     selected = torch.cat(probabilities["selected"])
     active = torch.cat(

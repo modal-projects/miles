@@ -34,6 +34,7 @@ def validate_score_centering_args(args: Namespace) -> None:
         "custom_pg_loss_reducer_function_path": "use the standard token/sample reducer",
         "multi_lora": "per-sample Tinker losses bypass the score-centering loss",
         "use_opd": "distillation composition is not supported",
+        "custom_convert_samples_to_train_data_path": "custom converters skip rollout top-k logprobs validation",
     }
     for option, reason in incompatible.items():
         if getattr(args, option, None):
