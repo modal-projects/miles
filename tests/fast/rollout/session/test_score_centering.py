@@ -150,6 +150,20 @@ def test_filtered_session_request_and_producer() -> None:
     np.testing.assert_allclose(samples[0].rollout_log_probs, [math.log(4 / 7)])
 
 
+def test_training_request_ignores_client_sampling_logprobs_mode() -> None:
+    tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
+    prepared = prepare_chat_request(
+        {"sampling_logprobs_mode": "support"},
+        tokenizer,
+        config=make_session_server_config(),
+        turn_args=None,
+        sampling_defaults={"temperature": 0.7, "top_p": 0.6, "top_k": 3},
+        sampling_support_replay=True,
+    )
+    assert prepared.body["return_sampling_mask"] is True
+    assert "sampling_logprobs_mode" not in prepared.body
+
+
 @pytest.mark.parametrize(
     "override,match",
     [
