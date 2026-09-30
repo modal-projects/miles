@@ -30,7 +30,8 @@ def _args(**overrides: object) -> Namespace:
             "rollout_top_p": 0.9,
             "rollout_top_k": 64,
         },
-        {"rollout_top_k": 64},
+        {"rollout_sampling_logprobs_mode": "support", "rollout_top_k": 64},
+        {"rollout_sampling_logprobs_mode": "support", "rollout_top_p": 0.9, "rollout_top_k": 64},
         {
             "rollout_top_logprobs_num": 8,
             "use_opd": True,
@@ -47,13 +48,10 @@ def test_consistent_settings_pass(overrides: dict) -> None:
     "overrides,match",
     [
         ({"rollout_top_logprobs_num": -1}, "non-negative"),
-        ({"rollout_top_logprobs_num": 128, "rollout_sampling_logprobs_mode": "support"}, "requires filtered"),
-        ({"rollout_sampling_logprobs_mode": "support", "rollout_top_k": 64}, ">= --rollout-top-k"),
         (
             {"rollout_top_logprobs_num": 32, "rollout_sampling_logprobs_mode": "support", "rollout_top_k": 64},
             ">= --rollout-top-k",
         ),
-        ({"rollout_top_logprobs_num": 128, "rollout_top_k": 64}, "selected mode records pre-filter"),
         ({"rollout_top_logprobs_num": 8, "use_opd": True, "opd_log_prob_top_k": 4}, "OPD student"),
     ],
 )

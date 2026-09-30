@@ -697,16 +697,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--rollout-sampling-logprobs-mode",
-                choices=["selected", "support"],
-                default="selected",
-                help=(
-                    "SGLang sampling_logprobs_mode for training requests. 'support' records the "
-                    "post-filter log-probs of the whole realized sampling support as the candidates; "
-                    "it requires filtered rollout sampling and --rollout-top-logprobs-num >= --rollout-top-k."
-                ),
-            )
-            parser.add_argument(
                 "--rollout-max-context-len",
                 type=int,
                 default=None,
@@ -3298,6 +3288,7 @@ def miles_validate_args(args):
     if args.rollout_top_k != -1 and args.rollout_top_k < 1:
         raise ValueError(f"--rollout-top-k must be -1 or at least 1, got {args.rollout_top_k}")
     args.use_sampling_support_replay = args.rollout_top_p < 1.0 or args.rollout_top_k > 0
+    args.rollout_sampling_logprobs_mode = "support" if args.use_sampling_support_replay else "selected"
     if args.use_sampling_support_replay:
         if args.rollout_top_k == -1:
             raise ValueError(

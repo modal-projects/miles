@@ -2,7 +2,7 @@
 
 ``--rollout-top-logprobs-num`` sets the width of ``Sample.rollout_topk_token_ids`` /
 ``rollout_topk_log_probs``; it records the sampling distribution and does not change it.
-``--rollout-sampling-logprobs-mode`` picks the SGLang source: ``selected`` reads
+``arguments.py`` derives ``rollout_sampling_logprobs_mode`` from the rollout filters: ``selected`` reads
 ``output_top_logprobs``, the top-K of the full-vocabulary distribution (unfiltered sampling);
 ``support`` reads ``output_token_sampling_logprobs`` over the whole realized support (filtered
 sampling). ``Sample.rollout_sampling_mask`` is the separate support record of sampling-support replay.
@@ -16,25 +16,17 @@ from typing import Any
 def validate_rollout_topk_logprobs_args(args: Any) -> None:
     """Reject rollout top-k logprobs settings whose recorded candidates cannot match the sampler."""
     k = args.rollout_top_logprobs_num
-    mode = args.rollout_sampling_logprobs_mode
-    filtered = args.rollout_top_p < 1.0 or args.rollout_top_k > 0
     if k < 0:
         raise ValueError(f"--rollout-top-logprobs-num must be non-negative, got {k}")
-    if mode == "support":
-        if not filtered:
-            raise ValueError("--rollout-sampling-logprobs-mode support requires filtered rollout sampling")
-        if k < args.rollout_top_k:
-            raise ValueError(
-                "--rollout-sampling-logprobs-mode support requires --rollout-top-logprobs-num >= --rollout-top-k "
-                "so the recorded candidates can hold the whole sampling support"
-            )
-    elif k and filtered:
+    if not k:
+        return
+    if args.rollout_sampling_logprobs_mode == "support" and k < args.rollout_top_k:
         raise ValueError(
-            "Recording --rollout-top-logprobs-num candidates under filtered rollout sampling requires "
-            "--rollout-sampling-logprobs-mode support; selected mode records pre-filter candidates"
+            "Filtered rollout sampling requires --rollout-top-logprobs-num >= --rollout-top-k "
+            "so the recorded candidates can hold the whole sampling support"
         )
     opd_student_top_k = args.use_opd and args.opd_log_prob_top_k > 0 and args.opd_top_k_strategy != "only-teacher"
-    if k and opd_student_top_k:
+    if opd_student_top_k:
         raise ValueError("--rollout-top-logprobs-num cannot be combined with OPD student top-k log-probs")
 
 

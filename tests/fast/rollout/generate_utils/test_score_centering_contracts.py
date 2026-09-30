@@ -51,19 +51,31 @@ def test_request_candidates_and_sampler_contract(openai: bool) -> None:
     assert request["sampling_logprobs_mode"] == "support"
     assert "top_logprobs" not in request and "top_logprobs_num" not in request
     original = deepcopy(request)
-    configure_rollout_topk_logprobs_request(_args(rollout_top_logprobs_num=0), request, openai=openai)
+    configure_rollout_topk_logprobs_request(
+        _args(rollout_top_logprobs_num=0, rollout_sampling_logprobs_mode="support"), request, openai=openai
+    )
     assert request == original
 
 
 @pytest.mark.parametrize("openai", [False, True])
-def test_rollout_args_override_client_candidate_fields(openai: bool) -> None:
+@pytest.mark.parametrize("mode", ["selected", "support"])
+def test_rollout_args_override_client_candidate_fields(openai: bool, mode: str) -> None:
     field = "top_logprobs" if openai else "top_logprobs_num"
-    request = {field: 5, "sampling_logprobs_mode": "support"}
-    if not openai:
-        request["sampling_params"] = {}
-    configure_rollout_topk_logprobs_request(_args(rollout_top_logprobs_num=3), request, openai=openai)
-    assert request[field] == 3
-    assert "sampling_logprobs_mode" not in request
+    request = {field: 5, "sampling_logprobs_mode": "selected" if mode == "support" else "support"}
+    sampling = {"top_p": 0.9, "top_k": 2} if mode == "support" else {}
+    if openai:
+        request.update(sampling)
+    else:
+        request["sampling_params"] = sampling
+    configure_rollout_topk_logprobs_request(
+        _args(rollout_top_logprobs_num=3, rollout_sampling_logprobs_mode=mode), request, openai=openai
+    )
+    if mode == "support":
+        assert request["sampling_logprobs_mode"] == "support"
+        assert "top_logprobs" not in request and "top_logprobs_num" not in request
+    else:
+        assert request[field] == 3
+        assert "sampling_logprobs_mode" not in request
 
 
 @pytest.mark.parametrize(
@@ -83,11 +95,9 @@ def test_implicit_openai_grammar_constraints_are_rejected(constraint: dict) -> N
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("rollout_top_p", 0.9),
         ("rollout_temperature", 0),
         ("rollout_top_k", 129),
         ("rollout_top_logprobs_num", 0),
-        ("rollout_sampling_logprobs_mode", "support"),
         ("score_centering_tis_clip", float("inf")),
         ("score_centering_mis_low", 6),
         ("use_tis", True),
