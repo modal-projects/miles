@@ -106,7 +106,8 @@ def _regularization(
         # Keep the existing Miles KL estimator's gradient through the ratio.
         ratio = (log_probs - rollout_log_probs).exp() if args.use_unbiased_kl else None
         kl = reduce(compute_approx_kl(log_probs, reference, args.kl_loss_type, importance_ratio=ratio))
-        loss = loss + args.kl_loss_coef * kl
+        if args.kl_loss_coef != 0:
+            loss = loss + args.kl_loss_coef * kl
         metrics["kl_loss"] = kl.detach()
     return loss, metrics
 
