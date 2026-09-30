@@ -2,7 +2,11 @@ from argparse import Namespace
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from miles.backends.training_utils.cp_utils import get_local_response_loss_masks, get_sum_of_sample_mean
+from miles.backends.training_utils.cp_utils import (
+    get_local_response_loss_masks,
+    get_sum_of_sample_mean,
+    loss_denominators,
+)
 from miles.backends.training_utils.loss_hub.advantages import compute_advantages, normalize_advantages
 from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy, get_values  # noqa: F401
 from miles.backends.training_utils.loss_hub.losses import get_loss_function
@@ -171,7 +175,7 @@ def loss_function(
         args.calculate_per_token_loss,
         args.qkv_format,
         batch.get("max_seq_lens", None),
-        denominators=batch.get("rollout_mask_sums", None),
+        denominators=loss_denominators(batch),
     )
 
     func = get_loss_function(args, batch.get("loss_fn"))

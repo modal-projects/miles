@@ -89,6 +89,12 @@ def slice_loss_masks_for_local_cp(
     return get_local_response_loss_masks(total_lengths, response_lengths, loss_masks, qkv_format, max_seq_lens)
 
 
+def loss_denominators(batch) -> list[torch.Tensor] | torch.Tensor | None:
+    """Per-sample loss denominators: the prompt-mean ones when set, else each rollout's mask total."""
+    denominators = batch.get("loss_denominators")
+    return denominators if denominators is not None else batch.get("rollout_mask_sums")
+
+
 def get_sum_of_sample_mean(
     total_lengths: list[int],
     response_lengths: list[int],

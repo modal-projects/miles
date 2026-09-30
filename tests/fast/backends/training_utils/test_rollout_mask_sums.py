@@ -5,7 +5,8 @@ Covers:
 - ``get_sum_of_sample_mean(denominators=...)`` — legacy per-sample mean when
   ``None``, per-rollout token-weighted mean with precomputed denominators, and
   the strict no-op equivalence between the two when 1 rollout = 1 sample;
-- ``aggregate_train_losses(num_rollouts=...)`` per-rollout-mean reduction.
+- ``aggregate_train_losses(num_rollouts=...)`` per-rollout-mean reduction;
+- prompt-mean denominators (``--prompt-mean-loss``).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from tests.fast.backends.training_utils.loss.loss_test_utils import make_paralle
 from tests.fast.ray.rollout.conftest import make_args, make_sample
 
 from miles.backends.training_utils import log_utils
-from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean
+from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean, loss_denominators
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data
 
 
@@ -27,9 +28,9 @@ def _parallel_state():
     make_parallel_state()
 
 
-def _convert(samples):
+def _convert(samples, **overrides):
     return convert_samples_to_train_data(
-        make_args(rewards_normalization=False),
+        make_args(rewards_normalization=False, **overrides),
         samples,
         metadata={},
         custom_convert_samples_to_train_data_func=None,
@@ -105,3 +106,67 @@ class TestAggregateTrainLossesNumRollouts:
         losses = [self._mb(2, {"loss": 2.0}), self._mb(2, {"loss": 6.0})]
         out = log_utils.aggregate_train_losses(losses)
         assert math.isclose(out["loss"], 2.0)
+
+
+class TestPromptMeanDenominators:
+    @staticmethod
+    def _grouped(lengths_by_group):
+        samples = []
+        for group_index, lengths in enumerate(lengths_by_group):
+            for n in lengths:
+                samples.append(make_sample(group_index=group_index, index=len(samples), response_length=n))
+        return samples
+
+    @staticmethod
+    def _loss(out, per_token_loss):
+        """The sample-mean loss: sum of per-sample sums over denominators, over the rollout count."""
+        lengths = out["response_lengths"]
+        masks = [torch.tensor(mask, dtype=torch.int) for mask in out["loss_masks"]]
+        denominators = torch.tensor(loss_denominators(out), dtype=torch.float32)
+        reducer = get_sum_of_sample_mean(lengths, lengths, masks, denominators=denominators)
+        return reducer(per_token_loss) / len(set(out["rollout_ids"]))
+
+    def test_only_the_flag_adds_prompt_mean_denominators(self):
+        samples = self._grouped([(2, 6), (1, 3)])
+        assert "loss_denominators" not in _convert(samples)
+
+        out = _convert(samples, prompt_mean_loss=True)
+        # T_q * P / N: prompt 0 has 8 tokens, prompt 1 has 4, over 2 prompts and 4 rollouts.
+        assert out["loss_denominators"] == [4.0, 4.0, 2.0, 2.0]
+        # Per-rollout denominators, which the rollout/* means use, are untouched.
+        assert out["rollout_mask_sums"] == [2, 6, 1, 3]
+
+    def test_loss_is_a_token_mean_per_prompt_then_a_mean_over_prompts(self):
+        samples = self._grouped([(2, 6), (1, 3, 5), (4,)])
+        samples[1].loss_mask = [1, 0, 1, 1, 0, 1]
+        out = _convert(samples, prompt_mean_loss=True)
+        x = torch.randn(sum(out["response_lengths"]), generator=torch.Generator().manual_seed(0))
+
+        masks = [torch.tensor(mask, dtype=torch.float32) for mask in out["loss_masks"]]
+        per_sample = [
+            (chunk * mask).sum() for chunk, mask in zip(x.split(out["response_lengths"]), masks, strict=True)
+        ]
+        per_sample_tokens = [mask.sum() for mask in masks]
+        groups = [(0, 1), (2, 3, 4), (5,)]
+        expected = sum(
+            sum(per_sample[i] for i in group) / sum(per_sample_tokens[i] for i in group) for group in groups
+        ) / len(groups)
+
+        torch.testing.assert_close(self._loss(out, x), expected)
+
+    def test_siblings_of_one_rollout_count_as_one_rollout(self):
+        samples = self._grouped([(2, 3, 5), (4, 4)])
+        samples[0].rollout_id = samples[1].rollout_id = 100
+        out = _convert(samples, prompt_mean_loss=True)
+        x = torch.randn(sum(out["response_lengths"]), generator=torch.Generator().manual_seed(1))
+
+        # 2 prompts, 4 rollouts: prompt 0 holds 10 tokens, prompt 1 holds 8.
+        assert out["loss_denominators"] == [5.0, 5.0, 5.0, 4.0, 4.0]
+        head, tail = x[:10], x[10:]
+        torch.testing.assert_close(self._loss(out, x), (head.mean() + tail.mean()) / 2)
+
+    def test_prompt_mean_denominators_take_precedence_in_the_loss(self):
+        mask_sums, prompt_mean = torch.tensor([2.0]), torch.tensor([4.0])
+        assert loss_denominators({"rollout_mask_sums": mask_sums}) is mask_sums
+        assert loss_denominators({"rollout_mask_sums": mask_sums, "loss_denominators": prompt_mean}) is prompt_mean
+        assert loss_denominators({"rollout_mask_sums": mask_sums, "loss_denominators": None}) is mask_sums

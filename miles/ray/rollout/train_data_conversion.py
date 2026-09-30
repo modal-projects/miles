@@ -45,6 +45,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "sample_indices": ValueSpec(codec="ndarray", dtype="int64"),
     "rollout_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "rollout_mask_sums": ValueSpec(codec="ndarray", dtype="int64"),
+    "loss_denominators": ValueSpec(codec="ndarray", dtype="float64"),
     "rollout_view_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
@@ -134,6 +135,12 @@ def convert_samples_to_train_data(
     train_data["loss_masks"] = loss_masks
 
     train_data["rollout_mask_sums"] = _compute_rollout_mask_sums(train_data["rollout_ids"], loss_masks)
+    if getattr(args, "prompt_mean_loss", False):
+        train_data["loss_denominators"] = _compute_prompt_mean_denominators(
+            _reward_group_segments(args, samples, metadata.get("prompt_group_sizes")),
+            train_data["rollout_ids"],
+            loss_masks,
+        )
 
     # overwriting the raw reward
     if samples[0].metadata and "raw_reward" in samples[0].metadata:
@@ -226,6 +233,27 @@ def _compute_rollout_mask_sums(rollout_ids: list[int], loss_masks: list[list[int
     for rid, mask in zip(rollout_ids, loss_masks, strict=True):
         totals[rid] = totals.get(rid, 0) + sum(mask)
     return [totals[rid] for rid in rollout_ids]
+
+
+def _compute_prompt_mean_denominators(
+    groups: list[list[int]], rollout_ids: list[int], loss_masks: list[list[int]]
+) -> list[float]:
+    """Per-sample loss denominators that turn the sample-mean loss into a prompt mean.
+
+    The sample-mean loss divides each sample's summed token loss by its denominator, adds
+    them up, and divides by the step's rollout count N. Giving every sample of prompt q
+    the denominator T_q * P / N, with T_q the loss tokens of all of q's rollouts and P the
+    number of prompts, yields (1/P) * sum_q (1/T_q) * (q's summed token loss): a token
+    mean within each prompt, then an equal-weight mean over prompts. Exact when the
+    rollout batch is one optimizer step.
+    """
+    scale = len(groups) / len(set(rollout_ids))
+    denominators = [0.0] * len(rollout_ids)
+    for group in groups:
+        tokens = sum(sum(loss_masks[index]) for index in group)
+        for index in group:
+            denominators[index] = tokens * scale
+    return denominators
 
 
 def _reward_group_segments(args: Any, samples: list[Sample], prompt_group_sizes: list[int] | None) -> list[list[int]]:
@@ -424,6 +452,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "sample_indices",
             "rollout_ids",
             "rollout_mask_sums",
+            "loss_denominators",
             "rollout_view_ids",
             "rollout_log_probs",
             "rollout_topk_token_ids",

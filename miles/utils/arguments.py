@@ -1866,6 +1866,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/experimental/DrGRPO/custom_reducer.py:get_pg_loss_reducer).",
             )
+            parser.add_argument(
+                "--prompt-mean-loss",
+                action="store_true",
+                default=False,
+                help=(
+                    "Average the loss over all loss tokens of each prompt's rollouts, then weight every "
+                    "prompt equally (prompt-mean aggregation). Requires sample-level normalization, i.e. "
+                    "no --calculate-per-token-loss, and one optimizer step per rollout batch."
+                ),
+            )
+            parser.add_argument(
+                "--freeze-moe-router",
+                action="store_true",
+                default=False,
+                help="Keep every MoE router's weights at their initial values during training.",
+            )
 
             parser.add_argument(
                 "--use-routing-replay",
@@ -4109,6 +4125,8 @@ def miles_validate_args(args):
         validate_skip_actor_forward_only(args)
 
     validate_score_centering_args(args)
+    validate_prompt_mean_loss(args)
+    validate_freeze_moe_router(args)
 
     _maybe_apply_dumper_overrides(args)
 
@@ -4119,6 +4137,26 @@ def miles_validate_args(args):
         raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
 
     _validate_deploy_component(args)
+
+
+def validate_prompt_mean_loss(args) -> None:
+    if not getattr(args, "prompt_mean_loss", False):
+        return
+    if args.calculate_per_token_loss:
+        raise ValueError("--prompt-mean-loss replaces --calculate-per-token-loss; set only one")
+    if args.custom_pg_loss_reducer_function_path:
+        raise ValueError("--prompt-mean-loss is incompatible with --custom-pg-loss-reducer-function-path")
+    if args.num_steps_per_rollout not in (None, 1):
+        raise ValueError("--prompt-mean-loss requires exactly one optimizer step per rollout batch")
+
+
+def validate_freeze_moe_router(args) -> None:
+    if not getattr(args, "freeze_moe_router", False):
+        return
+    if not getattr(args, "num_experts", None):
+        raise ValueError("--freeze-moe-router requires an MoE model (--num-experts)")
+    if getattr(args, "moe_router_enable_expert_bias", False):
+        raise ValueError("--freeze-moe-router would leave the router's expert bias updating; disable one of them")
 
 
 def validate_skip_actor_forward_only(args) -> None:

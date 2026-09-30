@@ -29,6 +29,8 @@ from miles.utils.arguments import (
     miles_validate_args,
     resolve_rollout_function_paths,
     validate_async_off_policy_correction,
+    validate_freeze_moe_router,
+    validate_prompt_mean_loss,
     validate_skip_actor_forward_only,
 )
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
@@ -611,6 +613,49 @@ def test_partial_aborted_groups_require_dynamic_global_batch_size():
 
     with pytest.raises(AssertionError, match="requires --use-dynamic-global-batch-size"):
         _resolve_rollout_functions(args)
+
+
+def test_prompt_mean_loss_and_router_freeze_parse_as_flags():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    defaults = parser.parse_args(REQUIRED_ARGS)
+    assert not defaults.prompt_mean_loss and not defaults.freeze_moe_router
+    args = parser.parse_args(["--prompt-mean-loss", "--freeze-moe-router", *REQUIRED_ARGS])
+    assert args.prompt_mean_loss and args.freeze_moe_router
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"calculate_per_token_loss": True}, "replaces --calculate-per-token-loss"),
+        ({"custom_pg_loss_reducer_function_path": "a.b"}, "custom-pg-loss-reducer"),
+        ({"num_steps_per_rollout": 2}, "one optimizer step"),
+    ],
+)
+def test_prompt_mean_loss_rejects_other_normalizations(overrides, message):
+    args = argparse.Namespace(
+        prompt_mean_loss=True,
+        calculate_per_token_loss=False,
+        custom_pg_loss_reducer_function_path=None,
+        num_steps_per_rollout=None,
+    )
+    validate_prompt_mean_loss(args)
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    with pytest.raises(ValueError, match=message):
+        validate_prompt_mean_loss(args)
+
+
+def test_router_freeze_needs_an_moe_model_without_expert_bias():
+    validate_freeze_moe_router(argparse.Namespace(freeze_moe_router=True, num_experts=256))
+    validate_freeze_moe_router(argparse.Namespace(freeze_moe_router=False, num_experts=None))
+    with pytest.raises(ValueError, match="requires an MoE model"):
+        validate_freeze_moe_router(argparse.Namespace(freeze_moe_router=True, num_experts=None))
+    with pytest.raises(ValueError, match="expert bias"):
+        validate_freeze_moe_router(
+            argparse.Namespace(freeze_moe_router=True, num_experts=256, moe_router_enable_expert_bias=True)
+        )
 
 
 def test_drain_during_weight_update_requires_fully_async():

@@ -126,6 +126,34 @@ def _is_muon_optimizer(optimizer: str | None) -> bool:
     return optimizer is not None and "muon" in optimizer.lower()
 
 
+def freeze_moe_routers(model: torch.nn.Module) -> int:
+    """Stop training every MoE router in ``model``; returns how many parameters were frozen.
+
+    Megatron's gradient buffers and optimizer skip parameters without ``requires_grad``,
+    so this has to run on each model chunk before it is wrapped for training.
+    """
+    from megatron.core.transformer.moe.router import Router
+
+    frozen = 0
+    for module in model.modules():
+        if isinstance(module, Router):
+            for param in module.parameters(recurse=False):
+                param.requires_grad = False
+                frozen += 1
+    return frozen
+
+
+def _with_frozen_moe_routers(provider_func: Callable) -> Callable:
+    """Wrap a model provider so every chunk it builds comes back with its MoE routers frozen."""
+
+    def provider(*provider_args, **provider_kwargs):
+        model = provider_func(*provider_args, **provider_kwargs)
+        logger.info("Froze %d MoE router parameters", freeze_moe_routers(model))
+        return model
+
+    return provider
+
+
 def setup_model_and_optimizer(
     args: Namespace,
     role: str = "actor",
@@ -156,6 +184,8 @@ def setup_model_and_optimizer(
         enforce_marked_param_dtypes(model)
     else:
         provider_func = get_model_provider_func(args, role)
+        if getattr(args, "freeze_moe_router", False):
+            provider_func = _with_frozen_moe_routers(provider_func)
         if is_lora_enabled(args) and role == "actor":
             if "inkling" in (args.custom_model_provider_path or ""):
                 assert args.lora_type == "lora", "Native Inkling does not implement --lora-type canonical_lora"
@@ -478,6 +508,7 @@ def run_forward_backward_pass(
                 "witness_ids",
                 "opd_reverse_kl",
                 "rollout_mask_sums",
+                "loss_denominators",
                 "rollout_view_ids",
                 "loss_weights",
                 "target_tokens",

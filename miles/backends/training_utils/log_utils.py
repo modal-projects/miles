@@ -199,6 +199,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 "sample_indices",
                 "rollout_ids",
                 "rollout_mask_sums",
+                "loss_denominators",
                 "rollout_routed_experts",
                 "rollout_indexer_topk",
                 "rollout_sampling_mask_ids",

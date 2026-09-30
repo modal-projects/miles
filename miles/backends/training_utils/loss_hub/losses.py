@@ -8,6 +8,7 @@ from miles.backends.training_utils.cp_utils import (
     all_gather_with_cp,
     get_local_response_loss_masks,
     get_sum_of_sample_mean,
+    loss_denominators,
 )
 from miles.backends.training_utils.loss_hub.corrections import vanilla_tis_function
 from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy, get_values
@@ -274,7 +275,7 @@ def policy_loss_function(
             args.calculate_per_token_loss,
             args.qkv_format,
             max_seq_lens,
-            denominators=batch.get("rollout_mask_sums", None),
+            denominators=loss_denominators(batch),
         )
 
     # Determine pg_loss reducer: use custom if specified, otherwise default
