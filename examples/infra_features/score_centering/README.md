@@ -21,7 +21,7 @@ Add these arguments to an existing text-only GRPO training recipe:
 --calculate-per-token-loss
 ```
 
-For session-server rollouts using more than 20 candidates, also set `--use-miles-router`.
+Unfiltered session-server rollouts with more than 20 candidates, and filtered rollouts, need a compatible SGLang router build; see [Rollout and data contract](#rollout-and-data-contract).
 
 Keep reward mean subtraction enabled. Disabling standard-deviation normalization gives the paper's group-centered rewards. This is a separate REINFORCE-style loss: PPO clipping parameters do not apply. Existing batch size and update scheduling still control how many updates consume a rollout batch; choose them explicitly when reproducing an experiment.
 
@@ -82,7 +82,7 @@ Native SGLang generation, the legacy rollout path, and both session-server versi
 
 Evaluation requests skip this collection and may use independent sampling settings, including greedy decoding. The built-in agentic producer marks evaluation sessions when creating them; custom session clients should create them with `POST /sessions` with JSON body `{"evaluation": true}`.
 
-For unfiltered session rollouts, more than 20 candidates require `--use-miles-router`. The SGLang Rust router caps OpenAI `top_logprobs` at 20, while MilesRouter forwards a larger request to SGLang unchanged. To use the SGLang router for unfiltered session rollouts, set `--rollout-top-logprobs-num 20` or less. Filtered rollouts request support probabilities instead of `top_logprobs` and do not use that cap. Native `/generate` rollouts support either router.
+Unfiltered session rollouts with more than 20 candidates need an SGLang router build that accepts the requested OpenAI `top_logprobs` value and preserves `input_ids` and `return_meta_info`. Older builds cap `top_logprobs` at 20. Verify a chat request through the installed router before launching; for `--rollout-top-logprobs-num 128`, confirm that 128 candidate log probabilities reach the session server. Native `/generate` requests use `top_logprobs_num` and do not share that chat validation limit. Filtered rollouts request support probabilities through `sampling_logprobs_mode` instead of `top_logprobs`, so that cap does not apply, but the router must forward `sampling_logprobs_mode` on chat and `/generate` requests.
 
 Unused candidate slots and non-trained observation rows contain token ID `-1` and log probability `-inf`. Tool-observation masks, multi-turn merging, retries, trailing-token trimming, and truncation preserve row alignment. Session serialization retains both arrays. For score centering in support mode, training batches share the recorded support IDs when every sample has exactly the same candidate order and prefix padding. A per-row candidate count preserves observation rows and masked generated rows; any mismatch keeps the original arrays for the whole batch. The trainer reconstructs only its context-parallel rows. The source Samples and session payloads still retain both representations.
 
