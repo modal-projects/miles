@@ -530,6 +530,7 @@ def _fully_async_candidate_args(**overrides) -> SimpleNamespace:
     """A namespace shaped like the parsed args `_resolve_rollout_functions` reads."""
     defaults = dict(
         fully_async=False,
+        fully_async_drain_during_weight_update=False,
         multi_lora=False,
         rollout_function_path=None,
         eval_function_path=None,
@@ -610,6 +611,17 @@ def test_partial_aborted_groups_require_dynamic_global_batch_size():
 
     with pytest.raises(AssertionError, match="requires --use-dynamic-global-batch-size"):
         _resolve_rollout_functions(args)
+
+
+def test_drain_during_weight_update_requires_fully_async():
+    """Only the persistent fully-async producer defers its drain, so the flag means nothing elsewhere."""
+    args = _fully_async_candidate_args(fully_async_drain_during_weight_update=True)
+
+    with pytest.raises(AssertionError, match="requires --fully-async"):
+        _resolve_rollout_functions(args)
+
+    args.fully_async = True
+    _resolve_rollout_functions(args)
 
 
 def test_fully_async_rejects_abort_pause_mode():

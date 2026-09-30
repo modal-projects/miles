@@ -100,6 +100,9 @@ def _resolve_rollout_functions(args) -> None:
         assert (
             args.rollout_all_samples_process_path is None
         ), "--fully-async does not support --rollout-all-samples-process-path"
+    assert (
+        args.fully_async or not args.fully_async_drain_during_weight_update
+    ), "--fully-async-drain-during-weight-update requires --fully-async"
     if args.keep_partial_groups_on_abort:
         assert (
             args.use_dynamic_global_batch_size
@@ -668,6 +671,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function; "
                     "evaluation keeps the standard rollout function, which fully async does not serve. "
                     "Requires train_async.py."
+                ),
+            )
+            parser.add_argument(
+                "--fully-async-drain-during-weight-update",
+                action="store_true",
+                default=False,
+                help=(
+                    "With --fully-async, drain the next batch while the weight update publishes instead of "
+                    "after it, so the batch's conversion overlaps the publish. The drain measures staleness "
+                    "against the version that update publishes and the buffer is FIFO, so it selects and "
+                    "accounts the same groups as a post-update drain."
                 ),
             )
             # Sampling values reach the engine per request only: the built-in generate path sends them

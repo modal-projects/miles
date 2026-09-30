@@ -146,19 +146,31 @@ class RolloutExecutor:
 
     # -------------------------- data generation -----------------------------
 
-    @event_logger_context(lambda _self, rollout_id, trainer_model_id=None: dict(rollout_id=rollout_id))
-    async def get(self, rollout_id: int, trainer_model_id: str | None = None) -> RolloutDataPack:
+    @event_logger_context(lambda _self, rollout_id, trainer_model_id=None, **_: dict(rollout_id=rollout_id))
+    async def get(
+        self, rollout_id: int, trainer_model_id: str | None = None, pending_weight_updates: int = 0
+    ) -> RolloutDataPack:
+        """Drain one training batch.
+
+        ``pending_weight_updates`` counts updates that will publish before this batch
+        trains; each advances the version by one, so staleness is measured against the
+        version the batch will actually train on. It is read before the first await,
+        so an update that publishes while this drain runs cannot shift it again.
+        """
         start_time = time.time()
         self.rollout_id = rollout_id
         self._rollouts_since_publish_of_model_id[trainer_model_id] += 1
         assert_weight_version_is_published(
             self.args, rollouts_since_publish=self._rollouts_since_publish_of_model_id[trainer_model_id]
         )
+        weight_version = self._weight_versions_of_model_id.get(trainer_model_id)
+        if weight_version is not None:
+            weight_version += pending_weight_updates
         if (get_buffer_length := getattr(self.data_source, "get_buffer_length", None)) is not None:
             dashboard_hooks.report_data_buffer(get_buffer_length())
         with timer("rollout" if trainer_model_id is None else f"{trainer_model_id}/rollout"):
             data, metadata, metrics = await self._get_rollout_data(
-                rollout_id=rollout_id, trainer_model_id=trainer_model_id
+                rollout_id=rollout_id, trainer_model_id=trainer_model_id, weight_version=weight_version
             )
         save_debug_rollout_data(
             self.args,
@@ -259,7 +271,9 @@ class RolloutExecutor:
         if self.args.ci_test:
             raise RuntimeError(f"CI eval {rollout_id} skipped: {reason}")
 
-    async def _get_rollout_data(self, rollout_id, trainer_model_id: str | None = None):
+    async def _get_rollout_data(
+        self, rollout_id, trainer_model_id: str | None = None, weight_version: int | None = None
+    ):
         if self.args.load_debug_rollout_data is not None:
             data, metadata = load_debug_rollout_data(self.args, rollout_id=rollout_id)
             metrics = None
@@ -270,7 +284,7 @@ class RolloutExecutor:
                     self.generate_rollout,
                     RolloutFnTrainInput(
                         rollout_id=rollout_id,
-                        weight_version=self._weight_versions_of_model_id.get(trainer_model_id),
+                        weight_version=weight_version,
                         trainer_model_id=trainer_model_id,
                     ),
                 )

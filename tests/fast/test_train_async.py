@@ -36,6 +36,7 @@ def _make_args(**overrides: Any) -> SimpleNamespace:
         eval_overflow_policy="skip",
         eval_uses_snapshots=True,
         fully_async=False,
+        fully_async_drain_during_weight_update=False,
         ft_components=[],
         hf_checkpoint=None,
         keep_old_actor=False,
@@ -201,6 +202,31 @@ class TestPipelinedGeneration:
 
         assert events.index("actor_train:0") < events.index("update_weights:0")
         assert events.index("update_weights:0") < events.index("generate_start:1")
+        assert "generate_start:2" not in events
+        assert components.actor_model.trained == [0, 1]
+
+    async def test_fully_async_drain_can_overlap_the_weight_publication(self, monkeypatch: pytest.MonkeyPatch):
+        """The next batch converts while the update publishes, counting that publish toward its version."""
+        events: list[str] = []
+        args = _make_args(
+            fully_async=True, fully_async_drain_during_weight_update=True, num_rollout=2, update_weights_interval=1
+        )
+        components = _install_driver_fakes(monkeypatch, args, events)
+
+        async def update_weights(
+            _args: Any, _model: Any, _executor: Any, _inference_controller: Any, *, rollout_id: int | None = None
+        ) -> None:
+            events.append(f"update_weights_start:{rollout_id}")
+            await asyncio.sleep(0)
+            events.append(f"update_weights:{rollout_id}")
+
+        monkeypatch.setattr(train_async_driver, "update_weights", update_weights)
+
+        await with_disposer(train_async_driver.train, args)
+
+        assert events.index("actor_train:0") < events.index("generate_start:1")
+        assert events.index("generate_start:1") < events.index("update_weights:0")
+        assert "generate_pending_updates:1:1" in events
         assert "generate_start:2" not in events
         assert components.actor_model.trained == [0, 1]
 

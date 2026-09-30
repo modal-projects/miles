@@ -49,8 +49,10 @@ class FakeRolloutExecutor:
         self.save = FakeRemoteMethod(self._save)
         self.report_eval_skip = FakeRemoteMethod(self._report_eval_skip)
 
-    async def _get(self, rollout_id: int) -> RolloutDataPack:
+    async def _get(self, rollout_id: int, pending_weight_updates: int = 0) -> RolloutDataPack:
         self.events.append(f"generate_start:{rollout_id}")
+        if pending_weight_updates:
+            self.events.append(f"generate_pending_updates:{rollout_id}:{pending_weight_updates}")
         if (gate := self.generation_gates.get(rollout_id)) is not None:
             await gate.wait()
         if self.generation_errors and (error := self.generation_errors.pop(0)) is not None:

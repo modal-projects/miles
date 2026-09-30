@@ -128,7 +128,7 @@ class TestPerPolicyKeying:
         )
         _record_logged_model_ids(monkeypatch)
 
-        async def _get_rollout_data(rollout_id, trainer_model_id=None):
+        async def _get_rollout_data(rollout_id, trainer_model_id=None, weight_version=None):
             return [], None, None
 
         executor._get_rollout_data = _get_rollout_data
@@ -151,6 +151,40 @@ class TestPerPolicyKeying:
 
         [rollout_input] = received
         assert (rollout_input.weight_version, rollout_input.trainer_model_id) == (7, "b")
+
+    async def test_a_drain_ahead_of_a_publish_uses_the_version_it_will_train_on(self, monkeypatch):
+        """A drain that overlaps an update must measure staleness against the version that update publishes."""
+        executor = _make_executor()
+        executor.set_weight_version(7, trainer_model_id="b")
+        executor.set_train_parallel_config({"dp_size": 4}, trainer_model_id="b")
+        received = _record_generate_inputs(executor, monkeypatch)
+        _record_postprocess_configs(monkeypatch)
+        _record_logged_model_ids(monkeypatch)
+
+        await executor.get(0, trainer_model_id="b", pending_weight_updates=1)
+
+        [rollout_input] = received
+        assert (rollout_input.weight_version, rollout_input.trainer_model_id) == (8, "b")
+
+    async def test_a_publish_during_the_drain_does_not_shift_its_version_again(self, monkeypatch):
+        """The pending update publishing mid-drain is the one already counted, so it must not add a second step."""
+        executor = _make_executor()
+        executor.set_weight_version(7, trainer_model_id="b")
+        executor.set_train_parallel_config({"dp_size": 4}, trainer_model_id="b")
+        monkeypatch.setattr(rollout_executor_module, "split_train_data_by_dp", lambda args, data, config: None)
+        _record_logged_model_ids(monkeypatch)
+        seen: list[int | None] = []
+
+        async def _get_rollout_data(rollout_id, trainer_model_id=None, weight_version=None):
+            executor.set_weight_version(8, trainer_model_id="b")
+            seen.append(weight_version)
+            return [], None, None
+
+        executor._get_rollout_data = _get_rollout_data
+
+        await executor.get(0, trainer_model_id="b", pending_weight_updates=1)
+
+        assert seen == [8]
 
     async def test_the_postprocess_step_uses_the_same_parallel_config_as_the_split(self, monkeypatch):
         """Postprocessing and splitting disagreeing on dp size would group samples one way and shard them another."""
@@ -191,7 +225,7 @@ class TestRolloutTimerNaming:
         both_arrived = asyncio.Event()
         arrivals = 0
 
-        async def _get_rollout_data(rollout_id, trainer_model_id=None):
+        async def _get_rollout_data(rollout_id, trainer_model_id=None, weight_version=None):
             nonlocal arrivals
             arrivals += 1
             if arrivals == 2:
@@ -216,7 +250,7 @@ class TestRolloutTimerNaming:
         executor = _make_executor()
         executor.set_train_parallel_config({"dp_size": 4})
 
-        async def _get_rollout_data(rollout_id, trainer_model_id=None):
+        async def _get_rollout_data(rollout_id, trainer_model_id=None, weight_version=None):
             return [], None, None
 
         executor._get_rollout_data = _get_rollout_data
@@ -242,7 +276,7 @@ class TestWeightVersionWatchdog:
             executor.set_weight_version(1, trainer_model_id=model_id)
             executor.set_train_parallel_config({"dp_size": 4}, trainer_model_id=model_id)
 
-        async def _get_rollout_data(rollout_id, trainer_model_id=None):
+        async def _get_rollout_data(rollout_id, trainer_model_id=None, weight_version=None):
             return [], None, None
 
         executor._get_rollout_data = _get_rollout_data

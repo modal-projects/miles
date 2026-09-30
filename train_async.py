@@ -69,8 +69,10 @@ async def train(args, *, disposer: Disposer):
         if args.use_critic and args.offload_train:
             await model.offload()
 
-    async def prepare_and_generate(rollout_id):
+    async def prepare_and_generate(rollout_id, pending_weight_updates=0):
         await inference_controller.prepare_rollout(rollout_id)
+        if pending_weight_updates:
+            return await rollout_executor.get(rollout_id, pending_weight_updates=pending_weight_updates)
         return await rollout_executor.get(rollout_id)
 
     # async train loop.
@@ -121,8 +123,15 @@ async def train(args, *, disposer: Disposer):
                 # sync generate before update weights to prevent update weight in the middle of generation
                 rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
                 rollout_data_next_future = None
+            drain_during_update = defer_next_drain and args.fully_async_drain_during_weight_update
+            if drain_during_update:
+                # Convert the next batch while this update publishes; the drain counts
+                # the pending publish, so its staleness matches a post-update drain.
+                rollout_data_next_future = await eager_create_task(
+                    prepare_and_generate(rollout_id + 1, pending_weight_updates=1)
+                )
             await update_weights(args, actor_model, rollout_executor, inference_controller, rollout_id=rollout_id)
-            if defer_next_drain:
+            if defer_next_drain and not drain_during_update:
                 rollout_data_next_future = await eager_create_task(prepare_and_generate(rollout_id + 1))
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout):
