@@ -4,6 +4,7 @@ import asyncio
 import math
 
 import numpy as np
+import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _meta
 
 from miles.rollout.generate_utils.generate_endpoint_utils import compute_request_payload, update_sample_from_response
@@ -33,8 +34,10 @@ def test_native_generate_producer_appends_each_call() -> None:
     validate_rollout_topk_logprobs_sample(sample, 3)
 
 
-def test_filtered_native_generation_records_post_filter_distribution() -> None:
+@pytest.mark.parametrize("candidate_count", [0, 3])
+def test_filtered_native_generation_records_post_filter_distribution(candidate_count: int) -> None:
     args = _args(
+        rollout_top_logprobs_num=candidate_count,
         rollout_top_p=0.6,
         rollout_top_k=3,
         rollout_sampling_logprobs_mode="support",
@@ -47,19 +50,25 @@ def test_filtered_native_generation_records_post_filter_distribution() -> None:
     )
     payload, status = compute_request_payload(args, [0, 1], {"temperature": 0.7, "top_p": 0.6, "top_k": 3})
     assert status is None
-    assert payload["return_sampling_mask"] and payload["sampling_logprobs_mode"] == "support"
+    assert payload["return_sampling_mask"]
+    assert payload.get("sampling_logprobs_mode") == ("support" if candidate_count else None)
     assert "top_logprobs_num" not in payload
     meta = {
         "output_token_logprobs": [(math.log(0.4), 2, None)],
         "output_token_sampling_mask": [[3, 2]],
-        "output_token_sampling_logprobs": [[math.log(3 / 7), math.log(4 / 7)]],
+        "output_token_sampling_logprobs": (
+            [[math.log(3 / 7), math.log(4 / 7)]] if candidate_count else [math.log(4 / 7)]
+        ),
         "finish_reason": {"type": "stop"},
     }
     sample = Sample()
     asyncio.run(update_sample_from_response(args, sample, payload, {"text": "2", "meta_info": meta}, True))
-    validate_rollout_topk_logprobs_sample(sample, 3)
-    np.testing.assert_array_equal(sample.rollout_topk_token_ids, [[3, 2, -1]])
-    np.testing.assert_allclose(np.exp(sample.rollout_topk_log_probs[0, :2]), [3 / 7, 4 / 7])
+    if candidate_count:
+        validate_rollout_topk_logprobs_sample(sample, 3)
+        np.testing.assert_array_equal(sample.rollout_topk_token_ids, [[3, 2, -1]])
+        np.testing.assert_allclose(np.exp(sample.rollout_topk_log_probs[0, :2]), [3 / 7, 4 / 7])
+    else:
+        assert sample.rollout_topk_token_ids is None and sample.rollout_topk_log_probs is None
     np.testing.assert_allclose(sample.rollout_log_probs, [math.log(4 / 7)])
 
 
