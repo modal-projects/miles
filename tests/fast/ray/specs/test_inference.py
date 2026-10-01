@@ -259,6 +259,8 @@ class TestComputeSpecSessionServer:
         args = make_args(
             use_session_server="v1",
             hf_checkpoint="/fake/model",
+            rollout_top_logprobs_num=0,
+            rollout_sampling_logprobs_mode="selected",
             session_server_workers=2,
             sglang_router_ip=None,
             sglang_router_port=None,
