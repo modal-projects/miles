@@ -89,7 +89,7 @@ For unfiltered session rollouts, more than 20 candidates require `--use-miles-ro
 
 Unused candidate slots and non-trained observation rows contain token ID `-1` and log probability `-inf`. Tool-observation masks, multi-turn merging, retries, trailing-token trimming, and truncation preserve row alignment. Session serialization and data-parallel sharding retain both arrays. Candidates stay on CPU until the trainer selects its context-parallel rows.
 
-Custom rollout producers must supply these fields with probabilities from the actual generation call and no repeated non-negative token ID in a row; Miles does not check uniqueness. Missing candidates or disagreeing sampled/candidate probabilities fail validation. Rescoring old rollouts with newer weights is not a substitute. With the feature disabled, requests and the session wire format remain unchanged.
+Custom rollout producers must supply these fields with probabilities from the actual generation call and no repeated non-negative token ID in a row. With `--ci-test`, Miles validates the complete sample before training, rejecting missing or duplicate candidates, sampling-support mismatches, and disagreeing sampled/candidate probabilities. This full-sample validation is skipped in normal training because sorting and support matching are expensive on long responses. Rescoring old rollouts with newer weights is not a substitute. With the feature disabled, requests and the session wire format remain unchanged.
 
 ## Supported configurations and limits
 
