@@ -20,6 +20,8 @@ from miles.utils.types import RolloutBatch
 def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Tensor) -> dict[str, list[torch.Tensor]]:
     parallel = get_parallel_state()
     result = {"selected": []}
+    if args.use_kl_loss:
+        result["kl_log_probs"] = []
     with_entropy = args.entropy_coef != 0 or args.observe_training_entropy
     replay = getattr(args, "use_sampling_support_replay", False)
     if with_entropy:
@@ -47,6 +49,9 @@ def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Ten
             chunk_size=args.log_probs_chunk_size,
             with_entropy=with_entropy and not replay,
         )
+        if args.use_kl_loss:
+            # The reference forward scores the full vocabulary, not the replayed support.
+            result["kl_log_probs"].append(selected[:, 0])
         if replay:
             # The saved candidates cover the entire realized support. Their
             # full-vocabulary logprobs share a normalizer, which cancels here.
@@ -93,6 +98,7 @@ def _regularization(
     rollout_log_probs: torch.Tensor,
     active: torch.Tensor,
     reduce: Callable[[torch.Tensor], torch.Tensor],
+    kl_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     loss = log_probs.new_zeros(())
     metrics = {}
@@ -101,14 +107,29 @@ def _regularization(
         loss = loss - args.entropy_coef * entropy
         metrics["entropy_loss"] = entropy.detach()
     if args.use_kl_loss:
-        reference = torch.where(active, torch.cat(batch["ref_log_probs"]).detach(), 0.0)
-        log_probs = torch.where(active, log_probs, 0.0)
+        reference = torch.cat(batch["ref_log_probs"]).detach()
+        actor = log_probs if kl_log_probs is None else kl_log_probs
+        # Mask before exponentiation: replacing infinity afterward can still give
+        # NaN gradients through exp. Two bounded exponentials can multiply safely
+        # in float32 (exp(40) * exp(40) < float32's maximum).
+        valid = active & torch.isfinite(actor) & torch.isfinite(reference)
+        difference = actor - reference
+        valid = valid & (difference.abs() <= 40)
+        ratio_log = log_probs - rollout_log_probs
+        if args.use_unbiased_kl:
+            valid = valid & torch.isfinite(ratio_log) & (ratio_log.abs() <= 40)
+        actor = torch.where(valid, actor, 0.0)
+        reference = torch.where(valid, reference, 0.0)
         # Keep the existing Miles KL estimator's gradient through the ratio.
-        ratio = (log_probs - rollout_log_probs).exp() if args.use_unbiased_kl else None
-        kl = reduce(compute_approx_kl(log_probs, reference, args.kl_loss_type, importance_ratio=ratio))
+        # This ratio uses the actual replayed sampling distribution even though
+        # the reference penalty compares full-vocabulary probabilities.
+        ratio = torch.where(valid, ratio_log, 0.0).exp() if args.use_unbiased_kl else None
+        kl = compute_approx_kl(actor, reference, args.kl_loss_type, importance_ratio=ratio)
+        kl = reduce(torch.where(valid, torch.nan_to_num(kl, nan=0.0, posinf=0.0, neginf=0.0), 0.0))
         if args.kl_loss_coef != 0:
             loss = loss + args.kl_loss_coef * kl
         metrics["kl_loss"] = kl.detach()
+        metrics["kl_invalid_fraction"] = reduce((active & ~valid).float()).detach()
     return loss, metrics
 
 
@@ -147,7 +168,10 @@ def score_centering_loss_function(
     )
     pg_loss = sum_of_sample_mean(token_loss)
     entropy = torch.cat(probabilities["entropy"]) if "entropy" in probabilities else None
-    loss, log = _regularization(args, batch, entropy, selected[:, 0], rollout, active, sum_of_sample_mean)
+    kl_log_probs = torch.cat(probabilities["kl_log_probs"]) if args.use_kl_loss else None
+    loss, log = _regularization(
+        args, batch, entropy, selected[:, 0], rollout, active, sum_of_sample_mean, kl_log_probs
+    )
     loss = loss + pg_loss
     log.update({key: sum_of_sample_mean(value).detach() for key, value in metrics.items()})
     log.update(loss=loss.detach(), pg_loss=pg_loss.detach())
