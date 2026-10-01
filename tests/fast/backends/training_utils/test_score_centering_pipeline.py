@@ -32,7 +32,8 @@ def single_rank(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
-def test_multiturn_wire_dp_split_and_training_gradient(single_rank: None, mode: str) -> None:
+@pytest.mark.parametrize("ci_test", [False, True])
+def test_multiturn_wire_dp_split_and_training_gradient(single_rank: None, mode: str, ci_test: bool) -> None:
     first = _turn([0, 1], [2, 3], [0.5, 0.25])
     second = _turn([0, 1, 2, 3, 6], [4, 5], [0.55, 0.2])
     merged = merge_samples([first, second], _Tokenizer())
@@ -47,7 +48,7 @@ def test_multiturn_wire_dp_split_and_training_gradient(single_rank: None, mode: 
     restored.reward, restored.index = 1.0, 0
     other = deepcopy(restored)
     other.index, other.reward = 1, -0.7
-    args = _args(score_centering_is=mode)
+    args = _args(score_centering_is=mode, ci_test=ci_test)
     data = convert_samples_to_train_data(args, [restored, other], {}, None, None)
     batch = split_train_data_by_dp_raw(args, data, dp_size=2)[1]
     np.testing.assert_array_equal(batch["rollout_topk_token_ids"][0], restored.rollout_topk_token_ids)

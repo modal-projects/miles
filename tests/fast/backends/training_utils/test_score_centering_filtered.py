@@ -61,12 +61,14 @@ def _filtered_sample() -> Sample:
 
 
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
-def test_filtered_loss_matches_dense_support_gradient(single_rank: None, mode: str) -> None:
+@pytest.mark.parametrize("ci_test", [False, True])
+def test_filtered_loss_matches_dense_support_gradient(single_rank: None, mode: str, ci_test: bool) -> None:
     sample = _filtered_sample()
     validate_rollout_topk_logprobs_sample(sample, 3)
     np.testing.assert_array_equal(sample.rollout_topk_token_ids, [[3, 2, -1]])
     np.testing.assert_allclose(np.exp(sample.rollout_topk_log_probs[0, :2]), [3 / 7, 4 / 7])
     args = _args(
+        ci_test=ci_test,
         score_centering_is=mode,
         rollout_top_p=0.6,
         rollout_top_k=3,
@@ -113,12 +115,19 @@ def test_filtered_loss_matches_dense_support_gradient(single_rank: None, mode: s
     torch.testing.assert_close(metrics["entropy_loss"], support_entropy.detach())
 
 
-def test_missing_support_candidate_fails_before_training() -> None:
+@pytest.mark.parametrize("ci_test", [False, True])
+def test_missing_support_candidate_checked_only_in_ci(ci_test: bool) -> None:
     sample = _filtered_sample()
     sample.rollout_topk_token_ids[0, 1] = -1
     sample.rollout_topk_log_probs[0, 1] = -np.inf
-    with pytest.raises(ValueError, match="must equal the sampling support"):
-        validate_rollout_topk_logprobs_sample(sample, 3)
+    args = _args(ci_test=ci_test)
+    if ci_test:
+        with pytest.raises(ValueError, match="must equal the sampling support"):
+            convert_samples_to_train_data(args, [sample], {}, None, None)
+    else:
+        data = convert_samples_to_train_data(args, [sample], {}, None, None)
+        np.testing.assert_array_equal(data["rollout_topk_token_ids"][0], sample.rollout_topk_token_ids)
+        np.testing.assert_array_equal(data["rollout_topk_log_probs"][0], sample.rollout_topk_log_probs)
 
 
 def test_missing_support_candidate_fails_at_generation() -> None:
