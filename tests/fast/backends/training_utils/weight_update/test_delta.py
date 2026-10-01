@@ -118,6 +118,7 @@ class TestPostWriteHookConstruction:
             protocol = UpdateWeightFromDiskDelta(args)
 
         assert protocol._post_write_hook is None
+        assert protocol._post_write_views_hook is None
         assert set(protocol._view_protocols) == {"bf16", "fp8-e4m3"}
         for name, child in protocol._view_protocols.items():
             assert child.delta_dir == str(tmp_path / "updates" / name)
@@ -412,6 +413,7 @@ def test_multiview_finalize_publishes_each_view_independently() -> None:
     fp8.update_weight_metrics = {"perf/update_weights_density": 0.5}
     nvfp4.update_weight_metrics = {"perf/update_weights_density": 0.25}
     protocol._view_protocols = {"fp8": fp8, "nvfp4": nvfp4}
+    protocol._post_write_views_hook = None
 
     def gather_one_rank(output, value, **_kwargs):
         output[0] = value
@@ -443,6 +445,7 @@ def test_multiview_failure_does_not_roll_back_a_published_sibling() -> None:
     nvfp4._inflight = []
     nvfp4.after_base_weights.side_effect = RuntimeError("failed child")
     protocol._view_protocols = {"fp8": fp8, "nvfp4": nvfp4}
+    protocol._post_write_views_hook = None
 
     def gather_one_rank(output, value, **_kwargs):
         output[0] = value
@@ -478,6 +481,7 @@ def test_multiview_finalize_does_not_wait_for_an_unready_sibling() -> None:
 
     nvfp4.finalize.side_effect = publish_nvfp4
     protocol._view_protocols = {"fp8": fp8, "nvfp4": nvfp4}
+    protocol._post_write_views_hook = None
 
     def gather_one_rank(output, value, **_kwargs):
         output[0] = value
@@ -493,3 +497,112 @@ def test_multiview_finalize_does_not_wait_for_an_unready_sibling() -> None:
     nvfp4.finalize.assert_called_once_with(7)
     fp8.finalize.assert_called_once_with(7)
     assert publish_order == ["nvfp4", "fp8"]
+
+
+def test_views_hook_is_loaded_only_for_weight_views(tmp_path: Path) -> None:
+    views = (WeightView("bf16", "/checkpoints/bf16", None),)
+    args = Namespace(
+        update_weight_disk_dir=str(tmp_path / "updates"),
+        update_weight_delta_encoding="xor",
+        update_weight_delta_checksum="xxh3",
+        custom_update_weight_post_write_path="plugins:publish",
+        custom_update_weight_post_write_views_path="plugins:publish_views",
+    )
+    hooks = {"plugins:publish": object(), "plugins:publish_views": object()}
+
+    with patch("miles.utils.function_registry.load_function", side_effect=hooks.get):
+        single = UpdateWeightFromDiskDelta(args)
+        with patch(f"{_DELTA_MODULE}.load_weight_views", side_effect=lambda config: views if config else ()):
+            multi = UpdateWeightFromDiskDelta(
+                Namespace(**vars(args), update_weight_views={"bf16": "/checkpoints/bf16"})
+            )
+
+    assert single._post_write_views_hook is None
+    assert single._post_write_hook is hooks["plugins:publish"]
+    assert multi._post_write_views_hook is hooks["plugins:publish_views"]
+
+
+def _gather_one_rank(output, value, **_kwargs):
+    output[0] = value
+
+
+def _view_child(name: str, events: list, ready: bool = True) -> MagicMock:
+    child = MagicMock()
+    child._version_dir = f"/updates/{name}/weight_v000007"
+    child._inflight = [] if ready else [Future()]
+    child.update_weight_metrics = {"perf/update_weights_density": 0.5}
+    child.after_base_weights.side_effect = lambda: events.append(("drain", name))
+    child._write_delta_files.side_effect = lambda _version: events.append(("write", name))
+    return child
+
+
+def _finalize_with_views_hook(children: dict, hook) -> UpdateWeightFromDiskDelta:
+    protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    protocol.args = Namespace()
+    protocol._view_protocols = children
+    protocol._post_write_views_hook = hook
+    with (
+        patch(f"{_DELTA_MODULE}.dist") as dist_mock,
+        patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=MagicMock()),
+        patch(f"{_DELTA_MODULE}.time.sleep"),
+    ):
+        dist_mock.get_world_size.return_value = 1
+        dist_mock.all_gather_object.side_effect = _gather_one_rank
+        protocol.finalize(7)
+    return protocol
+
+
+def test_views_ready_together_are_published_with_one_hook_call() -> None:
+    """Their files are all written before the one publish; no per-view publish runs."""
+    events = []
+    children = {name: _view_child(name, events) for name in ("bf16", "fp8", "nvfp4")}
+    hook = MagicMock(side_effect=lambda *_args: events.append(("publish", None)))
+
+    protocol = _finalize_with_views_hook(children, hook)
+
+    assert events == [
+        *(("drain", name) for name in children),
+        *(("write", name) for name in children),
+        ("publish", None),
+    ]
+    hook.assert_called_once_with(protocol.args, {name: child._version_dir for name, child in children.items()}, [])
+    for child in children.values():
+        child.finalize.assert_not_called()
+        child._reload_engines.assert_not_called()
+        child._record_metrics.assert_called_once_with(7)
+    assert protocol.update_weight_metrics == {f"perf/update_weights_density/{name}": 0.5 for name in children}
+
+
+def test_a_view_still_encoding_is_published_after_the_ready_ones() -> None:
+    """Views are independent: the ready ones publish without waiting for a slower one."""
+    events = []
+    children = {
+        "bf16": _view_child("bf16", events, ready=False),
+        "fp8": _view_child("fp8", events),
+        "nvfp4": _view_child("nvfp4", events),
+    }
+    published = []
+
+    def publish(_args, version_dirs, _engines):
+        published.append(sorted(version_dirs))
+        # bf16's encoding finishes while the others publish.
+        for future in children["bf16"]._inflight:
+            if not future.done():
+                future.set_result(None)
+
+    _finalize_with_views_hook(children, MagicMock(side_effect=publish))
+
+    assert published == [["fp8", "nvfp4"], ["bf16"]]
+
+
+def test_a_view_that_fails_to_drain_does_not_hold_back_a_drained_sibling() -> None:
+    events = []
+    children = {name: _view_child(name, events) for name in ("fp8", "nvfp4")}
+    children["nvfp4"].after_base_weights.side_effect = RuntimeError("encode failed")
+    hook = MagicMock()
+
+    with pytest.raises(RuntimeError, match="'nvfp4' preparation failed on rank 0: RuntimeError: encode failed"):
+        _finalize_with_views_hook(children, hook)
+
+    hook.assert_called_once_with(Namespace(), {"fp8": children["fp8"]._version_dir}, [])
+    children["nvfp4"]._write_delta_files.assert_not_called()

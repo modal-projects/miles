@@ -624,6 +624,15 @@ def test_rollout_sources_parse_as_a_list_and_default_to_none():
     assert args.rollout_sources == ["ServerH100FP8:fp8", "ServerB300NVFP4:nvfp4"]
 
 
+def test_views_publish_hook_parses_and_defaults_to_per_view_publication():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    assert parser.parse_args(REQUIRED_ARGS).custom_update_weight_post_write_views_path is None
+    args = parser.parse_args(["--custom-update-weight-post-write-views-path", "hooks.publish", *REQUIRED_ARGS])
+    assert args.custom_update_weight_post_write_views_path == "hooks.publish"
+
+
 def test_prompt_mean_loss_and_router_freeze_parse_as_flags():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)

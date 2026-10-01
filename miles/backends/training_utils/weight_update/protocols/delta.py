@@ -141,6 +141,12 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
             from miles.utils.function_registry import load_function
 
             self._post_write_hook = load_function(args.custom_update_weight_post_write_path)
+        # Publishes every view's files of a sync together; per-view publication otherwise.
+        self._post_write_views_hook: Callable | None = None
+        if views and getattr(args, "custom_update_weight_post_write_views_path", None):
+            from miles.utils.function_registry import load_function
+
+            self._post_write_views_hook = load_function(args.custom_update_weight_post_write_views_path)
         self._view_protocols: dict[str, UpdateWeightFromDiskDelta] = {}
         for view in views:
             view_args = copy(args)
@@ -244,7 +250,13 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         self._record_metrics(weight_version)
 
     def _finalize_views(self, weight_version: int) -> None:
-        """Publish each view when its workers have completed on every rank."""
+        """Publish each view once its workers have completed on every rank.
+
+        Views are independent: none waits for another. Views that become ready together
+        are drained, then published together, so with --custom-update-weight-post-write-views-path
+        one commit round covers them all. A view that fails to drain stops the sync, but
+        not before the siblings drained ahead of it are published.
+        """
         pending = dict(self._view_protocols)
         metrics = {}
         group = get_gloo_group()
@@ -258,6 +270,8 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
                 time.sleep(0.5)
                 continue
 
+            drained = []
+            failure = None
             for name in ready:
                 protocol = pending.pop(name)
                 local_error = None
@@ -269,10 +283,32 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
                 dist.all_gather_object(errors, local_error, group=group)
                 if any(errors):
                     failed_rank, error = next((rank, error) for rank, error in enumerate(errors) if error is not None)
-                    raise RuntimeError(f"Disk-delta view {name!r} preparation failed on rank {failed_rank}: {error}")
-                protocol.finalize(weight_version)
-                metrics.update({f"{key}/{name}": value for key, value in protocol.update_weight_metrics.items()})
+                    failure = RuntimeError(f"Disk-delta view {name!r} preparation failed on rank {failed_rank}: {error}")
+                    break
+                drained.append(name)
+            self._publish_views(weight_version, drained)
+            for name in drained:
+                metrics.update({f"{key}/{name}": value for key, value in self._view_protocols[name].update_weight_metrics.items()})
+            if failure is not None:
+                raise failure
         self.update_weight_metrics = metrics
+
+    def _publish_views(self, weight_version: int, names: list[str]) -> None:
+        """Write and publish drained views: one views-hook call for all of them, else each
+        through its own post-write hook."""
+        if not names:
+            return
+        if self._post_write_views_hook is None:
+            for name in names:
+                self._view_protocols[name].finalize(weight_version)
+            return
+        for name in names:
+            self._view_protocols[name]._write_delta_files(weight_version)
+        # Multiple views require an opaque external endpoint, so there are no engines to reload.
+        self._post_write_views_hook(self.args, {name: self._view_protocols[name]._version_dir for name in names}, [])
+        dist.barrier(group=get_gloo_group())
+        for name in names:
+            self._view_protocols[name]._record_metrics(weight_version)
 
     def _capture_baseline(self, iter_buckets) -> None:
         """Capture the baseline snapshot the first delta diffs against (no publish), and clear any

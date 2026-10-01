@@ -1184,6 +1184,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--custom-update-weight-post-write-views-path",
+                type=str,
+                default=None,
+                help=(
+                    "With --update-weight-views, a function called once per disk-delta sync on each "
+                    "trainer rank after every view's files are written, instead of the per-view "
+                    "--custom-update-weight-post-write-path, so one commit round can cover all views. "
+                    "Signature: ``def hook(args, version_dirs: dict[str, str], rollout_engines) -> None``."
+                ),
+            )
+            parser.add_argument(
                 "--p2p-transfer-num-workers",
                 type=int,
                 default=4,
