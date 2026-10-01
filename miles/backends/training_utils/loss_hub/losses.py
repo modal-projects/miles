@@ -23,7 +23,7 @@ from miles.backends.training_utils.loss_hub.score_centering_loss import score_ce
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.sampling_mask import get_rollout_sampling_masks
 from miles.utils.function_registry import load_function
-from miles.utils.rollout_views import add_rollout_view_metrics
+from miles.utils.rollout_views import add_train_rollout_diagnostics
 from miles.utils.types import RolloutBatch
 
 
@@ -345,7 +345,6 @@ def policy_loss_function(
 
     train_rollout_logprob_abs_diff = None
     train_rollout_kl = None
-    mismatch_token_metrics = None
     if rollout_old_log_probs:
         # The loss baseline may be rollout log-probs. Diagnostics must use an
         # independently scored trainer policy, even in that case.
@@ -369,10 +368,6 @@ def policy_loss_function(
             rollout_train_kl.new_zeros(()),
         )
         train_rollout_kl = sum_of_sample_mean(rollout_train_kl)
-        mismatch_token_metrics = {
-            "train_rollout_logprob_abs_diff": abs_diff,
-            "train_rollout_kl": rollout_train_kl,
-        }
 
     reported_loss = {
         "loss": loss.clone().detach(),
@@ -387,9 +382,8 @@ def policy_loss_function(
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
     if train_rollout_kl is not None:
         reported_loss["train_rollout_kl"] = train_rollout_kl.clone().detach()
-    if mismatch_token_metrics is not None:
-        add_rollout_view_metrics(
-            args, batch, reported_loss, local_loss_mask_list, mismatch_token_metrics, sum_of_sample_mean
+        add_train_rollout_diagnostics(
+            args, batch, reported_loss, local_loss_masks=local_loss_mask_list, abs_diff=abs_diff, kl=rollout_train_kl
         )
 
     if args.use_kl_loss:

@@ -166,6 +166,30 @@ class TestPerPolicyKeying:
         [rollout_input] = received
         assert (rollout_input.weight_version, rollout_input.trainer_model_id) == (8, "b")
 
+    async def test_conversion_learns_the_version_the_batch_trains_on(self, monkeypatch):
+        """Per-sample staleness tags are measured against the drain's version, pending publish included."""
+        executor = _make_executor()
+        executor.set_weight_version(7, trainer_model_id="b")
+        executor.set_train_parallel_config({"dp_size": 4}, trainer_model_id="b")
+        monkeypatch.setattr(rollout_executor_module, "split_train_data_by_dp", lambda args, data, config: None)
+        _record_logged_model_ids(monkeypatch)
+        seen: list[dict] = []
+
+        def convert(args, data, metadata, **_kwargs):
+            seen.append(metadata)
+            return {}
+
+        monkeypatch.setattr(rollout_executor_module, "convert_samples_to_train_data", convert)
+
+        async def _get_rollout_data(rollout_id, trainer_model_id=None, weight_version=None):
+            return [], {"prompt_group_sizes": [8]}, None
+
+        executor._get_rollout_data = _get_rollout_data
+
+        await executor.get(0, trainer_model_id="b", pending_weight_updates=1)
+
+        assert seen == [{"prompt_group_sizes": [8], "train_weight_version": 8}]
+
     async def test_a_publish_during_the_drain_does_not_shift_its_version_again(self, monkeypatch):
         """The pending update publishing mid-drain is the one already counted, so it must not add a second step."""
         executor = _make_executor()

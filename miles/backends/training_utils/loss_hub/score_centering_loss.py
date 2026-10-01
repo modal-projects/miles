@@ -14,7 +14,7 @@ from miles.backends.training_utils.loss_hub.logit_processors import _iter_respon
 from miles.backends.training_utils.loss_hub.math_utils import compute_approx_kl
 from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, selected_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.rollout_views import add_rollout_view_metrics
+from miles.utils.rollout_views import add_train_rollout_diagnostics
 from miles.utils.types import RolloutBatch
 
 
@@ -164,12 +164,7 @@ def score_centering_loss_function(
         0.0,
     )
     log["train_rollout_kl"] = sum_of_sample_mean(rollout_train_kl).detach()
-    add_rollout_view_metrics(
-        args,
-        batch,
-        log,
-        local_loss_masks,
-        {"train_rollout_logprob_abs_diff": abs_diff, "train_rollout_kl": rollout_train_kl},
-        sum_of_sample_mean,
+    add_train_rollout_diagnostics(
+        args, batch, log, local_loss_masks=local_loss_masks, abs_diff=abs_diff, kl=rollout_train_kl
     )
     return loss, log

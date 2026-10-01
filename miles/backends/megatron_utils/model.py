@@ -510,6 +510,8 @@ def run_forward_backward_pass(
                 "rollout_mask_sums",
                 "loss_denominators",
                 "rollout_view_ids",
+                "rollout_lag_buckets",
+                "rollout_source_ids",
                 "loss_weights",
                 "target_tokens",
                 "sample_indices",

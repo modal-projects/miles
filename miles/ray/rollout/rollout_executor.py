@@ -183,6 +183,9 @@ class RolloutExecutor:
         log_rollout_data(
             rollout_id, self.args, data, metrics, time.time() - start_time, trainer_model_id=trainer_model_id
         )
+        if weight_version is not None:
+            # Conversion tags each sample with its version lag against the version it trains on.
+            metadata = {**(metadata or {}), "train_weight_version": weight_version}
         data = convert_samples_to_train_data(
             self.args,
             data,

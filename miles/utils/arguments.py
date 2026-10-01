@@ -1066,6 +1066,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-sources",
+                type=str,
+                nargs="+",
+                default=None,
+                help=(
+                    "Every rollout source the endpoint can report in --rollout-source-header. "
+                    "When set, train-vs-rollout diagnostics are also split per source."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-external-router-pd",
                 action="store_true",
                 default=False,

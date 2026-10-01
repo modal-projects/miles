@@ -615,6 +615,15 @@ def test_partial_aborted_groups_require_dynamic_global_batch_size():
         _resolve_rollout_functions(args)
 
 
+def test_rollout_sources_parse_as_a_list_and_default_to_none():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    assert parser.parse_args(REQUIRED_ARGS).rollout_sources is None
+    args = parser.parse_args(["--rollout-sources", "ServerH100FP8:fp8", "ServerB300NVFP4:nvfp4", *REQUIRED_ARGS])
+    assert args.rollout_sources == ["ServerH100FP8:fp8", "ServerB300NVFP4:nvfp4"]
+
+
 def test_prompt_mean_loss_and_router_freeze_parse_as_flags():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)

@@ -11,7 +11,13 @@ from miles.utils import object_store
 from miles.utils.dp_schedule import build_dp_schedule, has_full_schedule_config
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.object_store import ValueSpec
-from miles.utils.rollout_views import rollout_view_index, rollout_view_names
+from miles.utils.rollout_views import (
+    rollout_lag_bucket,
+    rollout_source_index,
+    rollout_source_names,
+    rollout_view_index,
+    rollout_view_names,
+)
 from miles.utils.score_centering import score_centering_top_k
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
@@ -47,6 +53,8 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "rollout_mask_sums": ValueSpec(codec="ndarray", dtype="int64"),
     "loss_denominators": ValueSpec(codec="ndarray", dtype="float64"),
     "rollout_view_ids": ValueSpec(codec="ndarray", dtype="int64"),
+    "rollout_lag_buckets": ValueSpec(codec="ndarray", dtype="int64"),
+    "rollout_source_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
     "metadata": ValueSpec(codec="msgpack_ragged"),
@@ -197,6 +205,15 @@ def convert_samples_to_train_data(
     if view_names := rollout_view_names(args):
         train_data["rollout_view_ids"] = [
             rollout_view_index(view_names, (sample.metadata or {}).get("rollout_source")) for sample in samples
+        ]
+    if source_names := rollout_source_names(args):
+        train_data["rollout_source_ids"] = [
+            rollout_source_index(source_names, (sample.metadata or {}).get("rollout_source")) for sample in samples
+        ]
+    if (train_version := metadata.get("train_weight_version")) is not None:
+        train_data["rollout_lag_buckets"] = [
+            rollout_lag_bucket(None if (oldest := sample.oldest_weight_version) is None else train_version - oldest)
+            for sample in samples
         ]
 
     if samples[0].train_metadata is not None:
@@ -454,6 +471,8 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "rollout_mask_sums",
             "loss_denominators",
             "rollout_view_ids",
+            "rollout_lag_buckets",
+            "rollout_source_ids",
             "rollout_log_probs",
             "rollout_topk_token_ids",
             "rollout_topk_log_probs",
