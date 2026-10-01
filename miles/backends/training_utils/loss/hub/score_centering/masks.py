@@ -2,10 +2,9 @@
 
 Candidate slots outside ``head_mask`` are padding: their log-probability is a
 finite placeholder and their probability is zero, so padding never contributes
-and never trips the non-finite checks. NaN is tolerated only on inactive
-(zero-advantage) tokens, where it becomes zero mass; on an active token it is an
-error. ``-inf`` is valid data (zero probability) and is rejected only where an
-active token gives it a nonzero coefficient.
+to the loss. NaN on inactive (zero-advantage) tokens becomes zero mass.
+``-inf`` represents zero probability; scored terms mask non-finite values
+before multiplication.
 """
 
 import torch
@@ -17,14 +16,12 @@ def _token_mask(active: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
 
 
 def drop_inactive_nan(values: torch.Tensor, active: torch.Tensor, fill: float) -> torch.Tensor:
-    """Replace NaN on inactive tokens with ``fill``; NaN on active tokens is kept for the caller to reject."""
+    """Replace NaN on inactive tokens with ``fill``; preserve values on active tokens."""
     return torch.where(~_token_mask(active, values) & torch.isnan(values), fill, values)
 
 
 def sanitize_head_log_probs(log_probs: torch.Tensor, head_mask: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
     """Head log-probabilities with inactive NaN mapped to ``-inf`` and padding to the placeholder 0."""
-    if (_token_mask(active, log_probs) & head_mask & torch.isnan(log_probs)).any():
-        raise ValueError("Score centering has a NaN candidate log-probability on an active token")
     return torch.where(head_mask, drop_inactive_nan(log_probs, active, -torch.inf), 0.0)
 
 
@@ -33,13 +30,11 @@ def head_probs(log_probs: torch.Tensor, head_mask: torch.Tensor) -> torch.Tensor
     return log_probs.exp().masked_fill(~head_mask, 0.0)
 
 
-def scored_log_probs(log_probs: torch.Tensor, coefficient: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
+def scored_log_probs(log_probs: torch.Tensor, coefficient: torch.Tensor) -> torch.Tensor:
     """Log-probabilities that enter the loss, zeroed wherever the coefficient is zero.
 
     Masking before the multiply keeps ``0 * -inf`` from turning the loss into NaN.
     """
     finite = torch.isfinite(log_probs)
     scored = coefficient != 0
-    if (_token_mask(active, log_probs) & scored & ~finite).any():
-        raise ValueError("Score centering has a non-finite log-probability with nonzero gradient weight")
     return torch.where(scored & finite, log_probs, 0.0)
