@@ -13,6 +13,7 @@ from safetensors import safe_open
 
 from miles.backends.training_utils.checkpoint_io import write_checkpoint_dir
 from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase
+from miles.backends.training_utils.weight_update.protocols.delta import match_checkpoint_layout
 from miles.utils.hf_utils.config import HF_EXPORT_COMPLETE_MARKER
 from miles.utils.lora.utils import AdapterSpec, get_adapter_target_modules
 
@@ -233,7 +234,13 @@ class SnapshotPublisher:
             shard_index += 1
             shard_name = f"model-{shard_index:05d}.safetensors"
             for view_name, hf_named_tensors in tensors_by_view.items():
-                shard_tensors = {name: tensor.detach().to("cpu").contiguous() for name, tensor in hf_named_tensors}
+                # Each view is exported in its canonical checkpoint's layout, as its deltas are,
+                # so a replica booted from the export can apply the deltas that follow it.
+                checkpoint = views[view_name].checkpoint
+                shard_tensors = {
+                    name: match_checkpoint_layout(checkpoint, name, tensor).detach().to("cpu").contiguous()
+                    for name, tensor in hf_named_tensors
+                }
                 for name, tensor in shard_tensors.items():
                     weight_maps[view_name][name] = shard_name
                     total_sizes[view_name] += tensor.numel() * tensor.element_size()

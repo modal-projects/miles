@@ -83,6 +83,33 @@ def _safetensors_dtype(dtype: torch.dtype) -> str:
         raise ValueError(f"Disk-delta does not support trainer tensor dtype {dtype}") from None
 
 
+def match_checkpoint_layout(checkpoint: str, name: str, tensor: torch.Tensor) -> torch.Tensor:
+    """Match one emitted tensor to the immutable checkpoint byte layout.
+
+    Model conversion and quantization decide which tensors exist. Only a storage-dtype
+    cast between ordinary floating-point tensors is permitted; packed and FP8 layouts
+    must already match exactly. Deltas and full exports of a view both pass through
+    this, so an export holds exactly the bytes the view's delta lineage builds on.
+    """
+    try:
+        checkpoint_dtype, checkpoint_shape = checkpoint_tensor_layout(checkpoint, name)
+    except KeyError as error:
+        raise ValueError(f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint") from error
+
+    if tuple(tensor.shape) != checkpoint_shape:
+        raise ValueError(f"Checkpoint tensor {name!r} has shape {checkpoint_shape}; trainer emitted {tuple(tensor.shape)}")
+
+    emitted_dtype = _safetensors_dtype(tensor.dtype)
+    if emitted_dtype == checkpoint_dtype:
+        return tensor
+
+    checkpoint_torch_dtype = _PLAIN_FLOAT_DTYPE_BY_SAFETENSORS_DTYPE.get(checkpoint_dtype)
+    if checkpoint_torch_dtype is not None and emitted_dtype in _PLAIN_FLOAT_DTYPE_BY_SAFETENSORS_DTYPE:
+        return tensor.to(checkpoint_torch_dtype)
+
+    raise ValueError(f"Checkpoint tensor {name!r} has dtype {checkpoint_dtype}; trainer emitted {emitted_dtype}. Quantized storage layouts must be produced by the model's weight converter.")
+
+
 class UpdateWeightFromDiskDelta(WeightTransferProtocol):
     """
     Delta weight sync through durable filesystem artifacts. Source ranks diff each gathered HF
@@ -442,29 +469,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         dist.barrier(group=group)
 
     def _match_checkpoint_layout(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
-        """Match one emitted tensor to the immutable checkpoint byte layout.
-
-        Model conversion and quantization decide which tensors exist. Disk-delta
-        only permits a storage-dtype cast between ordinary floating-point
-        tensors; packed and FP8 layouts must already match exactly.
-        """
-        try:
-            checkpoint_dtype, checkpoint_shape = checkpoint_tensor_layout(self.args.hf_checkpoint, name)
-        except KeyError as error:
-            raise ValueError(f"Trainer emitted {name!r}, but it is absent from the canonical checkpoint") from error
-
-        if tuple(tensor.shape) != checkpoint_shape:
-            raise ValueError(f"Checkpoint tensor {name!r} has shape {checkpoint_shape}; trainer emitted {tuple(tensor.shape)}")
-
-        emitted_dtype = _safetensors_dtype(tensor.dtype)
-        if emitted_dtype == checkpoint_dtype:
-            return tensor
-
-        checkpoint_torch_dtype = _PLAIN_FLOAT_DTYPE_BY_SAFETENSORS_DTYPE.get(checkpoint_dtype)
-        if checkpoint_torch_dtype is not None and emitted_dtype in _PLAIN_FLOAT_DTYPE_BY_SAFETENSORS_DTYPE:
-            return tensor.to(checkpoint_torch_dtype)
-
-        raise ValueError(f"Checkpoint tensor {name!r} has dtype {checkpoint_dtype}; trainer emitted {emitted_dtype}. Quantized storage layouts must be produced by the model's weight converter.")
+        return match_checkpoint_layout(self.args.hf_checkpoint, name, tensor)
 
     def _begin_encode(self, weight_version: int) -> None:
         """Set up this version's diff/compress pipeline: each ``send_bucket`` copies one tensor at

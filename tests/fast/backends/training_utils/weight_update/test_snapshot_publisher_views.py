@@ -115,3 +115,43 @@ def test_snapshot_publisher_rejects_an_omitted_dynamic_tensor(tmp_path: Path) ->
         pytest.raises(ValueError, match="omitted canonical tensors"),
     ):
         publisher.write_model(tmp_path / "output", weights={}, hf_checkpoint="/unused")
+
+
+class _Float32Iterator(_Iterator):
+    """Emits a plain-float tensor in float32 that the canonical checkpoints store in bf16."""
+
+    @staticmethod
+    def iter_hf_weight_views(_weights):
+        (bucket,) = _Iterator.iter_hf_weight_views(_weights)
+        a_log = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
+        yield {view: [*tensors, ("A_log", a_log)] for view, tensors in bucket.items()}
+
+
+def test_snapshot_publisher_writes_each_view_in_its_canonical_layout(tmp_path: Path) -> None:
+    """The export must hold the bytes its view's deltas build on, not the emitted dtype."""
+    base = tmp_path / "base"
+    _write_base_checkpoints(base)
+    for view in ("fp8", "nvfp4"):
+        safetensors.torch.save_file({"A_log": torch.zeros(3, dtype=torch.bfloat16)}, base / view / "a_log.safetensors")
+        index_path = base / view / "model.safetensors.index.json"
+        index = json.loads(index_path.read_text())
+        index["weight_map"]["A_log"] = "a_log.safetensors"
+        index_path.write_text(json.dumps(index))
+
+    output = tmp_path / "output"
+    with (
+        patch(
+            "miles.backends.training_utils.weight_update.snapshot_publisher.dist.get_rank",
+            return_value=0,
+        ),
+        patch.object(SnapshotPublisher, "_copy_metadata"),
+    ):
+        SnapshotPublisher(_Float32Iterator(base)).write_model(
+            output, weights={}, hf_checkpoint="/unused", source_tensor_prefixes=("frozen.",)
+        )
+
+    for view in ("fp8", "nvfp4"):
+        index = json.loads((output / view / "model.safetensors.index.json").read_text())
+        exported = safetensors.torch.load_file(output / view / index["weight_map"]["A_log"])["A_log"]
+        assert exported.dtype == torch.bfloat16
+        assert torch.equal(exported, torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32).to(torch.bfloat16))
