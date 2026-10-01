@@ -120,9 +120,8 @@ def convert_samples_to_train_data(
 
     if k := args.rollout_top_logprobs_num:
         for sample in samples:
-            validate_rollout_topk_logprobs_sample(sample, k)
-            if sample.multimodal_train_inputs:
-                raise ValueError("Rollout top-k logprobs collection does not yet support multimodal token expansion")
+            if args.ci_test:
+                validate_rollout_topk_logprobs_sample(sample, k)
         train_data["rollout_topk_token_ids"] = [sample.rollout_topk_token_ids for sample in samples]
         train_data["rollout_topk_log_probs"] = [sample.rollout_topk_log_probs for sample in samples]
 

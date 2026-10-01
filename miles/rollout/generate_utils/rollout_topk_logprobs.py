@@ -47,7 +47,7 @@ def append_rollout_topk_logprobs(
     No rescoring is allowed: with stale rollouts it would replace the behavior
     policy. Slots unavailable from the server are represented by ID -1/logp -inf.
     append_sampling_metadata validates the sampling support on the same response,
-    and validate_rollout_topk_logprobs_sample checks the whole sample before training.
+    and CI checks the whole sample with validate_rollout_topk_logprobs_sample.
     """
     if not k:
         return
@@ -103,7 +103,11 @@ def pad_rollout_topk_logprobs(sample: Sample, count: int) -> None:
 
 
 def validate_rollout_topk_logprobs_sample(sample: Sample, k: int) -> None:
-    """Validate the contract also for custom producers and restored rollouts."""
+    """Validate candidate distributions, including custom producers and restored rollouts.
+
+    Full-sample sorting and support matching have significant CPU and memory costs;
+    training callers must enable this validation only under --ci-test.
+    """
     sample.validate()
     ids, logps = sample.rollout_topk_token_ids, sample.rollout_topk_log_probs
     if ids is None or logps is None or sample.rollout_log_probs is None:
