@@ -32,6 +32,8 @@ Choose `--score-centering-is tis` for weights clipped at `--score-centering-tis-
 
 The existing entropy and reference-KL loss options remain available. They are separate regularizers; the score-centering identity applies to the policy-gradient term.
 With filtered sampling, sampling-support replay rules prohibit reference KL; entropy is computed over the recorded support.
+The loss keeps full-vocabulary actor scores for reference KL, matching the reference forward even if called directly with replayed candidates. This does not remove the startup restriction above.
+Reference-KL tokens with non-finite probabilities or absolute log-probability ratios above 40 are excluded before exponentiation to keep gradients finite. With unbiased KL, this also applies to the train/rollout ratio. `train/kl_invalid_fraction` reports the excluded fraction.
 
 Training logs include `train/train_rollout_logprob_abs_diff` and `train/train_rollout_kl`. The latter uses the same masked, sampled-token k3 estimator of KL(rollout || train) as the policy loss. It is a detached diagnostic and is emitted even when reference-KL regularization is disabled.
 
