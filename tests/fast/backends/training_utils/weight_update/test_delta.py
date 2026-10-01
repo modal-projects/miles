@@ -191,6 +191,7 @@ def test_send_bucket_encodes_a_scalar_tensor(tmp_path: Path) -> None:
     protocol._pool = MagicMock()
     protocol._inflight = deque()
     protocol.total_bytes = 0
+    protocol._timings = dict.fromkeys(("convert_wait", "buffer_wait", "copy", "worker_wait"), 0.0)
 
     protocol.send_bucket([("weight_scale", torch.ones((), dtype=torch.float32))])
 

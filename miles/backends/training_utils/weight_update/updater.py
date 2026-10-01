@@ -7,6 +7,7 @@ LoRA adapter pushes.
 """
 
 import logging
+import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 
@@ -124,18 +125,40 @@ class WeightUpdater:
             ), "the LoRA checksum manifest is recorded on one rank, which must hold the full adapter"
         with timer("update_weights_implementation"):
             pbar = tqdm(desc=f"[{protocol.group_name}] Update weights", total=0) if protocol.is_sender else None
+            # Split each bucket's host time between producing it (gather + HF conversion) and
+            # handing it to the protocol, so a slow sync shows which side paces it. GPU work still
+            # queued at hand-off is charged to whichever protocol step first waits for it.
+            produce_s = send_s = 0.0
+            count = 0
+            handed_off = time.perf_counter()
             for bucket in self._iter_weight_buckets(
                 include_base=sync_base,
                 adapters=adapters,
                 materialize=protocol.is_sender,
             ):
+                produced = time.perf_counter()
+                produce_s += produced - handed_off
+                count += 1
                 if protocol.is_sender:
                     if driver and checksums is not None:
                         record_lora_checksums(bucket, checksums)
                     protocol.send_bucket(bucket)
                     pbar.update(1)
+                handed_off = time.perf_counter()
+                send_s += handed_off - produced
+            drain_started = time.perf_counter()
+            produce_s += drain_started - handed_off  # the iterator's last, empty step
             protocol.after_base_weights()
             dist.barrier(group=get_gloo_group())
+            if driver:
+                logger.info(
+                    "[weight sync v=%s] buckets=%d gather_and_convert=%.1fs send=%.1fs drain=%.1fs",
+                    self.weight_version,
+                    count,
+                    produce_s,
+                    send_s,
+                    time.perf_counter() - drain_started,
+                )
 
         with timer("finalize_and_resume_engines"):
             protocol.finalize(self.weight_version)

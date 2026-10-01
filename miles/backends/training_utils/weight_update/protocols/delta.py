@@ -211,22 +211,36 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
             return
         if isinstance(bucket, dict):
             raise ValueError("single-view disk-delta received a multi-view bucket")
+        # The bucket's gather/convert kernels may still be queued; the first copy below would
+        # wait for them anyway, so wait here to keep them out of the copy time. With several
+        # views, the first view's wait covers every view's conversion.
+        waited = time.perf_counter()
+        if bucket and bucket[0][1].is_cuda:
+            torch.cuda.current_stream().synchronize()
+        self._timings["convert_wait"] += time.perf_counter() - waited
         for name, tensor in bucket:
             tensor = self._match_checkpoint_layout(name, tensor)
             # The dtype-view overload requires at least one dimension.
             flat = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
             nbytes = int(flat.numel())
+            waited = time.perf_counter()
             if self._use_pinned and nbytes <= self._max_bytes:
                 buf = self._free_q.get()  # blocks when all buffers are in flight -> backpressures the gather
+                copied = time.perf_counter()
                 buf[:nbytes].copy_(flat, non_blocking=True)
                 torch.cuda.current_stream().synchronize()
                 payload, pinned = buf, True
             else:
+                copied = time.perf_counter()
                 payload, pinned = flat.cpu().numpy(), False
+            submitted = time.perf_counter()
+            self._timings["buffer_wait"] += copied - waited
+            self._timings["copy"] += submitted - copied
             self.total_bytes += nbytes
             self._inflight.append(self._pool.submit(self._diff_and_compress, name, payload, nbytes, pinned))
             if len(self._inflight) >= 2 * NUM_WORKERS:
                 self._collect(self._inflight.popleft())
+            self._timings["worker_wait"] += time.perf_counter() - submitted
 
     def after_base_weights(self) -> None:
         """Drain the in-flight diff/compress work and shut the pool down."""
@@ -519,6 +533,9 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         self._delta: dict[str, np.ndarray] = {}  # changed tensor name -> compressed diff
         self._checksums: dict[str, str] = {}  # changed tensor name -> new-state checksum
         self.changed_bytes = self.total_bytes = 0
+        # Where the sender's send_bucket time goes: the bucket's queued GPU conversion, waiting
+        # for a free pinned buffer, the GPU->CPU copy, and waiting for diff/compress workers.
+        self._timings = dict.fromkeys(("convert_wait", "buffer_wait", "copy", "worker_wait"), 0.0)
 
         # Pinned host-buffer pool: a pinned non_blocking GPU->CPU copy is far faster than .cpu().
         self._max_bytes = max((int(v.nbytes) for v in self._snapshot.values()), default=0)
@@ -677,10 +694,11 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         }
         if dist.get_rank() == 0:
             logger.info(
-                "[disk delta v=%s] density=%.2f%% wire=%.2f GB",
+                "[disk delta v=%s] density=%.2f%% wire=%.2f GB %s",
                 weight_version,
                 100.0 * changed / max(total, 1),
                 wire / 1e9,
+                " ".join(f"{name}={seconds:.1f}s" for name, seconds in self._timings.items()),
             )
 
 
