@@ -16,6 +16,7 @@ from miles.backends.training_utils.loss_hub.logit_processors import get_log_prob
 from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, selected_log_probs_and_entropy
 from miles.backends.training_utils.loss_hub.score_centering_loss import score_centering_loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
+from miles.utils.sampling_mask import RolloutSamplingMask
 
 
 def _layout(parts: list[torch.Tensor], args: Namespace, cp_rank: int) -> torch.Tensor:
@@ -55,7 +56,15 @@ def _check_selected(tp: GroupInfo, dtype: torch.dtype, device: torch.device) -> 
     )
 
 
-def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: torch.device) -> None:
+def _check_loss(
+    tp: GroupInfo,
+    cp: GroupInfo,
+    layout: str,
+    mode: str,
+    device: torch.device,
+    replay: bool = False,
+    use_kl: bool = True,
+) -> None:
     args = Namespace(
         loss_type="score_centering",
         qkv_format="bshd" if layout in ("bshd", "bshd_allgather") else "thd",
@@ -70,7 +79,8 @@ def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: to
         score_centering_mis_high=5.0,
         entropy_coef=0.03,
         observe_training_entropy=True,
-        use_kl_loss=True,
+        use_kl_loss=use_kl,
+        use_sampling_support_replay=replay,
         use_unbiased_kl=False,
         kl_loss_type="k2",
         kl_loss_coef=0.1,
@@ -83,26 +93,44 @@ def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: to
     advantages = [torch.randn(response, generator=generator).to(device) for response in responses]
     distributions = [torch.randn(response, 7, generator=generator).to(device).softmax(-1) for response in responses]
     candidates = [q.topk(3, dim=-1) for q in distributions]
+    if replay:
+        for token, response, head in zip(tokens, responses, candidates, strict=True):
+            if response:
+                token[-response:] = head.indices[:, 0]
+                head.values.div_(head.values.sum(-1, keepdim=True))
+        candidates[0].indices[1].fill_(-1)
+        candidates[0].values[1].zero_()
     sampled_q = [
         q.gather(-1, token[-response:, None] if response else token[:0, None]).squeeze(-1).log()
         for q, token, response in zip(distributions, tokens, responses, strict=True)
     ]
+    if replay:
+        sampled_q = [head.values[:, 0].clamp_min(1e-30).log() for head in candidates]
     expected_loss = torch.zeros((), device=device)
     for part, token, total, response, advantage, mask, head, q_sample in zip(
         parts, tokens, totals, responses, advantages, masks, candidates, sampled_q, strict=True
     ):
         logp = (part[total - response - 1 : total - 1, :7] / 0.7).log_softmax(-1)
         sampled = token[-response:] if response else token[:0]
+        valid = head.indices >= 0
+        if replay:
+            selected = logp.gather(-1, head.indices.clamp_min(0)).masked_fill(~valid, -torch.inf)
+            normalizer = torch.logsumexp(selected, -1, keepdim=True)
+            logp = logp - torch.where(valid.any(-1, keepdim=True), normalizer, 0.0)
         per_token, _ = score_centering_loss(
             logp.gather(-1, sampled[:, None]).squeeze(-1),
-            logp.gather(-1, head.indices),
+            logp.gather(-1, head.indices.clamp_min(0)),
             q_sample,
             head.values.log(),
-            torch.ones_like(head.indices, dtype=torch.bool),
+            valid,
             advantage,
             mode=mode,
         )
-        entropy = -(logp.exp() * logp).sum(-1)
+        if replay:
+            head_logp = logp.gather(-1, head.indices.clamp_min(0)).masked_fill(~valid, -torch.inf)
+            entropy = -(head_logp.exp() * head_logp.masked_fill(~valid, 0.0)).sum(-1)
+        else:
+            entropy = -(logp.exp() * logp).sum(-1)
         expected_loss = expected_loss + (
             (per_token - args.entropy_coef * entropy) * mask
         ).sum() / mask.sum().clamp_min(1)
@@ -129,6 +157,20 @@ def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: to
             for a, t, r in zip(advantages, totals, responses, strict=True)
         ],
     )
+    if replay:
+        dense_ids = [torch.from_numpy(ids) for ids in batch.pop("rollout_topk_token_ids")]
+        batch["rollout_topk_lengths"] = [(ids >= 0).sum(-1).to(torch.int32) for ids in dense_ids]
+        supports = [
+            RolloutSamplingMask.from_mask_list(
+                [
+                    row[row >= 0].tolist() if (row >= 0).any() else [int(token[-response + i])]
+                    for i, row in enumerate(ids)
+                ]
+            )
+            for ids, token, response in zip(dense_ids, tokens, responses, strict=True)
+        ]
+        batch["rollout_sampling_mask_ids"] = [mask._as_tensors()[0] for mask in supports]
+        batch["rollout_sampling_mask_offsets"] = [mask._as_tensors()[1] for mask in supports]
     # A reference identical to the actor must give zero KL, including with a padded vocabulary.
     with torch.no_grad():
         batch["ref_log_probs"] = get_log_probs_and_entropy(
@@ -143,7 +185,8 @@ def _check_loss(tp: GroupInfo, cp: GroupInfo, layout: str, mode: str, device: to
         totals, responses, masks, qkv_format=args.qkv_format, max_seq_lens=batch["max_seq_lens"]
     )
     loss, metrics = score_centering_loss_function(args, batch, local, reduce)
-    torch.testing.assert_close(metrics["kl_loss"], torch.zeros_like(metrics["kl_loss"]), atol=0, rtol=0)
+    if use_kl:
+        torch.testing.assert_close(metrics["kl_loss"], torch.zeros_like(metrics["kl_loss"]), atol=0, rtol=0)
     loss.backward()
     expected_grad = _layout([part.grad for part in parts], args, cp.rank)[..., tp.rank * 4 : (tp.rank + 1) * 4]
     torch.testing.assert_close(local.grad, expected_grad, atol=2e-6, rtol=2e-5)
@@ -172,6 +215,8 @@ def _worker(rank: int, rendezvous: str, backend: str) -> None:
         for layout in ("thd", "bshd", "allgather", "bshd_allgather"):
             for mode in ("none", "tis", "mis"):
                 _check_loss(tp, cp, layout, mode, device)
+                for use_kl in (False, True):
+                    _check_loss(tp, cp, layout, mode, device, replay=True, use_kl=use_kl)
     finally:
         dist.destroy_process_group()
 

@@ -17,6 +17,20 @@ from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.types import RolloutBatch
 
 
+def _candidate_ids(batch: RolloutBatch, sample: int, indices: torch.Tensor) -> torch.Tensor:
+    if batch.get("rollout_topk_token_ids") is not None:
+        return torch.as_tensor(batch["rollout_topk_token_ids"][sample])[indices].long()
+    lengths = torch.as_tensor(batch["rollout_topk_lengths"][sample])[indices]
+    offsets = torch.as_tensor(batch["rollout_sampling_mask_offsets"][sample])[indices]
+    support = torch.as_tensor(batch["rollout_sampling_mask_ids"][sample])
+    width = batch["rollout_topk_log_probs"][sample].shape[-1]
+    columns = torch.arange(width)
+    valid = columns < lengths[:, None]
+    ids = torch.full((len(indices), width), -1, dtype=torch.long)
+    ids[valid] = support[(offsets[:, None] + columns)[valid]].long()
+    return ids
+
+
 def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Tensor) -> dict[str, list[torch.Tensor]]:
     parallel = get_parallel_state()
     result = {"selected": []}
@@ -24,6 +38,7 @@ def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Ten
         result["kl_log_probs"] = []
     with_entropy = args.entropy_coef != 0 or args.observe_training_entropy
     replay = getattr(args, "use_sampling_support_replay", False)
+    support_only = replay and not args.use_kl_loss
     if with_entropy:
         result["entropy"] = []
     chunks = _iter_response_chunks(
@@ -36,9 +51,8 @@ def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Ten
         include_response_indices=True,
     )
     for i, (chunk, tokens, indices) in enumerate(chunks):
-        ids = torch.as_tensor(batch["rollout_topk_token_ids"][i], dtype=torch.long)
-        indices = torch.as_tensor(list(indices), dtype=torch.long, device=ids.device)
-        ids = ids.index_select(0, indices).to(logits.device)
+        indices = torch.as_tensor(list(indices), dtype=torch.long)
+        ids = _candidate_ids(batch, i, indices).to(logits.device)
         ids = torch.cat((tokens.unsqueeze(-1), ids), dim=-1)
         selected, entropy = selected_log_probs_and_entropy(
             chunk,
@@ -47,12 +61,13 @@ def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Ten
             vocab_size=getattr(args, "vocab_size", None),
             temperature=args.rollout_temperature,
             chunk_size=args.log_probs_chunk_size,
-            with_entropy=with_entropy and not replay,
+            with_entropy=with_entropy and (not replay or support_only),
+            sampling_support=support_only,
         )
         if args.use_kl_loss:
             # The reference forward scores the full vocabulary, not the replayed support.
             result["kl_log_probs"].append(selected[:, 0])
-        if replay:
+        if replay and not support_only:
             # The saved candidates cover the entire realized support. Their
             # full-vocabulary logprobs share a normalizer, which cancels here.
             head_valid = ids[:, 1:] >= 0
@@ -80,12 +95,14 @@ def _candidate_log_probs(args: Namespace, batch: RolloutBatch, logits: torch.Ten
 
 def _local_candidates(args: Namespace, batch: RolloutBatch, key: str, device: torch.device) -> torch.Tensor:
     values = []
-    for i, (value, total, response) in enumerate(
-        zip(batch[key], batch["total_lengths"], batch["response_lengths"], strict=True)
-    ):
+    for i, (total, response) in enumerate(zip(batch["total_lengths"], batch["response_lengths"], strict=True)):
         maximum = batch["max_seq_lens"][i] if batch.get("max_seq_lens") is not None else None
         # Slice on CPU before copying to the device; each CP rank needs only its rows.
-        value = slice_log_prob_with_cp(torch.as_tensor(value), total, response, args.qkv_format, maximum)
+        if key == "rollout_topk_token_ids":
+            indices = slice_log_prob_with_cp(torch.arange(response), total, response, args.qkv_format, maximum)
+            value = _candidate_ids(batch, i, indices)
+        else:
+            value = slice_log_prob_with_cp(torch.as_tensor(batch[key][i]), total, response, args.qkv_format, maximum)
         values.append(value.to(device))
     return torch.cat(values)
 

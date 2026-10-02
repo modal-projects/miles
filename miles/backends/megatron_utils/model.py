@@ -439,7 +439,7 @@ def run_forward_backward_pass(
 
     sampling_mask_keys = (
         ("rollout_sampling_mask_ids", "rollout_sampling_mask_offsets")
-        if args.use_sampling_support_replay and args.loss_type == "policy_loss"
+        if args.use_sampling_support_replay and args.loss_type in ("policy_loss", "score_centering")
         else ()
     )
 
@@ -477,6 +477,7 @@ def run_forward_backward_pass(
                 "returns",
                 "rollout_log_probs",
                 "rollout_topk_token_ids",
+                "rollout_topk_lengths",
                 "rollout_topk_log_probs",
                 "max_seq_lens",
                 "witness_ids",
