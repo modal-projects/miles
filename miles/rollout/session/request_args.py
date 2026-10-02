@@ -43,11 +43,13 @@ def parse_chat_request(body: bytes) -> dict[str, Any]:
 @dataclass
 class PreparedChatRequest:
     """Outbound body before adding ``input_ids``, template args to render them,
-    and the client's streaming preference for the response."""
+    and what the client asked of the response: streaming, and how many top
+    logprobs per token (training may request more than the client did)."""
 
     body: dict[str, Any]
     template_args: dict[str, Any]
     client_stream: bool
+    client_top_logprobs: int = 0
 
 
 def prepare_chat_request(
@@ -92,7 +94,10 @@ def prepare_chat_request(
         else:
             request_args.pop("return_sampling_mask", None)
     return PreparedChatRequest(
-        body=request_args, template_args=extract_template_args(request_args), client_stream=client_stream
+        body=request_args,
+        template_args=extract_template_args(request_args),
+        client_stream=client_stream,
+        client_top_logprobs=int(client_args.get("top_logprobs") or 0),
     )
 
 

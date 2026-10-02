@@ -2,8 +2,9 @@
 
 HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each request into primitives and calls these methods. Owns one ``SessionRegistry`` (per-session TITO/trajectory state) and one proxy ``backend``.
 
-- ``chat_completions`` strips training-only replay payloads from the client reply copy-on-write; the
-  ``SessionRecord`` keeps the full response for the training path (``GET /sessions/{id}``).
+- ``chat_completions`` strips training-only payloads from the client reply copy-on-write: replay outputs,
+  and candidate logprobs beyond what the client asked for. The ``SessionRecord`` keeps the full response
+  for the training path (``GET /sessions/{id}``).
 - ``chat_completions`` holds the per-session lock for prep and state update but not across the proxy call; ``closing`` re-checks and the ``num_assistant`` check gate concurrent DELETE/chat.
 - ``stream: true`` is served as fake streaming: the backend call stays non-streaming (TITO needs the complete message + meta_info) and the full response is re-rendered as a single SSE chunk plus ``data: [DONE]``. Errors all happen before the SSE body is built, so they keep their real status codes as JSON.
 - ``collect_samples`` holds that session's lock while it assembles training Samples in a worker thread, so the snapshot stays stable without blocking unrelated sessions.
@@ -26,7 +27,7 @@ from miles.rollout.session.errors import (
     UpstreamResponseError,
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
-from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
+from miles.rollout.session.request_args import PreparedChatRequest, filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.samples.merge import (
     compute_samples_from_openai_records,
@@ -84,13 +85,31 @@ _CLIENT_STRIPPED_META_KEYS = (
 )
 
 
-def _strip_replay_payloads(response: dict) -> dict:
+def _strip_replay_payloads(response: dict, top_logprobs: int = 0) -> dict:
+    """Copy ``response`` for the client without what training added to it.
+
+    Replay payloads are dropped, and per-token candidates beyond the client's
+    ``top_logprobs`` (training may request more) are cut from both their copies,
+    in the OpenAI logprobs and in ``meta_info``. The server lists candidates by
+    descending probability, so the cut keeps the client's top ones.
+    """
     stripped_choices = []
     for choice in response.get("choices", []):
         meta = choice.get("meta_info")
-        if isinstance(meta, dict) and any(k in meta for k in _CLIENT_STRIPPED_META_KEYS):
-            meta = {k: v for k, v in meta.items() if k not in _CLIENT_STRIPPED_META_KEYS}
-            choice = {**choice, "meta_info": meta}
+        if isinstance(meta, dict):
+            candidates = meta.get("output_top_logprobs") or []
+            excess = any(len(row or ()) > top_logprobs for row in candidates)
+            if excess or any(k in meta for k in _CLIENT_STRIPPED_META_KEYS):
+                meta = {k: v for k, v in meta.items() if k not in _CLIENT_STRIPPED_META_KEYS}
+                if excess:
+                    del meta["output_top_logprobs"]
+                    if top_logprobs:
+                        meta["output_top_logprobs"] = [row[:top_logprobs] if row else row for row in candidates]
+                choice = {**choice, "meta_info": meta}
+        content = (choice.get("logprobs") or {}).get("content")
+        if content and any(len(token.get("top_logprobs") or ()) > top_logprobs for token in content):
+            content = [{**token, "top_logprobs": (token.get("top_logprobs") or [])[:top_logprobs]} for token in content]
+            choice = {**choice, "logprobs": {**choice["logprobs"], "content": content}}
         stripped_choices.append(choice)
     return {**response, "choices": stripped_choices}
 
@@ -125,8 +144,8 @@ def _response_to_stream_chunk(response: dict) -> dict:
     return chunk
 
 
-def _chat_client_response(result: dict, response: dict, client_stream: bool) -> Response:
-    if client_stream:
+def _chat_client_response(result: dict, response: dict, prepared: PreparedChatRequest) -> Response:
+    if prepared.client_stream:
         sse = b"data: " + _render_json(_response_to_stream_chunk(response)) + b"\n\ndata: [DONE]\n\n"
         # Fresh headers: upstream's headers describe its JSON body, not this SSE body.
         # X-Accel-Buffering keeps reverse proxies from buffering the stream.
@@ -138,7 +157,7 @@ def _chat_client_response(result: dict, response: dict, client_stream: bool) -> 
         )
     headers = {k: v for k, v in result["headers"].items() if k.lower() not in _DROP_RESPONSE_HEADERS}
     return Response(
-        content=_render_json(_strip_replay_payloads(response)),
+        content=_render_json(_strip_replay_payloads(response, prepared.client_top_logprobs)),
         status_code=result["status_code"],
         headers=headers,
         media_type=JSON_MEDIA_TYPE,
@@ -391,7 +410,6 @@ class SessionCore:
                 message_matcher=self.registry.message_matcher,
             )
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
-            client_stream = prepared.client_stream
             request_messages = request_body.get("messages", [])
             prompt_token_ids = request_body["input_ids"]
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
@@ -430,7 +448,7 @@ class SessionCore:
         async with session.lock:
             if session.closing:
                 logger.debug("Session %s closed during proxy, skipping state update", session_id)
-                return _chat_client_response(result, response, client_stream)
+                return _chat_client_response(result, response, prepared)
 
             if session.num_assistant != expected_num_assistant:
                 logger.warning(
@@ -438,7 +456,7 @@ class SessionCore:
                     f"(expected num_assistant={expected_num_assistant}, "
                     f"got {session.num_assistant}), skipping state update"
                 )
-                return _chat_client_response(result, response, client_stream)
+                return _chat_client_response(result, response, prepared)
 
             stored_request_messages = tito_tokenizer.preserve_server_message_state(
                 session.messages,
@@ -465,7 +483,7 @@ class SessionCore:
             session.append_record(record)
         # --- lock released ---
 
-        return _chat_client_response(result, response, client_stream)
+        return _chat_client_response(result, response, prepared)
 
     async def proxy(
         self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes

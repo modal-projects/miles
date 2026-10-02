@@ -177,7 +177,6 @@ class SessionCoreV2(SessionCore):
                 message_matcher=self.registry.message_matcher,
             )
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
-            client_stream = prepared.client_stream
             request_messages = request_body.get("messages", [])
             prompt_token_ids = request_body["input_ids"]
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
@@ -214,7 +213,7 @@ class SessionCoreV2(SessionCore):
         async with session.lock:
             if session.closing:
                 logger.debug("Session %s closed during proxy, skipping state update", session_id)
-                return _chat_client_response(result, response, client_stream)
+                return _chat_client_response(result, response, prepared)
 
             record = SessionRecord(
                 timestamp=time.time(),
@@ -240,4 +239,4 @@ class SessionCoreV2(SessionCore):
             )
         # --- lock released ---
 
-        return _chat_client_response(result, response, client_stream)
+        return _chat_client_response(result, response, prepared)

@@ -12,7 +12,7 @@ from tests.fast.fixtures.session_fixtures import make_session_server_config
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.generate_utils.score_centering import validate_score_centering_sample
-from miles.rollout.session.core import SessionCore
+from miles.rollout.session.core import SessionCore, _chat_client_response
 from miles.rollout.session.errors import MessageValidationError
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.request_args import prepare_chat_request
@@ -52,6 +52,34 @@ def test_score_centering_training_and_evaluation_sessions(registry_type: type, c
                 prepare_chat_request(
                     {"temperature": 0}, tokenizer, config=config, turn_args=None, evaluation=session.evaluation
                 )
+
+
+@pytest.mark.parametrize("client_top_logprobs", [None, 2])
+def test_training_candidates_reach_the_record_but_not_the_client(client_top_logprobs: int | None) -> None:
+    config = make_session_server_config(loss_type="score_centering", rollout_temperature=0.7)
+    tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
+    client = {} if client_top_logprobs is None else {"logprobs": True, "top_logprobs": client_top_logprobs}
+    prepared = prepare_chat_request(client, tokenizer, config=config, turn_args=None)
+    assert prepared.body["top_logprobs"] == 128
+    rows = [[[math.log(0.5**j), 10 + j, f"t{j}"] for j in range(1, 5)] for _ in range(3)]
+    content = [
+        {"token": "a", "logprob": -0.1, "top_logprobs": [{"token": t, "logprob": p} for p, _, t in row]}
+        for row in rows
+    ]
+    response = {
+        "choices": [{"logprobs": {"content": content}, "meta_info": {"output_top_logprobs": rows, "weight_version": 3}}]
+    }
+    reply = _chat_client_response({"status_code": 200, "headers": {}}, response, prepared)
+    choice = json.loads(reply.body)["choices"][0]
+    kept = client_top_logprobs or 0
+    assert [[top["token"] for top in token["top_logprobs"]] for token in choice["logprobs"]["content"]] == [
+        ["t1", "t2"][:kept]
+    ] * 3
+    assert choice["meta_info"].get("output_top_logprobs") == ([row[:kept] for row in rows] if kept else None)
+    assert choice["meta_info"]["weight_version"] == 3
+    # The record shares ``response``: training still sees every candidate.
+    assert response["choices"][0]["meta_info"]["output_top_logprobs"] is rows
+    assert all(len(token["top_logprobs"]) == 4 for token in response["choices"][0]["logprobs"]["content"])
 
 
 def test_session_producer_trims_candidates_with_tito_tokens() -> None:
