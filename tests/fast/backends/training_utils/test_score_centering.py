@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from miles.backends.training_utils.loss_hub.score_centering import (
+    ScoreCenteringInputs,
     importance_weights,
     score_centering_loss,
     selected_log_probs,
@@ -29,12 +30,14 @@ def test_invalid_importance_bounds_fail_clearly(mode: str, kwargs: dict[str, flo
         importance_weights(torch.tensor([0.0]), mode, **kwargs)
     with pytest.raises(ValueError, match="clip|bounds"):
         score_centering_loss(
-            torch.tensor([-1.0]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([-1.0]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([[True]]),
-            torch.ones(1),
+            ScoreCenteringInputs(
+                train_log_probs=torch.tensor([-1.0]),
+                train_head_log_probs=torch.tensor([[-1.0]]),
+                rollout_log_probs=torch.tensor([-1.0]),
+                rollout_head_log_probs=torch.tensor([[-1.0]]),
+                head_mask=torch.tensor([[True]]),
+                advantages=torch.ones(1),
+            ),
             mode=mode,
             **kwargs,
         )
@@ -46,12 +49,14 @@ def test_nan_importance_ratio_fails_clearly(mode: str) -> None:
         importance_weights(torch.tensor([float("nan")]), mode)
     with pytest.raises(ValueError, match="log-ratio contains NaN"):
         score_centering_loss(
-            torch.tensor([float("-inf")]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([float("-inf")]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([[True]]),
-            torch.ones(1),
+            ScoreCenteringInputs(
+                train_log_probs=torch.tensor([float("-inf")]),
+                train_head_log_probs=torch.tensor([[-1.0]]),
+                rollout_log_probs=torch.tensor([float("-inf")]),
+                rollout_head_log_probs=torch.tensor([[-1.0]]),
+                head_mask=torch.tensor([[True]]),
+                advantages=torch.ones(1),
+            ),
             mode=mode,
         )
 
@@ -59,30 +64,34 @@ def test_nan_importance_ratio_fails_clearly(mode: str) -> None:
 @pytest.mark.parametrize("mode", ["tis", "mis"])
 def test_zero_advantage_ignores_nan_importance_ratio(mode: str) -> None:
     loss, metrics = score_centering_loss(
-        torch.tensor([float("-inf")]),
-        torch.tensor([[-1.0]]),
-        torch.tensor([float("-inf")]),
-        torch.tensor([[-1.0]]),
-        torch.tensor([[True]]),
-        torch.zeros(1),
+        ScoreCenteringInputs(
+            train_log_probs=torch.tensor([float("-inf")]),
+            train_head_log_probs=torch.tensor([[-1.0]]),
+            rollout_log_probs=torch.tensor([float("-inf")]),
+            rollout_head_log_probs=torch.tensor([[-1.0]]),
+            head_mask=torch.tensor([[True]]),
+            advantages=torch.zeros(1),
+        ),
         mode=mode,
     )
     torch.testing.assert_close(loss, torch.zeros_like(loss))
-    assert torch.isfinite(metrics["sc_importance_weight"]).all()
+    assert torch.isfinite(metrics.importance_weight).all()
 
 
 @pytest.mark.parametrize("mode", ["tis", "mis"])
 def test_zero_advantage_preserves_finite_importance_weight(mode: str) -> None:
     _, metrics = score_centering_loss(
-        torch.tensor([-1.0]),
-        torch.tensor([[-1.0]]),
-        torch.tensor([-1.0 - math.log(0.8)]),
-        torch.tensor([[-1.0]]),
-        torch.tensor([[True]]),
-        torch.zeros(1),
+        ScoreCenteringInputs(
+            train_log_probs=torch.tensor([-1.0]),
+            train_head_log_probs=torch.tensor([[-1.0]]),
+            rollout_log_probs=torch.tensor([-1.0 - math.log(0.8)]),
+            rollout_head_log_probs=torch.tensor([[-1.0]]),
+            head_mask=torch.tensor([[True]]),
+            advantages=torch.zeros(1),
+        ),
         mode=mode,
     )
-    torch.testing.assert_close(metrics["sc_importance_weight"], torch.tensor([0.8]))
+    torch.testing.assert_close(metrics.importance_weight, torch.tensor([0.8]))
 
 
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
@@ -91,27 +100,31 @@ def test_zero_advantage_ignores_nan_head_candidate(mode: str, bad_side: str) -> 
     train_head = torch.tensor([[float("nan") if bad_side == "train" else -1.0, -1.5]])
     rollout_head = torch.tensor([[float("nan") if bad_side == "rollout" else -1.0, -1.5]])
     loss, metrics = score_centering_loss(
-        torch.tensor([-1.0]),
-        train_head,
-        torch.tensor([-1.0]),
-        rollout_head,
-        torch.tensor([[True, True]]),
-        torch.zeros(1),
+        ScoreCenteringInputs(
+            train_log_probs=torch.tensor([-1.0]),
+            train_head_log_probs=train_head,
+            rollout_log_probs=torch.tensor([-1.0]),
+            rollout_head_log_probs=rollout_head,
+            head_mask=torch.tensor([[True, True]]),
+            advantages=torch.zeros(1),
+        ),
         mode=mode,
     )
     torch.testing.assert_close(loss, torch.zeros_like(loss))
-    assert all(torch.isfinite(value).all() for value in metrics.values())
+    assert all(torch.isfinite(value).all() for value in metrics.as_log_dict().values())
 
 
 def test_active_nan_head_candidate_fails_clearly() -> None:
     with pytest.raises(ValueError, match="NaN candidate"):
         score_centering_loss(
-            torch.tensor([-1.0]),
-            torch.tensor([[float("nan")]]),
-            torch.tensor([-1.0]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([[True]]),
-            torch.ones(1),
+            ScoreCenteringInputs(
+                train_log_probs=torch.tensor([-1.0]),
+                train_head_log_probs=torch.tensor([[float("nan")]]),
+                rollout_log_probs=torch.tensor([-1.0]),
+                rollout_head_log_probs=torch.tensor([[-1.0]]),
+                head_mask=torch.tensor([[True]]),
+                advantages=torch.ones(1),
+            ),
         )
 
 
@@ -119,12 +132,14 @@ def test_active_nan_head_candidate_fails_clearly() -> None:
 def test_nonfinite_advantage_fails_clearly(advantage: float) -> None:
     with pytest.raises(ValueError, match="advantages must be finite"):
         score_centering_loss(
-            torch.tensor([-1.0]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([-1.0]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([[True]]),
-            torch.tensor([advantage]),
+            ScoreCenteringInputs(
+                train_log_probs=torch.tensor([-1.0]),
+                train_head_log_probs=torch.tensor([[-1.0]]),
+                rollout_log_probs=torch.tensor([-1.0]),
+                rollout_head_log_probs=torch.tensor([[-1.0]]),
+                head_mask=torch.tensor([[True]]),
+                advantages=torch.tensor([advantage]),
+            ),
         )
 
 
@@ -140,7 +155,7 @@ def test_score_centering_loss_rejects_broadcastable_shapes(bad_index: int) -> No
     ]
     values[bad_index] = values[bad_index][..., :1] if bad_index in (1, 3, 4) else values[bad_index][None]
     with pytest.raises(ValueError, match="sample tensors must be"):
-        score_centering_loss(*values)
+        score_centering_loss(ScoreCenteringInputs(*values))
 
 
 @pytest.mark.parametrize("mode", ["tis", "mis"])
@@ -157,12 +172,14 @@ def test_zero_weight_negative_infinity_has_finite_loss_and_gradient(mode: str, n
         requires_grad=True,
     )
     loss, _ = score_centering_loss(
-        sample,
-        head,
-        torch.tensor([0.3], dtype=torch.float64).log(),
-        torch.tensor([[0.2]], dtype=torch.float64).log(),
-        torch.tensor([[True]]),
-        torch.ones(1, dtype=torch.float64),
+        ScoreCenteringInputs(
+            train_log_probs=sample,
+            train_head_log_probs=head,
+            rollout_log_probs=torch.tensor([0.3], dtype=torch.float64).log(),
+            rollout_head_log_probs=torch.tensor([[0.2]], dtype=torch.float64).log(),
+            head_mask=torch.tensor([[True]]),
+            advantages=torch.ones(1, dtype=torch.float64),
+        ),
         mode=mode,
     )
     loss.sum().backward()
@@ -181,24 +198,28 @@ def test_unweighted_nonfinite_positive_weight_fails_clearly(nonfinite: str) -> N
     head = torch.tensor([[float("-inf") if nonfinite == "head" else -1.0]])
     with pytest.raises(ValueError, match="non-finite log-probability"):
         score_centering_loss(
-            sample,
-            head,
-            torch.tensor([-1.0]),
-            torch.tensor([[-1.0]]),
-            torch.tensor([[True]]),
-            torch.ones(1),
+            ScoreCenteringInputs(
+                train_log_probs=sample,
+                train_head_log_probs=head,
+                rollout_log_probs=torch.tensor([-1.0]),
+                rollout_head_log_probs=torch.tensor([[-1.0]]),
+                head_mask=torch.tensor([[True]]),
+                advantages=torch.ones(1),
+            ),
         )
 
 
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
 def test_zero_advantage_skips_nonfinite_log_probabilities(mode: str) -> None:
     loss, _ = score_centering_loss(
-        torch.tensor([float("-inf")]),
-        torch.tensor([[float("-inf")]]),
-        torch.tensor([-1.0]),
-        torch.tensor([[-1.0]]),
-        torch.tensor([[True]]),
-        torch.zeros(1),
+        ScoreCenteringInputs(
+            train_log_probs=torch.tensor([float("-inf")]),
+            train_head_log_probs=torch.tensor([[float("-inf")]]),
+            rollout_log_probs=torch.tensor([-1.0]),
+            rollout_head_log_probs=torch.tensor([[-1.0]]),
+            head_mask=torch.tensor([[True]]),
+            advantages=torch.zeros(1),
+        ),
         mode=mode,
     )
     torch.testing.assert_close(loss, torch.zeros_like(loss))
@@ -209,12 +230,14 @@ def test_masked_logit_from_selected_probability_helper_has_finite_gradient(mode:
     logits = torch.tensor([[0.0, float("-inf")]], dtype=torch.float64, requires_grad=True)
     selected, _ = selected_log_probs_and_entropy(logits, torch.tensor([[0, 1]]))
     loss, _ = score_centering_loss(
-        selected[:, 0],
-        selected[:, 1:],
-        torch.tensor([0.8], dtype=torch.float64).log(),
-        torch.tensor([[0.2]], dtype=torch.float64).log(),
-        torch.tensor([[True]]),
-        torch.ones(1, dtype=torch.float64),
+        ScoreCenteringInputs(
+            train_log_probs=selected[:, 0],
+            train_head_log_probs=selected[:, 1:],
+            rollout_log_probs=torch.tensor([0.8], dtype=torch.float64).log(),
+            rollout_head_log_probs=torch.tensor([[0.2]], dtype=torch.float64).log(),
+            head_mask=torch.tensor([[True]]),
+            advantages=torch.ones(1, dtype=torch.float64),
+        ),
         mode=mode,
     )
     loss.sum().backward()
@@ -237,12 +260,14 @@ def test_gradient_matches_reconstructed_full_distribution(mode: str, k: int, dev
     advantage = torch.tensor([1.7, -0.8, 0.0, 0.2], dtype=torch.float64, device=device)
     logp = logits.log_softmax(-1)
     loss, _ = score_centering_loss(
-        logp.gather(-1, sampled[:, None]).squeeze(-1),
-        logp.gather(-1, ids),
-        q.gather(-1, sampled[:, None]).squeeze(-1).log(),
-        q_head.log(),
-        torch.ones_like(ids, dtype=torch.bool),
-        advantage,
+        ScoreCenteringInputs(
+            train_log_probs=logp.gather(-1, sampled[:, None]).squeeze(-1),
+            train_head_log_probs=logp.gather(-1, ids),
+            rollout_log_probs=q.gather(-1, sampled[:, None]).squeeze(-1).log(),
+            rollout_head_log_probs=q_head.log(),
+            head_mask=torch.ones_like(ids, dtype=torch.bool),
+            advantages=advantage,
+        ),
         mode=mode,
     )
     actual_grad = torch.autograd.grad(loss.sum(), logits)[0]
@@ -276,12 +301,14 @@ def test_full_distribution_has_zero_constant_reward_gradient(mode: str) -> None:
     q = torch.tensor([0.1, 0.5, 0.15, 0.25], dtype=torch.float64)
     logp = logits.log_softmax(-1)
     loss, _ = score_centering_loss(
-        logp,
-        logp.expand(4, 4),
-        q.log(),
-        q.log().expand(4, 4),
-        torch.ones(4, 4, dtype=torch.bool),
-        torch.ones(4),
+        ScoreCenteringInputs(
+            train_log_probs=logp,
+            train_head_log_probs=logp.expand(4, 4),
+            rollout_log_probs=q.log(),
+            rollout_head_log_probs=q.log().expand(4, 4),
+            head_mask=torch.ones(4, 4, dtype=torch.bool),
+            advantages=torch.ones(4),
+        ),
         mode=mode,
     )
     gradient = torch.autograd.grad((q * loss).sum(), logits)[0]
@@ -291,14 +318,16 @@ def test_full_distribution_has_zero_constant_reward_gradient(mode: str) -> None:
 def test_matched_policies_have_no_correction() -> None:
     logp = torch.tensor([[0.7, 0.2, 0.1]], dtype=torch.float64).log().requires_grad_()
     loss, metrics = score_centering_loss(
-        logp[:, 2],
-        logp[:, :2],
-        logp[:, 2].detach(),
-        logp[:, :2].detach(),
-        torch.ones(1, 2, dtype=torch.bool),
-        torch.tensor([2.0]),
+        ScoreCenteringInputs(
+            train_log_probs=logp[:, 2],
+            train_head_log_probs=logp[:, :2],
+            rollout_log_probs=logp[:, 2].detach(),
+            rollout_head_log_probs=logp[:, :2].detach(),
+            head_mask=torch.ones(1, 2, dtype=torch.bool),
+            advantages=torch.tensor([2.0]),
+        ),
     )
-    torch.testing.assert_close(metrics["sc_correction"], torch.zeros(1, dtype=torch.float64))
+    torch.testing.assert_close(metrics.correction, torch.zeros(1, dtype=torch.float64))
     torch.testing.assert_close(loss, -2 * logp[:, 2])
 
 
@@ -306,16 +335,18 @@ def test_unclipped_importance_sampling_has_no_correction() -> None:
     p = torch.tensor([[0.55, 0.3, 0.15]], dtype=torch.float64)
     q = torch.tensor([[0.2, 0.5, 0.3]], dtype=torch.float64)
     _, metrics = score_centering_loss(
-        p[:, 2].log(),
-        p[:, :2].log(),
-        q[:, 2].log(),
-        q[:, :2].log(),
-        torch.ones(1, 2, dtype=torch.bool),
-        torch.ones(1),
+        ScoreCenteringInputs(
+            train_log_probs=p[:, 2].log(),
+            train_head_log_probs=p[:, :2].log(),
+            rollout_log_probs=q[:, 2].log(),
+            rollout_head_log_probs=q[:, :2].log(),
+            head_mask=torch.ones(1, 2, dtype=torch.bool),
+            advantages=torch.ones(1),
+        ),
         mode="tis",
         tis_clip=10,
     )
-    torch.testing.assert_close(metrics["sc_correction"], torch.zeros(1, dtype=torch.float64), atol=1e-14, rtol=0)
+    torch.testing.assert_close(metrics.correction, torch.zeros(1, dtype=torch.float64), atol=1e-14, rtol=0)
 
 
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
@@ -326,18 +357,30 @@ def test_tiny_tails_and_padding_are_finite_and_detached(mode: str) -> None:
     sampled_q = torch.tensor([-0.1], requires_grad=True)
     advantage = torch.ones(1, requires_grad=True)
     loss, metrics = score_centering_loss(
-        head[:, 0],
-        head,
-        sampled_q,
-        q,
-        torch.tensor([[True, False]]),
-        advantage,
+        ScoreCenteringInputs(
+            train_log_probs=head[:, 0],
+            train_head_log_probs=head,
+            rollout_log_probs=sampled_q,
+            rollout_head_log_probs=q,
+            head_mask=torch.tensor([[True, False]]),
+            advantages=advantage,
+        ),
         mode=mode,
     )
     loss.sum().backward()
     assert torch.isfinite(loss).all() and torch.isfinite(logits.grad).all()
-    assert all(torch.isfinite(value).all() for value in metrics.values())
+    assert all(torch.isfinite(value).all() for value in metrics.as_log_dict().values())
     assert q.grad is None and sampled_q.grad is None and advantage.grad is None
+    logged = metrics.as_log_dict()
+    expected = {
+        "sc_correction": metrics.correction,
+        "sc_train_head_mass": metrics.train_head_mass,
+        "sc_rollout_head_mass": metrics.rollout_head_mass,
+        "sc_tail_ratio": metrics.tail_ratio,
+        "sc_importance_weight": metrics.importance_weight,
+    }
+    assert list(logged) == list(expected)
+    assert all(logged[key] is value and not value.requires_grad for key, value in expected.items())
 
 
 @pytest.mark.parametrize("chunk_size", [-1, 1, 3])
