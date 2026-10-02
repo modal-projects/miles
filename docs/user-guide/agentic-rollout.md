@@ -125,6 +125,8 @@ sequence, trims model-specific boundary tokens, and builds the training sample.
 
 </Warning>
 
+Chat responses from both session-server versions omit `choices[*].meta_info`; ordinary JSON replies retain the message, standard `logprobs`, and `usage`. The server keeps the full metadata in session records for training sample collection and inspection through `GET /sessions/{id}`. Streaming chunks also omit `meta_info`.
+
 ### Choose template options per session
 
 - Ordinary `chat_template_kwargs` use request > continued turn > launch defaults. Fields required to preserve the reused prompt retain their recorded values; fixed model settings override conflicts. Qwen3.8 selects `reasoning_effort` on a new root and preserves its value or absence on continuation. When the field is absent, the template defaults to `xhigh`.
@@ -148,7 +150,10 @@ History handling depends on the selected server version:
 - **v2 (Experimental) is an append-only tree.** A request attaches to the deepest checkpoint
   whose complete message path prefixes the request. Any unmatched suffix creates
   a branch, and existing branches are never deleted. A path whose last generation
-  ended with `finish_reason=length` cannot be extended.
+  ended with `finish_reason=length` cannot be extended. By default, a leaf becomes
+  no sample when a later request re-sent its exact prompt tokens; a later request
+  that differs is a separate branch and its own sample
+  (`--session-sample-picker-path`).
 
 Whether a replayed message counts as "the same" as the stored one is decided by
 `--session-message-matcher` (default `strict`); see

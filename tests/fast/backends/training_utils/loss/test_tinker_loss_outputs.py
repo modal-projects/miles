@@ -5,8 +5,8 @@ from argparse import Namespace
 import pytest
 import torch
 
-from miles.backends.training_utils import loss as loss_module
-from miles.backends.training_utils.loss_hub import tinker_losses
+from miles.backends.training_utils.loss import objective as loss_module
+from miles.backends.training_utils.loss.hub import tinker_losses
 
 from .loss_test_utils import make_parallel_state
 
