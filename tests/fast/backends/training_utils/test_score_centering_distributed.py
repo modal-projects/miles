@@ -13,7 +13,11 @@ import torch.nn.functional as F
 
 from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean, slice_log_prob_with_cp, slice_with_cp
 from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy
-from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, selected_log_probs_and_entropy
+from miles.backends.training_utils.loss_hub.score_centering import (
+    ScoreCenteringInputs,
+    score_centering_loss,
+    selected_log_probs_and_entropy,
+)
 from miles.backends.training_utils.loss_hub.score_centering_loss import score_centering_loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
 from miles.utils.sampling_mask import RolloutSamplingMask
@@ -118,12 +122,14 @@ def _check_loss(
             normalizer = torch.logsumexp(selected, -1, keepdim=True)
             logp = logp - torch.where(valid.any(-1, keepdim=True), normalizer, 0.0)
         per_token, _ = score_centering_loss(
-            logp.gather(-1, sampled[:, None]).squeeze(-1),
-            logp.gather(-1, head.indices.clamp_min(0)),
-            q_sample,
-            head.values.log(),
-            valid,
-            advantage,
+            ScoreCenteringInputs(
+                train_log_probs=logp.gather(-1, sampled[:, None]).squeeze(-1),
+                train_head_log_probs=logp.gather(-1, head.indices.clamp_min(0)),
+                rollout_log_probs=q_sample,
+                rollout_head_log_probs=head.values.log(),
+                head_mask=valid,
+                advantages=advantage,
+            ),
             mode=mode,
         )
         if replay:

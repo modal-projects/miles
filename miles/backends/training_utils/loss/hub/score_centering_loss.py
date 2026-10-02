@@ -12,7 +12,11 @@ from miles.backends.training_utils.cp_utils import (
 )
 from miles.backends.training_utils.loss_hub.logit_processors import _iter_response_chunks
 from miles.backends.training_utils.loss_hub.math_utils import compute_approx_kl
-from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, selected_log_probs_and_entropy
+from miles.backends.training_utils.loss_hub.score_centering import (
+    ScoreCenteringInputs,
+    score_centering_loss,
+    selected_log_probs_and_entropy,
+)
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.types import RolloutBatch
 
@@ -172,12 +176,14 @@ def score_centering_loss_function(
     ids = _local_candidates(args, batch, "rollout_topk_token_ids", logits.device)
     head = _local_candidates(args, batch, "rollout_topk_log_probs", logits.device)
     token_loss, metrics = score_centering_loss(
-        selected[:, 0],
-        selected[:, 1:],
-        rollout,
-        head,
-        (ids >= 0) & active.unsqueeze(-1),
-        advantages,
+        ScoreCenteringInputs(
+            train_log_probs=selected[:, 0],
+            train_head_log_probs=selected[:, 1:],
+            rollout_log_probs=rollout,
+            rollout_head_log_probs=head,
+            head_mask=(ids >= 0) & active.unsqueeze(-1),
+            advantages=advantages,
+        ),
         mode=args.score_centering_is,
         tis_clip=args.score_centering_tis_clip,
         mis_low=args.score_centering_mis_low,
@@ -190,7 +196,7 @@ def score_centering_loss_function(
         args, batch, entropy, selected[:, 0], rollout, active, sum_of_sample_mean, kl_log_probs
     )
     loss = loss + pg_loss
-    log.update({key: sum_of_sample_mean(value).detach() for key, value in metrics.items()})
+    log.update({key: sum_of_sample_mean(value).detach() for key, value in metrics.as_log_dict().items()})
     log.update(loss=loss.detach(), pg_loss=pg_loss.detach())
     train_log_probs = torch.where(active, selected[:, 0].detach(), 0.0)
     log["train_rollout_logprob_abs_diff"] = sum_of_sample_mean((train_log_probs - rollout).abs()).detach()
