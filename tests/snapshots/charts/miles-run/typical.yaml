@@ -1320,6 +1320,8 @@ spec:
                 value: "true"
               - name: "SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2"
                 value: "1"
+              - name: "SGLANG_RETURN_ORIGINAL_LOGPROB"
+                value: "0"
             ports:
               - name: "primary"
                 containerPort: 8000
@@ -1523,6 +1525,8 @@ spec:
                 value: "true"
               - name: "SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2"
                 value: "1"
+              - name: "SGLANG_RETURN_ORIGINAL_LOGPROB"
+                value: "0"
             ports:
               - name: "primary"
                 containerPort: 8000
