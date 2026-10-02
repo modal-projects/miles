@@ -183,11 +183,11 @@ def score_centering_loss_function(
             rollout_head_log_probs=head,
             head_mask=(ids >= 0) & active.unsqueeze(-1),
             advantages=advantages,
+            mode=args.score_centering_is,
+            tis_clip=args.score_centering_tis_clip,
+            mis_low=args.score_centering_mis_low,
+            mis_high=args.score_centering_mis_high,
         ),
-        mode=args.score_centering_is,
-        tis_clip=args.score_centering_tis_clip,
-        mis_low=args.score_centering_mis_low,
-        mis_high=args.score_centering_mis_high,
     )
     pg_loss = sum_of_sample_mean(token_loss)
     entropy = torch.cat(probabilities["entropy"]) if "entropy" in probabilities else None

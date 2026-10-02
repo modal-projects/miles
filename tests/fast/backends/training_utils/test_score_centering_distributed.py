@@ -129,8 +129,8 @@ def _check_loss(
                 rollout_head_log_probs=head.values.log(),
                 head_mask=valid,
                 advantages=advantage,
+                mode=mode,
             ),
-            mode=mode,
         )
         if replay:
             head_logp = logp.gather(-1, head.indices.clamp_min(0)).masked_fill(~valid, -torch.inf)

@@ -76,8 +76,8 @@ def test_multiturn_wire_dp_split_and_training_gradient(single_rank: None, mode: 
             rollout_head_log_probs=torch.tensor(restored.rollout_topk_log_probs),
             head_mask=(ids >= 0) & mask[:, None],
             advantages=mask.float() * -0.7,
+            mode=mode,
         ),
-        mode=mode,
     )
     expected = torch.autograd.grad(reduce(reference), reference_logits)[0]
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-6)
