@@ -8,8 +8,8 @@ from dataclasses import dataclass, fields
 
 import torch
 
-from miles.backends.training_utils.loss_hub.score_centering.importance_sampling import importance_sampling
-from miles.backends.training_utils.loss_hub.score_centering.masks import (
+from miles.backends.training_utils.loss.hub.score_centering.importance_sampling import importance_sampling
+from miles.backends.training_utils.loss.hub.score_centering.masks import (
     drop_inactive_nan,
     head_probs,
     sanitize_head_log_probs,

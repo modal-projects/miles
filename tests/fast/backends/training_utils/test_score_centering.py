@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from miles.backends.training_utils.loss_hub.score_centering import (
+from miles.backends.training_utils.loss.hub.score_centering import (
     ScoreCenteringInputs,
     importance_weights,
     score_centering_loss,

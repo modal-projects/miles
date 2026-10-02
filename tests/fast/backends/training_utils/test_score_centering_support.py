@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from miles.backends.training_utils.loss_hub.score_centering import selected_log_probs_and_entropy
+from miles.backends.training_utils.loss.hub.score_centering import selected_log_probs_and_entropy
 
 
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32, torch.bfloat16])
