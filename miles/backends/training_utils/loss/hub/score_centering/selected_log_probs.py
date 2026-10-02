@@ -56,11 +56,68 @@ class _SelectedLogProbs(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, None, None, None]:
         probabilities, local_ids, local, valid, entropy = ctx.saved_tensors
         grad = grad_output.masked_fill(~valid, 0.0)
-        grad_logits = -probabilities * grad.sum(-1, keepdim=True)
+        grad_logits = probabilities * (-grad.sum(-1, keepdim=True))
         grad_logits.scatter_add_(-1, local_ids, grad.masked_fill(~local, 0.0))
         if ctx.with_entropy:
             logp = torch.where(probabilities > 0, probabilities.log(), 0.0)
             grad_logits -= grad_entropy.unsqueeze(-1) * probabilities * (logp + entropy.unsqueeze(-1))
+        return grad_logits, None, None, None, None
+
+
+class _SupportLogProbs(torch.autograd.Function):
+    """Score the sampled token and complete support without saving vocabulary-sized probabilities."""
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        group: dist.ProcessGroup | None,
+        temperature: float,
+        with_entropy: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rank = dist.get_rank(group) if group is not None else 0
+        width = logits.size(-1)
+        valid = token_ids >= 0
+        local_ids = token_ids - rank * width
+        local = valid & (local_ids >= 0) & (local_ids < width)
+        local_ids = local_ids.clamp(0, width - 1)
+        dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        selected = torch.where(local, logits.gather(-1, local_ids).to(dtype), 0.0) / temperature
+        if group is not None:
+            dist.all_reduce(selected, group=group)
+        head_valid = valid[:, 1:]
+        has_support = head_valid.any(-1, keepdim=True)
+        head = selected[:, 1:].masked_fill(~head_valid, -torch.inf)
+        head = torch.where(has_support, head, 0.0)
+        logp = selected - torch.logsumexp(head, dim=-1, keepdim=True)
+        logp = torch.where(valid & has_support, logp, 0.0)
+        probabilities = torch.where(head_valid, logp[:, 1:].exp(), 0.0)
+        entropy = logits.new_zeros(logits.size(0), dtype=dtype)
+        if with_entropy:
+            entropy = -(probabilities * torch.where(probabilities > 0, logp[:, 1:], 0.0)).sum(-1)
+        ctx.logits_shape = logits.shape
+        ctx.temperature = temperature
+        ctx.with_entropy = with_entropy
+        ctx.save_for_backward(probabilities, local_ids, local, valid & has_support, entropy)
+        return logp, entropy
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        grad_output: torch.Tensor,
+        grad_entropy: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None, None, None]:
+        probabilities, local_ids, local, valid, entropy = ctx.saved_tensors
+        grad = grad_output.masked_fill(~valid, 0.0)
+        head_grad = probabilities * (-grad.sum(-1, keepdim=True))
+        if ctx.with_entropy:
+            logp = torch.where(probabilities > 0, probabilities.log(), 0.0)
+            head_grad -= grad_entropy.unsqueeze(-1) * probabilities * (logp + entropy.unsqueeze(-1))
+        grad_logits = grad.new_zeros(ctx.logits_shape)
+        grad_logits.scatter_add_(-1, local_ids, grad.masked_fill(~local, 0.0))
+        grad_logits.scatter_add_(-1, local_ids[:, 1:], head_grad.masked_fill(~local[:, 1:], 0.0))
+        grad_logits.div_(ctx.temperature)
         return grad_logits, None, None, None, None
 
 
@@ -92,8 +149,13 @@ def selected_log_probs_and_entropy(
     temperature: float = 1.0,
     chunk_size: int = -1,
     with_entropy: bool = False,
+    sampling_support: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Selected logprobs and optional entropy of the same unpadded distribution."""
+    """Selected logprobs and optional entropy of the same unpadded distribution.
+
+    With sampling_support, column zero is the sampled token and remaining
+    columns are the complete support. Rows without candidates contribute zero.
+    """
     size = dist.get_world_size(group) if group is not None else 1
     vocab_size = vocab_size if vocab_size is not None else logits.size(-1) * size
     if temperature <= 0 or not 0 < vocab_size <= logits.size(-1) * size:
@@ -106,8 +168,10 @@ def selected_log_probs_and_entropy(
         return logits.sum(-1, keepdim=True).expand_as(token_ids), logits.sum(-1)
     chunk_size = chunk_size if chunk_size > 0 else logits.size(0)
     dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
-    chunks = [
-        _SelectedLogProbs.apply(chunk.to(dtype) / temperature, ids, group, vocab_size, with_entropy)
-        for chunk, ids in zip(logits.split(chunk_size), token_ids.split(chunk_size), strict=True)
-    ]
+    chunks = []
+    for chunk, ids in zip(logits.split(chunk_size), token_ids.split(chunk_size), strict=True):
+        if sampling_support:
+            chunks.append(_SupportLogProbs.apply(chunk, ids, group, temperature, with_entropy))
+        else:
+            chunks.append(_SelectedLogProbs.apply(chunk.to(dtype) / temperature, ids, group, vocab_size, with_entropy))
     return torch.cat([chunk[0] for chunk in chunks]), torch.cat([chunk[1] for chunk in chunks])
