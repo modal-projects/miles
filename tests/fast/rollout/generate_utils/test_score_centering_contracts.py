@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _turn
 
+from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data
 from miles.rollout.generate_utils.rollout_topk_logprobs import (
     append_rollout_topk_logprobs,
     configure_rollout_topk_logprobs_request,
@@ -16,6 +17,17 @@ from miles.rollout.session.samples.codec import COMPUTED_FIELDS, decode_samples_
 from miles.utils.sampling_mask import RolloutSamplingMask
 from miles.utils.score_centering import validate_score_centering_args
 from miles.utils.types import Sample
+
+
+@pytest.mark.parametrize("field", ["rollout_topk_token_ids", "rollout_topk_log_probs", "rollout_log_probs"])
+@pytest.mark.parametrize("ci_test", [False, True])
+def test_missing_custom_producer_probabilities_fail_at_conversion(field: str, ci_test: bool) -> None:
+    complete = _turn([0, 1], [2, 3], [0.5, 0.25])
+    incomplete = deepcopy(complete)
+    incomplete.index = 1
+    setattr(incomplete, field, None)
+    with pytest.raises(ValueError, match=rf"{field}.*sample_index=1"):
+        convert_samples_to_train_data(_args(ci_test=ci_test), [complete, incomplete], {}, None, None)
 
 
 def test_observation_padding_retry_and_disabled_wire() -> None:

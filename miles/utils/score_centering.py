@@ -4,10 +4,7 @@ import math
 import os
 from argparse import Namespace
 
-from miles.utils.rollout_topk_logprobs import (
-    validate_rollout_topk_logprobs_args,
-    validate_rollout_topk_logprobs_sampling,
-)
+from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sampling
 
 
 def validate_score_centering_args(args: Namespace) -> None:
@@ -25,7 +22,6 @@ def validate_score_centering_args(args: Namespace) -> None:
         temperature=args.rollout_temperature,
         candidate_count=args.rollout_top_logprobs_num,
     )
-    validate_rollout_topk_logprobs_args(args)
     if args.advantage_estimator != "grpo":
         raise ValueError("Score centering currently supports --advantage-estimator grpo (group-centered rewards)")
     incompatible = {
