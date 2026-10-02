@@ -9,9 +9,10 @@ import torch
 from tests.fast.fixtures.score_centering_fixtures import _args, _Tokenizer, _turn
 
 from miles.backends.training_utils import parallel
-from miles.backends.training_utils.data import DataIterator
-from miles.backends.training_utils.loss_hub.score_centering_loss import score_centering_loss_function
+from miles.backends.training_utils.data.rollout import DataIterator
+from miles.backends.training_utils.loss.hub.score_centering_loss import score_centering_loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState
+from miles.backends.training_utils.torch_native.actor import SAMPLING_MASK_KEYS, TRAIN_KEYS
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
     convert_samples_to_train_data,
@@ -261,15 +262,7 @@ def test_compact_session_object_store_and_iterator(single_rank, ray_local_mode, 
     store = RayObjectStore(frees_objects=True)
     ref = store.put(shard, value_spec=ROLLOUT_DATA_VALUE_SPEC)
     with store.get(ref) as fetched:
-        batch = DataIterator(fetched, micro_batch_size=1).get_next(
-            [
-                "rollout_topk_token_ids",
-                "rollout_topk_lengths",
-                "rollout_topk_log_probs",
-                "rollout_sampling_mask_ids",
-                "rollout_sampling_mask_offsets",
-            ]
-        )
+        batch = DataIterator(fetched, micro_batch_size=1).get_next(TRAIN_KEYS + SAMPLING_MASK_KEYS)
     store.remove(ref)
     assert batch["rollout_topk_token_ids"] is None
     batch.update(

@@ -11,14 +11,18 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
-from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean, slice_log_prob_with_cp, slice_with_cp
-from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy
-from miles.backends.training_utils.loss_hub.score_centering import (
+from miles.backends.training_utils.data.context_parallel import (
+    get_sum_of_sample_mean,
+    slice_log_prob_with_cp,
+    slice_with_cp,
+)
+from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy
+from miles.backends.training_utils.loss.hub.score_centering import (
     ScoreCenteringInputs,
     score_centering_loss,
     selected_log_probs_and_entropy,
 )
-from miles.backends.training_utils.loss_hub.score_centering_loss import score_centering_loss_function
+from miles.backends.training_utils.loss.hub.score_centering_loss import score_centering_loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
 from miles.utils.sampling_mask import RolloutSamplingMask
 

@@ -5,14 +5,14 @@ from collections.abc import Callable
 
 import torch
 
-from miles.backends.training_utils.cp_utils import (
+from miles.backends.training_utils.data.context_parallel import (
     allgather_cp_redistribute,
     get_local_response_loss_masks,
     slice_log_prob_with_cp,
 )
-from miles.backends.training_utils.loss_hub.logit_processors import _iter_response_chunks
-from miles.backends.training_utils.loss_hub.math_utils import compute_approx_kl
-from miles.backends.training_utils.loss_hub.score_centering import (
+from miles.backends.training_utils.loss.hub.logit_processors import _iter_response_chunks
+from miles.backends.training_utils.loss.hub.math_utils import compute_approx_kl
+from miles.backends.training_utils.loss.hub.score_centering import (
     ScoreCenteringInputs,
     score_centering_loss,
     selected_log_probs_and_entropy,

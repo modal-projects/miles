@@ -8,10 +8,10 @@ import torch
 from tests.fast.fixtures.score_centering_fixtures import _args, _Tokenizer, _turn
 
 from miles.backends.training_utils import parallel
-from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean
-from miles.backends.training_utils.loss import compute_advantages_and_returns, loss_function
-from miles.backends.training_utils.loss_hub.losses import get_loss_function
-from miles.backends.training_utils.loss_hub.score_centering import ScoreCenteringInputs, score_centering_loss
+from miles.backends.training_utils.data.context_parallel import get_sum_of_sample_mean
+from miles.backends.training_utils.loss.hub.losses import get_loss_function
+from miles.backends.training_utils.loss.hub.score_centering import ScoreCenteringInputs, score_centering_loss
+from miles.backends.training_utils.loss.objective import compute_advantages_and_returns, loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_raw
 from miles.rollout.generate_utils.sample_utils import merge_samples

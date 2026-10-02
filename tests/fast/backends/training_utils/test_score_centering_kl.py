@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from miles.backends.training_utils.loss_hub import score_centering_loss as loss_module
-from miles.backends.training_utils.loss_hub.score_centering_loss import _regularization
+from miles.backends.training_utils.loss.hub import score_centering_loss as loss_module
+from miles.backends.training_utils.loss.hub.score_centering_loss import _regularization
 
 
 def test_candidate_collection_retains_full_vocabulary_kl_scores(monkeypatch: pytest.MonkeyPatch) -> None:

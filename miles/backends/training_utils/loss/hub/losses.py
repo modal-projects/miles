@@ -19,7 +19,7 @@ from miles.backends.training_utils.loss.hub.math_utils import (
     compute_opsm_mask,
     compute_policy_loss,
 )
-from miles.backends.training_utils.loss_hub.score_centering_loss import score_centering_loss_function
+from miles.backends.training_utils.loss.hub.score_centering_loss import score_centering_loss_function
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.function_registry import load_function
 from miles.utils.types import RolloutBatch
