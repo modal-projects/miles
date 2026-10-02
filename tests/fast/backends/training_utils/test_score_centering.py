@@ -37,9 +37,9 @@ def test_invalid_importance_bounds_fail_clearly(mode: str, kwargs: dict[str, flo
                 rollout_head_log_probs=torch.tensor([[-1.0]]),
                 head_mask=torch.tensor([[True]]),
                 advantages=torch.ones(1),
+                mode=mode,
+                **kwargs,
             ),
-            mode=mode,
-            **kwargs,
         )
 
 
@@ -56,8 +56,8 @@ def test_nan_importance_ratio_fails_clearly(mode: str) -> None:
                 rollout_head_log_probs=torch.tensor([[-1.0]]),
                 head_mask=torch.tensor([[True]]),
                 advantages=torch.ones(1),
+                mode=mode,
             ),
-            mode=mode,
         )
 
 
@@ -71,8 +71,8 @@ def test_zero_advantage_ignores_nan_importance_ratio(mode: str) -> None:
             rollout_head_log_probs=torch.tensor([[-1.0]]),
             head_mask=torch.tensor([[True]]),
             advantages=torch.zeros(1),
+            mode=mode,
         ),
-        mode=mode,
     )
     torch.testing.assert_close(loss, torch.zeros_like(loss))
     assert torch.isfinite(metrics.importance_weight).all()
@@ -88,8 +88,8 @@ def test_zero_advantage_preserves_finite_importance_weight(mode: str) -> None:
             rollout_head_log_probs=torch.tensor([[-1.0]]),
             head_mask=torch.tensor([[True]]),
             advantages=torch.zeros(1),
+            mode=mode,
         ),
-        mode=mode,
     )
     torch.testing.assert_close(metrics.importance_weight, torch.tensor([0.8]))
 
@@ -107,8 +107,8 @@ def test_zero_advantage_ignores_nan_head_candidate(mode: str, bad_side: str) -> 
             rollout_head_log_probs=rollout_head,
             head_mask=torch.tensor([[True, True]]),
             advantages=torch.zeros(1),
+            mode=mode,
         ),
-        mode=mode,
     )
     torch.testing.assert_close(loss, torch.zeros_like(loss))
     assert all(torch.isfinite(value).all() for value in metrics.as_log_dict().values())
@@ -179,8 +179,8 @@ def test_zero_weight_negative_infinity_has_finite_loss_and_gradient(mode: str, n
             rollout_head_log_probs=torch.tensor([[0.2]], dtype=torch.float64).log(),
             head_mask=torch.tensor([[True]]),
             advantages=torch.ones(1, dtype=torch.float64),
+            mode=mode,
         ),
-        mode=mode,
     )
     loss.sum().backward()
     assert torch.isfinite(loss).all()
@@ -219,8 +219,8 @@ def test_zero_advantage_skips_nonfinite_log_probabilities(mode: str) -> None:
             rollout_head_log_probs=torch.tensor([[-1.0]]),
             head_mask=torch.tensor([[True]]),
             advantages=torch.zeros(1),
+            mode=mode,
         ),
-        mode=mode,
     )
     torch.testing.assert_close(loss, torch.zeros_like(loss))
 
@@ -237,8 +237,8 @@ def test_masked_logit_from_selected_probability_helper_has_finite_gradient(mode:
             rollout_head_log_probs=torch.tensor([[0.2]], dtype=torch.float64).log(),
             head_mask=torch.tensor([[True]]),
             advantages=torch.ones(1, dtype=torch.float64),
+            mode=mode,
         ),
-        mode=mode,
     )
     loss.sum().backward()
     assert torch.isfinite(loss).all()
@@ -267,8 +267,8 @@ def test_gradient_matches_reconstructed_full_distribution(mode: str, k: int, dev
             rollout_head_log_probs=q_head.log(),
             head_mask=torch.ones_like(ids, dtype=torch.bool),
             advantages=advantage,
+            mode=mode,
         ),
-        mode=mode,
     )
     actual_grad = torch.autograd.grad(loss.sum(), logits)[0]
 
@@ -308,8 +308,8 @@ def test_full_distribution_has_zero_constant_reward_gradient(mode: str) -> None:
             rollout_head_log_probs=q.log().expand(4, 4),
             head_mask=torch.ones(4, 4, dtype=torch.bool),
             advantages=torch.ones(4),
+            mode=mode,
         ),
-        mode=mode,
     )
     gradient = torch.autograd.grad((q * loss).sum(), logits)[0]
     torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=1e-12, rtol=0)
@@ -342,9 +342,9 @@ def test_unclipped_importance_sampling_has_no_correction() -> None:
             rollout_head_log_probs=q[:, :2].log(),
             head_mask=torch.ones(1, 2, dtype=torch.bool),
             advantages=torch.ones(1),
+            mode="tis",
+            tis_clip=10,
         ),
-        mode="tis",
-        tis_clip=10,
     )
     torch.testing.assert_close(metrics.correction, torch.zeros(1, dtype=torch.float64), atol=1e-14, rtol=0)
 
@@ -364,8 +364,8 @@ def test_tiny_tails_and_padding_are_finite_and_detached(mode: str) -> None:
             rollout_head_log_probs=q,
             head_mask=torch.tensor([[True, False]]),
             advantages=advantage,
+            mode=mode,
         ),
-        mode=mode,
     )
     loss.sum().backward()
     assert torch.isfinite(loss).all() and torch.isfinite(logits.grad).all()

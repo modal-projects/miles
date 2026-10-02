@@ -27,6 +27,11 @@ class ScoreCenteringInputs:
     rollout_head_log_probs: torch.Tensor
     head_mask: torch.Tensor
     advantages: torch.Tensor
+    mode: str = "none"
+    tis_clip: float = 2.0
+    mis_low: float = 0.5
+    mis_high: float = 5.0
+    eps: float = 1e-6
 
     def __post_init__(self) -> None:
         if (
@@ -58,15 +63,7 @@ class ScoreCenteringMetrics:
         return {f"sc_{field.name}": getattr(self, field.name) for field in fields(self)}
 
 
-def score_centering_loss(
-    inputs: ScoreCenteringInputs,
-    *,
-    mode: str = "none",
-    tis_clip: float = 2.0,
-    mis_low: float = 0.5,
-    mis_high: float = 5.0,
-    eps: float = 1e-6,
-) -> tuple[torch.Tensor, ScoreCenteringMetrics]:
+def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, ScoreCenteringMetrics]:
     """Return unreduced token losses and detached token metrics.
 
     Inputs have shape [tokens], except head tensors/mask [tokens, candidates].
@@ -74,14 +71,16 @@ def score_centering_loss(
     cancellation is exact for a full distribution, approximate for a true tail
     that differs from the modeled, rescaled trainer tail.
     """
-    sampling = importance_sampling(mode, tis_clip=tis_clip, mis_low=mis_low, mis_high=mis_high)
+    sampling = importance_sampling(
+        inputs.mode, tis_clip=inputs.tis_clip, mis_low=inputs.mis_low, mis_high=inputs.mis_high
+    )
     active = inputs.advantages.detach() != 0
     train_head = sanitize_head_log_probs(inputs.train_head_log_probs, inputs.head_mask, active)
     rollout_head = sanitize_head_log_probs(inputs.rollout_head_log_probs, inputs.head_mask, active)
     with torch.no_grad():
         p, q = head_probs(train_head, inputs.head_mask), head_probs(rollout_head, inputs.head_mask)
         p_mass, q_mass = p.sum(-1), q.sum(-1)
-        rho = (1 - q_mass).clamp_min(eps) / (1 - p_mass).clamp_min(eps)
+        rho = (1 - q_mass).clamp_min(inputs.eps) / (1 - p_mass).clamp_min(inputs.eps)
         alpha = sampling.tail_scale(rho, p.dtype)
         residual = sampling.head_mass(p, q, train_head - rollout_head) - alpha.unsqueeze(-1) * p
         weight = sampling.sample_weight(
