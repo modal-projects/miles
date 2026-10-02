@@ -13,7 +13,11 @@ import torch
 import torch.distributed as dist
 from tests.fast.dist_utils import init_gloo, run_multiprocess
 
-from miles.backends.training_utils.data.context_parallel import all_gather_with_cp, slice_log_prob_with_cp, slice_with_cp
+from miles.backends.training_utils.data.context_parallel import (
+    all_gather_with_cp,
+    slice_log_prob_with_cp,
+    slice_with_cp,
+)
 from miles.backends.training_utils.loss.hub import tinker_losses
 from miles.backends.training_utils.loss.objective import loss_function
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
