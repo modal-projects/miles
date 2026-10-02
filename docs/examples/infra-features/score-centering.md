@@ -73,7 +73,7 @@ The first row is the sampler under filtering and the second the sampler without 
 | Score centering, unfiltered | not called (no `return_sampling_mask`) | stores the top `K` candidates | `output_top_logprobs` |
 | Score centering, filtered | stores the support; picks the sampled-token log probability from its row | stores `[n, K]`: the same support IDs with their row log probabilities | both read the same `output_token_sampling_mask`, `output_token_sampling_logprobs` |
 
-The trainer computes only the requested log probabilities from each vocabulary shard, reducing normalization scalars and selected logits across tensor-parallel ranks. It excludes padded vocabulary entries and computes probabilities in float32 for BF16/FP16 models. `--log-probs-chunk-size` controls the temporary computation size; `--recompute-loss-function` can trade computation for saved activations. No full vocabulary is gathered across ranks.
+For support replay without reference KL, the trainer gathers only sampled and support logits, normalizes over that support, and saves activations proportional to the candidate count rather than the vocabulary size. Other paths retain full-vocabulary normalization, reducing normalization scalars and selected logits across tensor-parallel ranks. It excludes padded vocabulary entries and computes probabilities in float32 for BF16/FP16 models. `--log-probs-chunk-size` controls the temporary computation size; `--recompute-loss-function` can trade computation for saved activations. No full vocabulary is gathered across ranks.
 
 ## Rollout and data contract
 
@@ -87,17 +87,17 @@ Evaluation requests skip this collection and may use independent sampling settin
 
 For unfiltered session rollouts, more than 20 candidates require `--use-miles-router`. The SGLang Rust router caps OpenAI `top_logprobs` at 20, while MilesRouter forwards a larger request to SGLang unchanged. To use the SGLang router for unfiltered session rollouts, set `--rollout-top-logprobs-num 20` or less. Filtered rollouts request support probabilities instead of `top_logprobs` and do not use that cap. Native `/generate` rollouts support either router.
 
-Unused candidate slots and non-trained observation rows contain token ID `-1` and log probability `-inf`. Tool-observation masks, multi-turn merging, retries, trailing-token trimming, and truncation preserve row alignment. Session serialization and data-parallel sharding retain both arrays. Candidates stay on CPU until the trainer selects its context-parallel rows.
+Unused candidate slots and non-trained observation rows contain token ID `-1` and log probability `-inf`. Tool-observation masks, multi-turn merging, retries, trailing-token trimming, and truncation preserve row alignment. Session serialization retains both arrays. For score centering in support mode, training batches share the recorded support IDs when every sample has exactly the same candidate order and prefix padding. A per-row candidate count preserves observation rows and masked generated rows; any mismatch keeps the original arrays for the whole batch. The trainer reconstructs only its context-parallel rows. The source Samples and session payloads still retain both representations.
 
-Custom rollout producers must supply these fields with probabilities from the actual generation call and no repeated non-negative token ID in a row. With `--ci-test`, Miles validates the complete sample before training, rejecting missing or duplicate candidates, sampling-support mismatches, and disagreeing sampled/candidate probabilities. This full-sample validation is skipped in normal training because sorting and support matching are expensive on long responses. Rescoring old rollouts with newer weights is not a substitute. With the feature disabled, requests and the session wire format remain unchanged.
+Custom rollout producers must supply these fields with probabilities from the actual generation call and no repeated non-negative token ID in a row. Conversion always rejects missing candidate IDs, candidate log probabilities, or sampled-token log probabilities, including from custom producers. With `--ci-test`, Miles also validates the complete sample before training, rejecting duplicate candidates, sampling-support mismatches, and disagreeing sampled/candidate probabilities. This full-sample validation is skipped in normal training because sorting and support matching are expensive on long responses. Rescoring old rollouts with newer weights is not a substitute. With the feature disabled, requests and the session wire format remain unchanged.
 
 ## Supported configurations and limits
 
 - The shared loss is wired into Megatron and FSDP. Candidate selection supports tensor parallelism, packed (`thd`) and padded (`bshd`) zigzag context parallelism, and packed all-gather context parallelism.
 - Sampling requires a fixed positive temperature and `min_p=0` on every call. Filtered sampling, including top-p filtering, automatically uses support mode and requires a positive `top_k`, for example `--rollout-top-p 0.9 --rollout-top-k 64 --rollout-top-logprobs-num 128`. Global filtered rollout settings automatically enable sampling-support replay; per-request overrides are checked when each request is built. See the [sampling-support replay guide](/advanced/sampling-support-replay) for its request and server requirements.
-- Filtered sampling requires SGLang with support log probabilities (SGLang PR [#40932](https://github.com/sgl-project/sglang/pull/40932), included in the `sglang-miles` branch by [#41047](https://github.com/sgl-project/sglang/pull/41047)). External servers must set `SGLANG_RETURN_ORIGINAL_LOGPROB=0` like Miles-managed workers. OpenAI session responses must expose the SGLang fields above in `choices[0].meta_info`; a generic OpenAI-compatible server without that metadata is insufficient.
+- Filtered sampling requires SGLang with support log probabilities (SGLang PR [#40932](https://github.com/sgl-project/sglang/pull/40932), included in the `sglang-miles` branch by [#41047](https://github.com/sgl-project/sglang/pull/41047), merge commit [`ae04cb14046896b6d453758c5769d639deedd353`](https://github.com/sgl-project/sglang/commit/ae04cb14046896b6d453758c5769d639deedd353) or a descendant containing it). External servers must set `SGLANG_RETURN_ORIGINAL_LOGPROB=0` like Miles-managed workers. OpenAI session responses must expose the SGLang fields above in `choices[0].meta_info`; a generic OpenAI-compatible server without that metadata is insufficient.
 - Constrained/custom sampling, speculative decoding, true-on-policy mode, OPD, multi-LoRA/Tinker losses, sequence masking, custom policy-loss reducers, custom train-data converters, and logprob recomputation via prefill are rejected. Multimodal token expansion is not supported. The initial advantage estimator is GRPO.
-- Retaining `k=128` uses about 1 KiB per response position for the two arrays, before transport overhead. Larger `k` improves the tail approximation at additional storage and compute cost.
+- Retaining `k=128` uses about 1 KiB per response position for the two arrays, before transport overhead. Eligible support-mode training batches replace the duplicate ID array with one int32 count per response position, saving `4 * (k - 1)` bytes per position in training transport and storage. Source Samples and session payloads keep the original storage cost. Larger `k` improves the unfiltered tail approximation at additional storage and compute cost.
 
 ## Metrics and verification
 
@@ -109,14 +109,15 @@ The numerical tests compare gradients against an independent dense-distribution 
 ```bash
 python -m pytest tests/fast/backends/training_utils/test_score_centering.py \
     tests/fast/backends/training_utils/test_score_centering_pipeline.py \
-    tests/fast/backends/training_utils/test_score_centering_filtered.py
+    tests/fast/backends/training_utils/test_score_centering_filtered.py \
+    tests/fast/backends/training_utils/test_score_centering_support.py
 python -m pytest \
     tests/fast/backends/training_utils/test_score_centering_distributed.py
 MILES_TEST_CUDA_DISTRIBUTED=1 python -m pytest \
     tests/fast/backends/training_utils/test_score_centering_distributed.py
 ```
 
-The distributed tests use four CPU/Gloo processes or four CUDA/NCCL processes (TP=2, CP=2), all three context layouts and weighting modes, plus BF16 selected-probability gradients. The independent dense-gradient oracle also runs on CUDA when available. These are correctness tests, not a reproduction of the paper's GPU training results.
+The distributed tests use four CPU/Gloo processes or four CUDA/NCCL processes (TP=2, CP=2), all four context layouts and all weighting modes, compact support replay with reference KL on and off, plus BF16 selected-probability gradients. Support-scoring tests check saved tensor shapes and float32/64/BF16 gradients against a dense oracle. The independent dense-gradient oracle also runs on CUDA when available. These are correctness tests, not a reproduction of the paper's GPU training results.
 
 For a real SGLang server, also run the opt-in protocol probe:
 
