@@ -121,6 +121,10 @@ def test_split_matches_hand_computation():
     assert got["train_rollout_log_ratio_mean/all"] == pytest.approx((math.log(2) - math.log(1.5)) / 4)
     assert got["train_rollout_log_ratio_mean/bf16"] == pytest.approx(math.log(2) / 3)
     assert got["train_rollout_log_ratio_mean/fp8"] == pytest.approx(-math.log(1.5))
+    # The absolute log-ratio's mean, per group as for every other metric.
+    assert got["train_rollout_logprob_abs_diff/all"] == pytest.approx((math.log(3) + math.log(6) + math.log(1.5)) / 4)
+    assert got["train_rollout_logprob_abs_diff/bf16"] == pytest.approx((math.log(3) + math.log(6)) / 3)
+    assert got["train_rollout_logprob_abs_diff/fp8"] == pytest.approx(math.log(1.5))
     assert got["train_rollout_kl/lag_0_1"] == got["train_rollout_kl/bf16"]
     assert got["train_rollout_kl/lag_6_plus"] == got["train_rollout_kl/fp8"]
     # Empty groups report nothing rather than a zero mean.

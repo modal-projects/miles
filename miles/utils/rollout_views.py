@@ -30,8 +30,13 @@ LAG_BUCKETS = ("lag_0_1", "lag_2_3", "lag_4_5", "lag_6_plus")
 TAIL_LOG_RATIO = math.log(5.0)
 # The mean signed log-ratio (trainer minus rollout) is the mismatch's direction, which
 # KL and the tail leave out: negative when the trainer gives the sampled tokens less
-# probability than their sampler did.
-TOKEN_METRICS = ("train_rollout_kl", "train_rollout_ratio_tail_frac", "train_rollout_log_ratio_mean")
+# probability than their sampler did. The mean absolute log-ratio is its size.
+TOKEN_METRICS = (
+    "train_rollout_kl",
+    "train_rollout_ratio_tail_frac",
+    "train_rollout_log_ratio_mean",
+    "train_rollout_logprob_abs_diff",
+)
 
 
 def rollout_view_names(args: Namespace) -> tuple[str, ...]:
@@ -117,6 +122,7 @@ def add_train_rollout_diagnostics(
                     kl.detach().float(),
                     (ratio.abs() > TAIL_LOG_RATIO).float(),
                     ratio,
+                    ratio.abs(),
                     mask,
                 ]
             )
