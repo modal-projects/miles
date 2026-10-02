@@ -352,13 +352,13 @@ def policy_loss_function(
             torch.cat(trainer_scored_log_probs, dim=0) if trainer_scored_log_probs is not None else log_probs.detach()
         )
         rollout_log_probs = torch.cat(rollout_old_log_probs, dim=0)
-        abs_diff = (train_scored_log_probs - rollout_log_probs).abs()
-        abs_diff = torch.where(
+        log_ratio = train_scored_log_probs - rollout_log_probs
+        log_ratio = torch.where(
             active_tokens,
-            torch.nan_to_num(abs_diff, nan=0.0, posinf=0.0, neginf=0.0),
-            abs_diff.new_zeros(()),
+            torch.nan_to_num(log_ratio, nan=0.0, posinf=0.0, neginf=0.0),
+            log_ratio.new_zeros(()),
         )
-        train_rollout_logprob_abs_diff = sum_of_sample_mean(abs_diff)
+        train_rollout_logprob_abs_diff = sum_of_sample_mean(log_ratio.abs())
 
         # KL(rollout || train) at sampled tokens via Schulman k3 with per-token clamp [-10, 10]
         rollout_train_kl = compute_approx_kl(rollout_log_probs, train_scored_log_probs, kl_loss_type="low_var_kl")
@@ -383,7 +383,7 @@ def policy_loss_function(
     if train_rollout_kl is not None:
         reported_loss["train_rollout_kl"] = train_rollout_kl.clone().detach()
         add_train_rollout_diagnostics(
-            args, batch, reported_loss, local_loss_masks=local_loss_mask_list, abs_diff=abs_diff, kl=rollout_train_kl
+            args, batch, reported_loss, local_loss_masks=local_loss_mask_list, log_ratio=log_ratio, kl=rollout_train_kl
         )
 
     if args.use_kl_loss:

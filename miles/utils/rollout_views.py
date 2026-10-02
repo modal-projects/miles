@@ -28,7 +28,10 @@ LAG_BUCKETS = ("lag_0_1", "lag_2_3", "lag_4_5", "lag_6_plus")
 # Tokens whose trainer/sampler ratio leaves [1/5, 5]: those a [0.2, 5] masked
 # importance sampler (IcePop, MIS) drops.
 TAIL_LOG_RATIO = math.log(5.0)
-TOKEN_METRICS = ("train_rollout_kl", "train_rollout_ratio_tail_frac")
+# The mean signed log-ratio (trainer minus rollout) is the mismatch's direction, which
+# KL and the tail leave out: negative when the trainer gives the sampled tokens less
+# probability than their sampler did.
+TOKEN_METRICS = ("train_rollout_kl", "train_rollout_ratio_tail_frac", "train_rollout_log_ratio_mean")
 
 
 def rollout_view_names(args: Namespace) -> tuple[str, ...]:
@@ -85,13 +88,13 @@ def add_train_rollout_diagnostics(
     log: dict[str, torch.Tensor],
     *,
     local_loss_masks: Sequence[torch.Tensor],
-    abs_diff: torch.Tensor,
+    log_ratio: torch.Tensor,
     kl: torch.Tensor,
 ) -> None:
     """Add the mismatch for all tokens and every tagged group to ``log``.
 
-    ``abs_diff`` is |trainer - rollout| log-probability and ``kl`` the losses' KL
-    estimate on each token, both zero outside the loss mask. ``local_loss_masks`` are
+    ``log_ratio`` is the trainer minus the rollout log-probability and ``kl`` the losses'
+    KL estimate on each token, both zero outside the loss mask. ``local_loss_masks`` are
     the per-sample local response masks whose concatenation is their layout. Nothing is
     added unless the batch carries view, source or staleness tags; then every group is
     reported in every micro-batch, zero when absent, so all ranks reduce the same keys.
@@ -105,13 +108,25 @@ def add_train_rollout_diagnostics(
         mask = torch.cat(local_loss_masks).to(device=device, dtype=torch.float32)
         lengths = _to_device([m.numel() for m in local_loss_masks], torch.long, device)
         sample = torch.repeat_interleave(torch.arange(num_samples, device=device), lengths, output_size=mask.numel())
-        # Rows: KL, tail indicator, loss tokens; summed per sample, then per group.
-        per_token = torch.stack([kl.detach().float(), (abs_diff.detach() > TAIL_LOG_RATIO).float(), mask]) * mask
-        per_sample = per_token.new_zeros(3, num_samples).index_add_(1, sample, per_token)
+        # Rows: one per TOKEN_METRICS entry, then loss tokens; summed per sample, then
+        # per group, in the same pass.
+        ratio = log_ratio.detach().float()
+        per_token = (
+            torch.stack(
+                [
+                    kl.detach().float(),
+                    (ratio.abs() > TAIL_LOG_RATIO).float(),
+                    ratio,
+                    mask,
+                ]
+            )
+            * mask
+        )
+        per_sample = per_token.new_zeros(per_token.shape[0], num_samples).index_add_(1, sample, per_token)
         membership = _to_device([[True] * num_samples, *groups.values()], torch.float32, device)
         totals = membership @ per_sample.T
-        for suffix, (kl_sum, tail_sum, tokens) in zip(("/all", *groups), totals, strict=True):
-            for key, value in zip(TOKEN_METRICS, (kl_sum, tail_sum), strict=True):
+        for suffix, (*sums, tokens) in zip(("/all", *groups), totals, strict=True):
+            for key, value in zip(TOKEN_METRICS, sums, strict=True):
                 log[f"{key}{suffix}{NUMERATOR_SUFFIX}"] = value
                 log[f"{key}{suffix}{DENOMINATOR_SUFFIX}"] = tokens
 

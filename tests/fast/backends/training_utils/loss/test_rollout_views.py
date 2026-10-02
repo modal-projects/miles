@@ -19,6 +19,7 @@ from miles.utils.rollout_views import (
     DENOMINATOR_SUFFIX,
     LAG_BUCKETS,
     NUMERATOR_SUFFIX,
+    TOKEN_METRICS,
     UNKNOWN_LAG,
     UNKNOWN_VIEW,
     add_train_rollout_diagnostics,
@@ -33,7 +34,7 @@ from .loss_test_utils import deep_clone, make_args, make_batch, make_inputs, mak
 VIEWS = {"bf16": "/checkpoints/bf16", "fp8": "/checkpoints/fp8", "nvfp4": "/checkpoints/nvfp4"}
 # Two pools serve fp8, so a view mixes hardware that a source keeps apart.
 SOURCES = ("ServerA100BF16:bf16", "ServerH100FP8:fp8", "ServerH200FP8:fp8", "ServerB300NVFP4:nvfp4")
-METRICS = ("train_rollout_kl", "train_rollout_ratio_tail_frac")
+METRICS = TOKEN_METRICS
 TAGS = {"rollout_view_ids": [0, 1, 1, 2], "rollout_source_ids": [0, 1, 2, 3], "rollout_lag_buckets": [0, 1, 3, 3]}
 
 
@@ -96,7 +97,7 @@ def _pairs(metrics):
 
 
 def test_split_matches_hand_computation():
-    """Sample A (bf16, lag 1) has |log r| = [0, log 3, log 6]; sample B (fp8, lag 7) has [log 1.5, masked]."""
+    """Sample A (bf16, lag 1) has log r = [0, -log 3, log 6]; sample B (fp8, lag 7) has [-log 1.5, masked]."""
     make_parallel_state()
     log: dict[str, torch.Tensor] = {}
     add_train_rollout_diagnostics(
@@ -104,7 +105,7 @@ def test_split_matches_hand_computation():
         {"rollout_view_ids": [0, 1], "rollout_lag_buckets": [rollout_lag_bucket(1), rollout_lag_bucket(7)]},
         log,
         local_loss_masks=[torch.ones(3), torch.tensor([1.0, 0.0])],
-        abs_diff=torch.tensor([0.0, math.log(3), math.log(6), math.log(1.5), math.log(7)]),
+        log_ratio=torch.tensor([0.0, -math.log(3), math.log(6), -math.log(1.5), math.log(7)]),
         kl=torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0]),
     )
     got = resolve_ratio_metrics({key: value.item() for key, value in log.items()})
@@ -116,6 +117,10 @@ def test_split_matches_hand_computation():
     assert got["train_rollout_ratio_tail_frac/bf16"] == pytest.approx(1 / 3)
     assert got["train_rollout_kl/fp8"] == pytest.approx(3.0)
     assert got["train_rollout_ratio_tail_frac/fp8"] == pytest.approx(0.0)
+    # The signed mean keeps the direction: A sums to log 6 - log 3, B to -log 1.5.
+    assert got["train_rollout_log_ratio_mean/all"] == pytest.approx((math.log(2) - math.log(1.5)) / 4)
+    assert got["train_rollout_log_ratio_mean/bf16"] == pytest.approx(math.log(2) / 3)
+    assert got["train_rollout_log_ratio_mean/fp8"] == pytest.approx(-math.log(1.5))
     assert got["train_rollout_kl/lag_0_1"] == got["train_rollout_kl/bf16"]
     assert got["train_rollout_kl/lag_6_plus"] == got["train_rollout_kl/fp8"]
     # Empty groups report nothing rather than a zero mean.
