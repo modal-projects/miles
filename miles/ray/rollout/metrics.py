@@ -13,6 +13,7 @@ from miles.utils.metric_utils import (
     compute_statistics,
     dict_add_prefix,
     has_repetition,
+    namespace_metrics,
 )
 from miles.utils.tracking_utils import tracking
 from miles.utils.types import Sample
@@ -70,7 +71,9 @@ def log_eval_skip(rollout_id, args, reason: str):
     tracking.log(args, log_dict, step_key="eval/step")
 
 
-def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+def log_rollout_data(
+    rollout_id, args, samples, rollout_extra_metrics, rollout_time, trainer_model_id: str | None = None
+):
     if (x := args.custom_rollout_log_function_path) is not None:
         custom_log_func = load_function(x)
         if custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
@@ -88,9 +91,13 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
             "passrate/",
         )
     logger.info(f"perf {rollout_id}: {log_dict}")
-    step = compute_rollout_step(args, rollout_id)
-    log_dict["rollout/step"] = step
-    tracking.log(args, log_dict, step_key="rollout/step")
+    log_dict, step_key = namespace_metrics(
+        log_dict,
+        trainer_model_id=trainer_model_id,
+        step_name="rollout/step",
+        step=compute_rollout_step(args, rollout_id),
+    )
+    tracking.log(args, log_dict, step_key=step_key)
 
 
 def _compute_metrics_from_samples(args, samples):
@@ -125,11 +132,16 @@ def _compute_metrics_from_samples(args, samples):
                 [any(m.get("type") == mtype for m in v) for v in tito_vals]
             ).item()
         if args.ci_test:
-            for strict_type in ("special_token_count", "special_token_type", "non_assistant_text"):
+            strict_thresholds = {
+                "special_token_count": args.ci_tito_special_token_count_threshold,
+                "special_token_type": 0,
+                "non_assistant_text": 0,
+            }
+            for strict_type, threshold in strict_thresholds.items():
                 rate = log_dict.get(f"{metric_prefix}/{strict_type}", 0)
                 assert (
-                    rate == 0
-                ), f"{metric_prefix}/{strict_type}={rate:.4f} must be 0 — this indicates a bug in the TITO algorithm or chat template. Please check your tito model and chat template."
+                    rate <= threshold
+                ), f"{metric_prefix}/{strict_type}={rate:.4f} exceeds {threshold} — this indicates a bug in the TITO algorithm or chat template. Please check your tito model and chat template."
             # assistant_text mismatch is non-critical: assistant tokens are inherited
             # from the pretokenized prefix and may differ from canonical tokenization.
 

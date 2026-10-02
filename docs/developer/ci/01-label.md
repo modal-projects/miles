@@ -13,6 +13,7 @@ A label is a GitHub PR label that changes what CI runs or how it fails. Three ki
 | Scope label | `run-ci-all` | run every enabled tag |
 | Behavior label | `bypass-fastfail` | opt out of fast-fail; one run surfaces every failure |
 | Behavior label | `rebuild-ci-image` | force a rebuild when selected CUDA tests need an eligible PR image; does not select tests and is removed once consumed (see [Docker build](/developer/ci/02-docker-build)) |
+| Opt-in label | `run-ci` (or any `run-ci*` label) | lets a PR whose base is not the default branch run `PR Test` (see [below](#labels-opt-non-main-prs-into-ci)) |
 
 Only domain labels are declared in `labels=[...]`; scope and behavior labels are workflow inputs resolved by `tests/ci/ci_policy.py`. The separate `nightly=True` registration field is a cadence gate described below.
 
@@ -33,7 +34,7 @@ CUDA and ROCm registrations must declare at least one domain label. GPU runners 
 
 ### The canonical label list
 
-Domain labels live in `tests/ci/labels.py` (`KNOWN_LABELS`); a `labels=[...]` value outside it is a hard error. Current set: `megatron`, `model-scripts`, `sglang`, `fsdp`, `short`, `long`, `ckpt`, `lora`, `eval`, `precision`, `ft-short`, `ft-long`, `weight-update`, `fully-async`, `replay`, `qwen35`, `mooncake`, `miles-plugin`, `amd`.
+Domain labels live in `tests/ci/labels.py` (`KNOWN_LABELS`); a `labels=[...]` value outside it is a hard error. Current set: `megatron`, `model-scripts`, `sglang`, `fsdp`, `short`, `long`, `ckpt`, `lora`, `eval`, `precision`, `ft-short`, `ft-long`, `deploy`, `weight-update`, `fully-async`, `multi-policy`, `replay`, `qwen35`, `mooncake`, `miles-plugin`, `amd`, `rpc-comm`.
 
 To add one: add the entry to `KNOWN_LABELS`, then create the matching `run-ci-<key>` repository label in GitHub. No workflow edit is needed. To expose it through PR comments, also add that exact label to `commands.add_label.allowed_labels` in `.github/workflows/policies/comment-command-access.json`.
 
@@ -63,7 +64,7 @@ Each generation keeps its own performance baseline, keyed on the stage that exec
 
 The PR-comment entrypoint is a command gateway rather than a label handler. Each recognized comment becomes a typed request, and a code-defined static registry selects its fixed handler, policy key, and token capability. The JSON policy controls only access groups and per-command resource allowlists. The registry implements exact-label additions plus `/clear-labels`, `/rerun-failed-ci`, and `/rerun-test`.
 
-After the command App is enabled, post `/<label>` as the entire comment on an open PR to append that exact label. The label must be a supported `run-ci-*` label or `bypass-fastfail` and must be listed in `.github/workflows/policies/comment-command-access.json`; for example, `/run-ci-short` appends only `run-ci-short`, while `/bypass-fastfail` appends only `bypass-fastfail`.
+After the CI App is enabled, post `/<label>` as the entire comment on an open PR to append that exact label. The label must be a supported `run-ci-*` label or `bypass-fastfail` and must be listed in `.github/workflows/policies/comment-command-access.json`; for example, `/run-ci-short` appends only `run-ci-short`, while `/bypass-fastfail` appends only `bypass-fastfail`.
 
 A label command permits leading and trailing whitespace only; it cannot include arguments, prose, or a second command. Only `/rerun-test` takes an argument, and that argument must be a single test-file path. If the label is already present, the request succeeds as a no-op and does not emit another `labeled` event or rerun CI.
 
@@ -73,7 +74,7 @@ Unrecognized comments exit after trusted parsing with capability `none`; they do
 
 The gateway controls only the delegated comment path; it does not restrict users' existing GitHub UI/API label permissions and does not offer commands that add `run-ci-all`, `nightly`, or an arbitrary label absent from the policy.
 
-Post `/clear-labels` as the entire comment to remove every current label whose name starts with `run-ci` or `run-on-`, plus `nightly` and `bypass-fastfail`. All other PR labels are preserved. This stops stale CI scope, dispatch, cadence, fast-fail, and fork-approval choices from carrying into later pushes. It neither suppresses the ordinary always-on CI triggered by `synchronize` nor cancels a run that has already started.
+Post `/clear-labels` as the entire comment to remove every current label whose name starts with `run-ci` or `run-on-`, plus `nightly` and `bypass-fastfail`. All other PR labels are preserved. This stops stale CI scope, dispatch, cadence, fast-fail, and fork-approval choices from carrying into later pushes. On a PR based on the default branch it does not suppress the ordinary CI triggered by `synchronize`; on a PR based on another branch, later pushes stop starting `PR Test`. It never cancels a run that has already started.
 
 Post `/rerun-failed-ci` as the entire comment to request failed-job reruns for the current open PR head. The handler considers only the latest run of each allowlisted PR workflow: `pre-commit.yml`, `pr-test.yml`, and `pr-test-rocm.yml`. A latest run is rerun only when it belongs to this PR and exact head SHA and has completed with conclusion `failure`.
 
@@ -105,10 +106,10 @@ A file run honors the PR body's `ci-megatron-pr` and `ci-sglang-pr` pins; CUDA f
 
 GitHub's recursion guard suppresses `GITHUB_TOKEN`-triggered events with the documented exception of `workflow_dispatch` and `repository_dispatch`, which is exactly how a file run starts, and a failed-job rerun is a new attempt of an existing run rather than a new event-triggered run. The 👍 reaction and the running/final status comment are posted as `github-actions[bot]`.
 
-Label commands are the exception: a label added with `GITHUB_TOKEN` would never fire the `pull_request(labeled)` CI workflows, so they stay off until workflow owners complete the following steps and set the repository variable `CI_COMMAND_APP_ENABLED=true`. A label command posted before that fails loudly with a pointer to this document instead of skipping silently.
+Label commands are the exception: a label added with `GITHUB_TOKEN` would never fire the `pull_request(labeled)` CI workflows, so they stay off until workflow owners complete the following steps and set the repository variable `CI_APP_ENABLED=true`. This switch gates label commands only; wheel publishing uses the same App credentials independently. A label command posted before that fails loudly with a pointer to this document instead of skipping silently.
 
-1. Create a GitHub App, install it only on `radixark/miles`, and grant `Issues: write` and `Pull requests: write`; do not grant `Actions: write` or `Contents: write`. [Command Identity](/developer/ci/05-command-identity) explains why the label token needs `Pull requests: write`. When a permission is added to an already installed App, an organization administrator must also accept it on the installation, or minting the token fails. The App token is minted only for label commands; the actions-capability and feedback jobs never receive it.
-2. Store the App client ID in the repository variable `CI_COMMAND_APP_CLIENT_ID` and its private key in the repository secret `CI_COMMAND_APP_PRIVATE_KEY`.
+1. Use the `radixark-miles-ci` GitHub App installed on `radixark/miles` and `radixark/miles-wheels`, with `Issues: write`, `Pull requests: write`, and `Contents: write`. The label workflow requests only `Issues: write` and `Pull requests: write` on `radixark/miles`; [wheel publishing](/developer/ci/06-build-wheels#publish-setup) requests only `Contents: write` on `radixark/miles-wheels`. [Command Identity](/developer/ci/05-command-identity) explains the label token's permissions. The actions-capability and feedback jobs never receive an App token.
+2. Store the App client ID in the `radixark/miles` repository variable `CI_APP_CLIENT_ID` and its private key in the repository secret `CI_APP_PRIVATE_KEY`. Both workflows use these credentials.
 3. Protect the final bytes under `.github/workflows/` that implement the command gateway—its workflows, handler, and policy: require code-owner review, enable stale-review dismissal or last-push approval, and explicitly accept administrators who can still bypass the rule as external trust roots.
 4. In the target repository, compare manually adding a test label with adding the same label through the App. Confirm that both trigger the expected CUDA, ROCm, and held-run approval consumers.
    Then run `/clear-labels`; confirm that it removes only the CI control labels and does not start another CUDA, ROCm, or held-run approval workflow.
@@ -192,3 +193,7 @@ Like the scope labels, `bypass-fastfail` is a workflow-only input and is not in 
 ## Labels double as fork-PR CI approval
 
 GitHub holds a first-time contributor's fork-PR CI at "Approve and run" after every push. Any maintainer-applied or comment-gateway-authorized `run-ci*` label is already that human decision, so the `Approve Trusted CI` workflow (on `pull_request_target`) auto-approves those held runs while such a label is present. Removing the labels restores manual approval. This automation covers the first-time-contributor hold only; GitHub may separately hold a workflow it identifies as potentially malicious, and that hold requires approval through an authenticated web session.
+
+## Labels opt non-main PRs into CI
+
+`PR Test` starts automatically only on PRs based on the default branch. A PR based on another branch, typically a stacked PR, runs it only while it carries a `run-ci*` label; the bare `run-ci` label opts in without selecting extra tests, and adding a label starts a run. Labeling the top PR of a stack tests the whole stack once. Retargeting a PR to `main` does not start a run; push or add a label to run it there.

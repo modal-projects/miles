@@ -93,7 +93,7 @@ def _convert_to_fp8(args: ScriptArgs):
     if sentinel.exists():
         print(f"_convert_to_fp8 skip {dst} since {sentinel} exists")
         return
-    U.exec_command(
+    args.create_backend().exec_command_gpu(
         f"python tools/convert_hf_to_fp8.py "
         f"--model-dir {src} --save-dir {dst} "
         f"--strategy block --block-size 128 128 "
@@ -102,9 +102,12 @@ def _convert_to_fp8(args: ScriptArgs):
 
 
 def _prepare_download(args: ScriptArgs):
-    U.exec_command(f"mkdir -p {args.model_dir} {args.data_dir}")
-    U.exec_command(f"hf download {args.model_org}/{args.model_name} --local-dir {args.model_dir}/{args.model_name}")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k", data_dir=args.data_dir)
+    backend = args.create_backend()
+    backend.exec_command_cpu(f"mkdir -p {args.model_dir} {args.data_dir}")
+    backend.exec_command_cpu(
+        f"hf download {args.model_org}/{args.model_name} --local-dir {args.model_dir}/{args.model_name}"
+    )
+    backend.hf_download_dataset("zhuzilin/dapo-math-17k", data_dir=args.data_dir)
 
 
 def _prepare_megatron_ckpt(args: ScriptArgs):
@@ -119,7 +122,7 @@ def _prepare_megatron_ckpt(args: ScriptArgs):
         "--expert-model-parallel-size 1 "
     )
 
-    U.convert_checkpoint(
+    args.create_backend().convert_checkpoint(
         model_name=args.model_name,
         megatron_model_type=args.megatron_model_type,
         num_gpus_per_node=1,
@@ -219,11 +222,11 @@ def _execute_train(args: ScriptArgs):
         sglang_args += "--sglang-moe-a2a-backend mori " "--sglang-deepep-mode auto "
     sglang_args += (
         "--sglang-kv-cache-dtype fp8_e4m3 "
-        "--sglang-nsa-decode-backend tilelang "
-        "--sglang-nsa-prefill-backend tilelang "
+        "--sglang-dsa-decode-backend tilelang "
+        "--sglang-dsa-prefill-backend tilelang "
         "--sglang-attention-backend nsa "
         "--sglang-page-size 64 "
-        f"--sglang-cuda-graph-max-bs {sglang_decode_max_bs} "
+        f"--sglang-cuda-graph-max-bs-decode {sglang_decode_max_bs} "
         # concurrency
         "--sglang-max-running-requests 512 "
         f"--sglang-chunked-prefill-size {2048 * sglang_world_size} "
@@ -264,9 +267,8 @@ def _execute_train(args: ScriptArgs):
         f"{args.extra_args} "
     )
 
-    U.execute_train(
+    args.create_backend().execute_train(
         train_args=train_args,
-        config=args,
         num_gpus_per_node=args.num_gpus_per_node,
         megatron_model_type=args.megatron_model_type,
         extra_env_vars={
