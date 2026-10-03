@@ -29,6 +29,15 @@ def test_missing_private_draft_hashes_fail(payload):
         _private_checksums(payload)
 
 
+def test_one_populated_rank_cannot_hide_another_rank_missing_private_hashes():
+    payload = _payload({"draft.layers.0.weight": "1"})
+    payload["ranks"].append(
+        dict(parallelism_info=[dict(role="draft", tp_rank=1)], checksums={"draft.lm_head.weight": "2"})
+    )
+    with pytest.raises(ValueError, match="TP rank 1"):
+        _private_checksums(payload)
+
+
 def test_regular_arm_preserves_default_logging_without_querying_a_draft():
     assert log_draft_checksums(0, SimpleNamespace(sglang_speculative_algorithm=None), [], {}, 1.0) is False
 

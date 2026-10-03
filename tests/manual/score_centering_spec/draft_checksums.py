@@ -21,6 +21,7 @@ def _private_checksums(payload):
         if len(placements) != 1 or placements[0]["role"] != "draft":
             raise ValueError("Expected one DFlash draft placement per TP rank")
         index = placements[0]["tp_rank"]
+        previous_count = len(private)
         for name, checksum in rank["checksums"].items():
             if not name.startswith("draft."):
                 raise ValueError(f"Unexpected non-draft checksum: {name}")
@@ -29,8 +30,8 @@ def _private_checksums(payload):
             if key in destination:
                 raise ValueError(f"Duplicate draft checksum: {key}")
             destination[key] = checksum
-    if not private:
-        raise ValueError("No private draft tensors were captured")
+        if len(private) == previous_count:
+            raise ValueError(f"No private draft tensors were captured on TP rank {index}")
     return private, shared
 
 
