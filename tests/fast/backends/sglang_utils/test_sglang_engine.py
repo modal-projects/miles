@@ -23,6 +23,7 @@ def _cmd(
     addr_overrides: dict | None = None,
     base_gpu_id: int = 0,
     random_seed: int = 0,
+    sglang_overrides: dict | None = None,
     **kwargs,
 ) -> str:
     addr_and_ports = dict(
@@ -41,7 +42,7 @@ def _cmd(
         node_rank=0,
         worker_type=worker_type,
         base_gpu_id=base_gpu_id,
-        sglang_overrides={},
+        sglang_overrides=sglang_overrides or {},
         num_gpus_per_engine=1,
         dist_init_addr=addr_and_ports["dist_init_addr"],
         nccl_port=addr_and_ports["nccl_port"],
@@ -112,6 +113,37 @@ class TestComputeEngineLaunchCmd:
         cmd = _cmd(args=make_engine_args(sglang_api_key="secret"))
         parsed = parse_server_args_argv(shlex.split(cmd)[3:])
         assert parsed.api_key == "secret"
+
+
+class TestScoreCenteringSpeculativeOverrides:
+    @pytest.mark.parametrize("algorithm", [None, "DFLASH"])
+    def test_effective_group_algorithm_wins_over_global_defaults(self, algorithm):
+        command = _cmd(
+            args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm="EAGLE"),
+            sglang_overrides={"speculative_algorithm": algorithm},
+        )
+        assert parse_server_args_argv(shlex.split(command)[3:]).speculative_algorithm == algorithm
+
+    def test_a_group_cannot_enable_an_unsupported_algorithm(self):
+        with pytest.raises(ValueError, match="only.*DFLASH"):
+            _cmd(
+                args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm=None),
+                sglang_overrides={"speculative_algorithm": "EAGLE"},
+            )
+
+    @pytest.mark.parametrize("field", ["speculative_accept_threshold_single", "speculative_accept_threshold_acc"])
+    def test_effective_group_acceptance_threshold_is_checked(self, field):
+        with pytest.raises(ValueError, match="exact DFlash sampling"):
+            _cmd(
+                args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm="DFLASH"),
+                sglang_overrides={field: 0.9},
+            )
+
+    def test_other_losses_keep_existing_speculative_configuration(self):
+        command = _cmd(
+            args=make_engine_args(loss_type="policy_loss", sglang_speculative_algorithm="EAGLE"),
+        )
+        assert parse_server_args_argv(shlex.split(command)[3:]).speculative_algorithm == "EAGLE"
 
 
 class TestLoraTargetModules:
