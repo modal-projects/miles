@@ -1,0 +1,110 @@
+{
+  "date_utc": "2026-10-03",
+  "local_directory": "/tmp/score-centering-experiments",
+  "modal_volume": "score-centering-spec-results",
+  "modal_environment": "jason-dev",
+  "archives": [
+    {
+      "file": "score-centering-inference-artifacts.tar.gz",
+      "sha256": "f17a3c4545c5ffd4e9779956f7f2ed8bcff2f2f8750a147f12ecf4d543f5a3c8",
+      "bytes": 218463540,
+      "volume_path": "/score-centering-inference-artifacts.tar.gz",
+      "manifest": "inference-artifacts-manifest.json",
+      "independent_volume_read_verified": false,
+      "hashed_member_count": 526
+    },
+    {
+      "file": "training-unfiltered-regular-artifacts.tar.gz",
+      "sha256": "beb69cfd3ae3d01b049aa80b3d3538a071da31cd75c45aaa2a88b042e8f830cf",
+      "bytes": 185253484,
+      "volume_path": "/training-unfiltered-regular-artifacts.tar.gz",
+      "manifest": "training-unfiltered-regular-artifacts.tar.manifest.json",
+      "independent_volume_read_verified": true,
+      "hashed_member_count": 29
+    },
+    {
+      "file": "training-unfiltered-dflash-artifacts.tar.gz",
+      "sha256": "1f0a08e5413d290a6feb752aefb6f87dd0a888db1fa4df4c850838dce2c55aff",
+      "bytes": 191433332,
+      "volume_path": "/training-unfiltered-dflash-artifacts.tar.gz",
+      "manifest": "training-unfiltered-dflash-artifacts.tar.manifest.json",
+      "independent_volume_read_verified": true,
+      "hashed_member_count": 32
+    },
+    {
+      "file": "training-filtered-regular-artifacts.tar.gz",
+      "sha256": "5ed7011ec6d0591cf45be3aad3a50884ecf456ae4e84eb2d202dab548d11ff70",
+      "bytes": 8586683,
+      "volume_path": "/training-filtered-regular-artifacts.tar.gz",
+      "manifest": "training-filtered-regular-artifacts.tar.manifest.json",
+      "independent_volume_read_verified": true,
+      "hashed_member_count": 29
+    },
+    {
+      "file": "training-filtered-dflash-artifacts.tar.gz",
+      "sha256": "6a7b10d8bfcfc1e78ceb283815ec53cb9a5ec5b089b8a6e5cceb308cc224b0fc",
+      "bytes": 8555597,
+      "volume_path": "/training-filtered-dflash-artifacts.tar.gz",
+      "manifest": "training-filtered-dflash-artifacts.tar.manifest.json",
+      "independent_volume_read_verified": true,
+      "hashed_member_count": 32
+    },
+    {
+      "file": "training-inconclusive-artifacts.tar.gz",
+      "sha256": "4099691e178ae04bb9dfb09fe0417502e3cf203d573250f07683d4ca600f03ac",
+      "bytes": 98258878,
+      "volume_path": null,
+      "manifest": "training-inconclusive-artifacts.tar.manifest.json",
+      "independent_volume_read_verified": false
+    },
+    {
+      "file": "training-audit-helpers.tar.gz",
+      "sha256": "7b016c8863f99870d9c6edcc429096abf9cf909d956aebe10c09c09a4e769820",
+      "bytes": 6256,
+      "volume_path": "/training-audit-helpers.tar.gz",
+      "manifest": "training-audit-helpers.manifest.json",
+      "hashed_member_count": 6,
+      "independent_volume_read_verified": true
+    }
+  ],
+  "training_reports": {
+    "training-reproduction.json": {
+      "sha256": "20bd938557784628dac51cb9760dfd0628aecc120996b9ac17a7f4900cf6df05",
+      "bytes": 1552,
+      "volume_path": "/training-reproduction.json",
+      "independent_volume_read_verified": false
+    },
+    "training-all-paired-controls.json": {
+      "sha256": "9912eea1ac42d546218f8ae2a045fe946ab2002f845f2c7d984b9f04d1a0a712",
+      "bytes": 89271,
+      "volume_path": "/training-all-paired-controls.json",
+      "independent_volume_read_verified": true
+    },
+    "training-memory-capped-summary.json": {
+      "sha256": "9fa44818c0a35db5c9b2cc16bfc68193f747326fa9564db5d84bfcc5913ec9e3",
+      "bytes": 15127,
+      "volume_path": "/training-memory-capped-summary.json",
+      "independent_volume_read_verified": false
+    },
+    "training-completed-summary.json": {
+      "sha256": "bd523d8b3eb923f2776f2c7de2f3cbae81207203da6b54c0226df6d382a1550c",
+      "bytes": 17052,
+      "volume_path": "/training-completed-summary.json",
+      "independent_volume_read_verified": false
+    },
+    "training-resources-capped.jsonl": {
+      "sha256": "ffd9850bc9691f38df14d5315583b7c35f8cb909ad7743b06adf346e8107c277",
+      "bytes": 490039,
+      "volume_path": "/training-resources-capped.jsonl",
+      "independent_volume_read_verified": true
+    }
+  },
+  "local_durability_manifest": "training-durable-volume-verification.json",
+  "local_cleanup_manifest": "training-cleanup.json",
+  "interpretation": [
+    "Archive SHA256 values identify the raw evidence; where present, manifest entries also record individual member hashes.",
+    "The negative-control training archive is retained locally and does not substantiate a successful training claim.",
+    "independent_volume_read_verified identifies files whose full bytes were also hashed through the Modal Volume backend, independently of the live sandbox mount.",
+    "GPU execution is not required to rerun saved-artifact training audits; see training-reproduction.json in the helper archive."
+  ]
+}

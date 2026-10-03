@@ -3,7 +3,7 @@
 The inference checks establish correct captured probabilities and score-centering
 arithmetic for the tested Qwen3.8-27B/DFlash2 configuration. They do **not** establish
 numerical equivalence between model execution paths or training-quality parity.
-The paired training audit is still in progress.
+All four training arms pass their integration audits.
 
 Implementation: [Miles draft #11](https://github.com/modal-projects/miles/pull/11).
 Dependency: [SGLang draft #69](https://github.com/modal-projects/sglang/pull/69).
@@ -95,13 +95,53 @@ the observed speed ratios, not a precise general capture-overhead estimate.
 
 ## Training integration
 
-Pending: four matched three-step arms, regular/DFlash2 crossed with
-unfiltered/top-k64-top-p0.9 sampling. All use the same converted checkpoint,
-dataset, optimizer settings, and text-only objective. The audit requires mixed
-reward groups, nonzero active advantages and gradients, finite score-centering
-metrics, changed language-model weights, two post-update synchronizations, and
-valid subsequent rollouts. DFlash private tensor hashes must remain unchanged;
-the target's shared draft `lm_head` is recorded separately.
+Four three-step arms cross regular/DFlash2 with unfiltered/top-k64-top-p0.9
+sampling. Each uses one eight-H200 node, trainer TP4/DP2, two TP4 rollout engines,
+K128 capture, and score-centering IS mode `none`. All start from the same converted
+checkpoint with the same optimizer settings and text-only objective. Each step
+uses eight prompts with four samples each; the three steps use different prompt
+batches. The DAPO dataset SHA256 is
+`acaa4418ccaa1fb4dfd1bddcb08eb64abc6df5471f645bd53266503de3fb9780`.
+
+| Arm | Gradient norms, steps 0/1/2 | Mixed-reward groups, out of 8 | Validated token rows | Audit |
+| --- | --- | --- | --- | --- |
+| Unfiltered regular | 0.29924 / 0.36606 / 0.27797 | 2 / 3 / 3 | 162,321 | Pass |
+| Unfiltered DFlash2 | 0.33276 / 0.46027 / 0.22675 | 2 / 4 / 2 | 167,982 | Pass |
+| Filtered regular | 0.30726 / 0.43950 / 0.26222 | 3 / 4 / 3 | 161,422 | Pass |
+| Filtered DFlash2 | 0.20764 / 0.50683 / 0.21454 | 2 / 5 / 2 | 159,091 | Pass |
+
+Every arm has finite score-centering diagnostics, nonzero active
+advantages and gradients, three normally completed optimizer steps, and target
+versions advancing 1 → 2 → 3. Two post-update synchronizations publish changed
+language weights, with identical hashes across both rollout engines. Of 3,280
+checked language tensors per engine, the unfiltered regular arm changes 2,044 at
+each handoff; unfiltered DFlash2 and filtered regular change 2,044 then 2,048.
+Filtered DFlash2 changes 2,043 then 2,052. Across the four arms, 650,816 generated
+token rows pass the saved-metadata audit.
+The final optimizer step has no subsequent handoff in the standard loop, so its
+parameter changes are not checksum-verified by this recipe.
+
+All four arms' 96 saved prompts, labels, and sample/group/rollout indices match
+exactly. All initial language-weight checksum dictionaries also match across
+the eight rollout engines.
+Initial language-checksum dictionary SHA256:
+`2069a10d31133251cc4a3af1ab1d06b5fca20970b718e58221b9527179b35b86`.
+
+Both DFlash2 arms preserve all 264 private draft tensor hashes per engine
+(66 on each of four TP ranks) through both target updates. Four separately
+recorded shared target-head hashes per engine are allowed to change: all four
+change in unfiltered DFlash2, while three then four differ from the initial
+hashes in filtered DFlash2. The unfiltered rollouts record 9,335, 8,902, and 10,961
+speculative verifications; filtered rollouts record 7,979, 8,068, and 10,823,
+confirming active speculation after updates. Complete support ranges from 1–21
+tokens for filtered regular and 1–20 for filtered DFlash2, with mass within
+`1.4e-7` and `2.1e-7` of one respectively.
+
+These training metadata checks use the saved production samples; they do not
+collect a full-logit verifier trace during training. The exact-verifier and
+none/TIS/MIS gradient checks are the separate inference experiments above.
+The finite three-step results establish integration, not statistical parity or
+training-quality equivalence.
 
 The earlier run using an incompatible response-format scorer produced zero
 rewards and zero gradients and is retained as an **inconclusive negative control**.
@@ -110,7 +150,33 @@ preflight produced 19 correct responses and three mixed-reward prompt groups.
 The vision encoder is unused in this text-only recipe; excluding it from weight
 equality checks does not establish its preservation across memory offload.
 
+Training source revisions are Miles `7e5755150e` for unfiltered regular and
+`60c08e65d7` for subsequent arms, with SGLang `79f36a8a1` throughout. The intervening
+Miles changes tighten the private-draft diagnostic and add documentation;
+training and sampling settings are unchanged. The host has an explicitly
+verified 1,280 GiB memory cap. Maximum observed cgroup usage in 15-second samples
+ranges from 1,030.10 to 1,050.13 GiB across the four arms; these are sampled
+maxima, not instantaneous peak counters.
+
 ## Evidence and limits
+
+[artifacts.json](artifacts.json) records exact archive/report paths, byte sizes,
+and SHA256 values. The four training archives are
+`training-{unfiltered,filtered}-{regular,dflash}-artifacts.tar.gz`; each contains
+raw rollout/train tensors, structured events, logs, and the per-arm audits.
+The earlier failed/inconclusive attempts remain in
+`training-inconclusive-artifacts.tar.gz`.
+
+`training-audit-helpers.tar.gz` contains the metadata/support/private-draft audit,
+the exact cross-arm prompt and initial-weight comparison, resource/summary
+helpers, and `training-reproduction.json` with commands. The committed
+`training_evidence` module independently audits useful gradients and target
+changes. The final `training-all-paired-controls.json`,
+`training-completed-summary.json`, `training-memory-capped-summary.json`, and
+`training-resources-capped.jsonl` preserve the combined results and resource
+timeline. These files are under `/tmp/score-centering-experiments` locally and
+at the paths in the artifact index on the `score-centering-spec-results` Modal
+volume in environment `jason-dev`.
 
 The inference source audit matched all 2,865 uploaded Miles files to
 `aaf7fa7362d8cca9b997b1087fa3107bd7701949` and all 4,105 SGLang Python runtime

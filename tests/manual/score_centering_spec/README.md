@@ -246,6 +246,25 @@ and `2.json`, which record both engines and every TP rank. The runtime hook
 checks private-draft equality; the training-evidence analyzer does not infer
 draft preservation from target-only checksum events.
 
+The recorded experiment also has read-only checks for every saved token's
+metadata/support and for matching actual prompts and initial language weights
+across arms. Their helpers and exact commands are preserved in
+`training-audit-helpers.tar.gz` and its `training-reproduction.json`; archive
+locations and hashes are listed in [RESULTS.md](RESULTS.md). With the recorded
+Miles/SGLang sources on `PYTHONPATH`, extract the training archives and helper
+archive under `/artifacts`, then run:
+
+```bash
+python /artifacts/audit_training_metadata.py \
+  /artifacts/training/unfiltered-regular \
+  --output /artifacts/unfiltered-regular-metadata.json
+python /artifacts/compare_training_prompts.py \
+  --root /artifacts/training --output /artifacts/training-all-paired-controls.json
+```
+
+Repeat the metadata command for each arm. These audits need the saved trusted
+artifacts and Python dependencies; they do not need GPUs or model checkpoints.
+
 ## Local regression checks
 
 ```bash
