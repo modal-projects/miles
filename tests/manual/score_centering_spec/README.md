@@ -4,6 +4,8 @@ These probes separate sampling correctness, captured metadata, loss arithmetic,
 model-forward numerical differences, and actual training integration. Matching
 generated strings at the same random seed is not a correctness criterion.
 
+Recorded observations and limitations are in [RESULTS.md](RESULTS.md).
+
 ## Revisions and scope
 
 - Miles stack base: `1145f1e8a451435b469095e38caf64161b4a9b09`
@@ -24,7 +26,7 @@ preserve the imported source paths and an archive hash too.
 
 The experiment image is
 `radixark/miles@sha256:2b6fa5afa2b52f53fe870b842b62d7fcb2e258cac420018fb34d7a6ab41f1f0b`.
-The source overlay reused its `rust_tree_core/mem_cache` extension, SHA256
+The training source overlay reused its `rust_tree_core/mem_cache` extension, SHA256
 `254d907ca70c4c0190bbccae85420f9e63ff63e55b83fd10c21e1affca951a1e`, after
 checking that the Python adapters and Rust sources match the image baseline.
 
@@ -109,6 +111,27 @@ the production none/TIS/MIS score-centering gradients against an independent
 dense surrogate at absolute tolerance `1e-7` and relative tolerance `1e-5`.
 This gradient check tests estimator arithmetic; it does not substitute for
 training or prove independent model-forward equivalence.
+
+Short responses can consume a case's bounded full-logit snapshot quota on rows
+later trimmed at termination. If `check_trace` reports missing gradient cases,
+preserve the original run and collect longer requests for those cases. In the
+recorded run the two missing cases were supplied by:
+
+```bash
+python -m tests.manual.score_centering_spec.probe \
+  --endpoint http://127.0.0.1:30000 --model /models/Qwen3.8-27B \
+  --output /artifacts/spec-gradient-supplement --concurrency 1 --prompts 1 \
+  --lengths 32 --cases unfiltered32_t1.3,topk32_capture128_t1
+cat /artifacts/spec-matrix/responses.jsonl \
+  /artifacts/spec-gradient-supplement/responses.jsonl > /artifacts/combined-responses.jsonl
+python -m tests.manual.score_centering_spec.check_trace \
+  --responses /artifacts/combined-responses.jsonl \
+  --trace-dir /artifacts/traces --output /artifacts/combined-trace-check.json
+```
+
+The fresh run identifier gives the supplement a separate per-case snapshot quota;
+the global full-logit limit still applies. Report supplements separately rather
+than replacing failed or incomplete original records.
 
 `endpoint_checks` checks natural EOS and string stops through both native
 generation and non-streaming OpenAI Chat Completions, including the production
@@ -207,10 +230,28 @@ The target's shared `draft.lm_head.*` tensors are recorded separately; target
 input embeddings are supplied externally and are not registered draft tensors.
 Missing private hashes fail this probe instead of implying preservation.
 
+Audit each completed arm from its saved tensors and structured events:
+
+```bash
+python -m tests.manual.score_centering_spec.training_evidence \
+  /results/training/unfiltered-regular \
+  --output /results/training/unfiltered-regular/evidence.json
+```
+
+Repeat for `unfiltered-dflash`, `filtered-regular`, and `filtered-dflash`. This
+checks all three training steps and the initial plus two post-update target
+checksums; the third step has no subsequent published weights in this recipe.
+For each DFlash arm, also retain and inspect `draft_checksums/0.json`, `1.json`,
+and `2.json`, which record both engines and every TP rank. The runtime hook
+checks private-draft equality; the training-evidence analyzer does not infer
+draft preservation from target-only checksum events.
+
 ## Local regression checks
 
 ```bash
 python -m pytest -q tests/manual/score_centering_spec/test_contract.py \
+  tests/manual/score_centering_spec/test_draft_checksums.py \
+  tests/manual/score_centering_spec/test_training_evidence.py \
   tests/fast/launch_scripts/test_score_centering_train_probe.py \
   tests/fast/utils/test_score_centering_speculative.py
 ```
