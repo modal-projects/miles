@@ -93,11 +93,19 @@ def prepare_chat_request(
             request_args["return_sampling_mask"] = True
         else:
             request_args.pop("return_sampling_mask", None)
+    client_top_logprobs = _client_top_logprobs(client_args)
+    # Candidates only training asked for are read from meta_info; the backend can skip
+    # rendering them as OpenAI logprobs, which costs far more than computing them.
+    # Decided per turn from the client's request, never inherited from turn_args.
+    if request_args.get("top_logprobs") and not client_top_logprobs:
+        request_args["top_logprobs_in_meta_info_only"] = True
+    else:
+        request_args.pop("top_logprobs_in_meta_info_only", None)
     return PreparedChatRequest(
         body=request_args,
         template_args=extract_template_args(request_args),
         client_stream=client_stream,
-        client_top_logprobs=_client_top_logprobs(client_args),
+        client_top_logprobs=client_top_logprobs,
     )
 
 

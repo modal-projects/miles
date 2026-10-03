@@ -133,6 +133,27 @@ def test_client_top_logprobs_never_fails_the_request(value: object, expected: in
     assert prepare_chat_request(client, tokenizer, config=config, turn_args=None).client_top_logprobs == expected
 
 
+@pytest.mark.parametrize(
+    "loss_type,client,evaluation,meta_info_only",
+    [
+        ("score_centering", {}, False, True),
+        ("score_centering", {"top_logprobs": 2}, False, False),
+        # A flag inherited or sent by the client never outlives the rule.
+        ("score_centering", {"top_logprobs": 2, "top_logprobs_in_meta_info_only": True}, False, False),
+        ("score_centering", {"top_logprobs_in_meta_info_only": True}, True, False),
+        ("policy_loss", {"top_logprobs_in_meta_info_only": True}, False, False),
+        ("policy_loss", {"top_logprobs": 2}, False, False),
+    ],
+)
+def test_only_training_candidates_skip_the_openai_logprobs(
+    loss_type: str, client: dict, evaluation: bool, meta_info_only: bool
+) -> None:
+    config = make_session_server_config(loss_type=loss_type, rollout_temperature=0.7)
+    tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
+    body = prepare_chat_request(client, tokenizer, config=config, turn_args=None, evaluation=evaluation).body
+    assert body.get("top_logprobs_in_meta_info_only", False) is meta_info_only
+
+
 def test_session_producer_trims_candidates_with_tito_tokens() -> None:
     records = []
     for prompt, output, probabilities in (([0, 1], [2, 3], [0.5, 0.25]), ([0, 1, 2, 6], [4, 5], [0.55, 0.2])):
