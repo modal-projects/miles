@@ -94,8 +94,9 @@ Filtered requests reserve capture width 128 because ties can make realized
 top-k support larger than the requested sampling top-k. An overflow must fail;
 truncating support or renormalizing only the captured subset is invalid.
 
-The observer records the exact target probabilities passed to stochastic
-verification and the logits for each committed row. It covers accepted drafts,
+The observer checks the exact target probabilities passed to stochastic
+verification for each committed row and saves full logits for a bounded subset.
+It covers accepted drafts,
 rejection bonuses and all-accepted bonuses, then aligns them with emitted
 metadata. The first response token comes from ordinary prefill and is outside
 the DFlash trace. Extra committed rows after termination are counted separately.
@@ -158,7 +159,9 @@ each arm and spec/non-spec speed at the same capture setting.
 
 `train_probe` uses the existing Qwen dense recipe on one eight-GPU node, trainer
 TP4/DP2, two TP4 rollout replicas, CPU optimizer offload, and three optimizer
-updates with target synchronization after each. Both arms start from the same
+steps. The initial synchronization and two post-update synchronizations exercise
+two rollouts after target updates. The standard training loop skips the final
+handoff because no rollout follows it. Both arms start from the same
 converted checkpoint and use the same dataset, objective and training settings.
 The target checkpoint also contains a vision encoder that this text-only recipe
 does not train. Both arms use `--check-weight-update-selector target` and the

@@ -2,6 +2,8 @@
 
 The Qwen dense recipe supplies the model definition, TP4 and CPU Adam offload.
 Both arms start from the same converted checkpoint and synchronize real updates.
+The default three optimizer steps use an initial synchronization and two
+post-update synchronizations; the last step needs no further rollout handoff.
 The text-only trainer leaves the checkpoint's vision encoder frozen; the weight
 checker therefore preserves ``visual.`` tensors while checking all text weights.
 Rollout TP4 keeps two target replicas on an eight-GPU node to bound host backups.
