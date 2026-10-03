@@ -31,6 +31,7 @@ def test_pair_differs_only_in_speculation_and_artifact_paths(sampling):
     assert "--use-kl-loss" not in regular_argv
     assert "--ci-disable-weight-update-checker" not in regular_argv
     assert regular_argv[regular_argv.index("--check-weight-update-selector") + 1] == "target"
+    assert regular_argv[regular_argv.index("--check-weight-update-skip-list") + 1] == "visual."
     assert regular_argv[regular_argv.index("--loss-type") + 1] == "score_centering"
     assert regular_argv[regular_argv.index("--global-batch-size") + 1] == "32"
     assert regular_argv[regular_argv.index("--num-steps-per-rollout") + 1] == "1"

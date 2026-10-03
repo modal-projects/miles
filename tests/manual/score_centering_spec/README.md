@@ -39,6 +39,12 @@ the real-model experiment exercises DFlash2. Neither demonstrates all-model or
 all-draft compatibility, and three training updates do not establish long-run
 stability.
 
+The categorical verification kernels consume probabilities and token IDs, so
+their distribution-law tests do not depend on the model architecture. The draft
+method still chooses the verification path and constructs and aligns its inputs;
+the live checks establish that those tensors and returned metadata correspond
+to the right target prefixes for this model and DFlash2 implementation.
+
 ## Inference and estimator checks
 
 Use an environment with the Miles and dependency PR sources installed and the
@@ -154,6 +160,12 @@ each arm and spec/non-spec speed at the same capture setting.
 TP4/DP2, two TP4 rollout replicas, CPU optimizer offload, and three optimizer
 updates with target synchronization after each. Both arms start from the same
 converted checkpoint and use the same dataset, objective and training settings.
+The target checkpoint also contains a vision encoder that this text-only recipe
+does not train. Both arms use `--check-weight-update-selector target` and the
+narrow `--check-weight-update-skip-list visual.` rule: startup preserves the
+frozen vision tensors and checks every language-model tensor after transfer.
+Without that rule the startup checker randomizes the vision encoder, which a
+language-only update cannot restore.
 
 ```bash
 CUDA_DEVICE_MAX_CONNECTIONS=1 python -m tests.manual.score_centering_spec.train_probe \

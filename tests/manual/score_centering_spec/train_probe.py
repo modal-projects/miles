@@ -2,6 +2,8 @@
 
 The Qwen dense recipe supplies the model definition, TP4 and CPU Adam offload.
 Both arms start from the same converted checkpoint and synchronize real updates.
+The text-only trainer leaves the checkpoint's vision encoder frozen; the weight
+checker therefore preserves ``visual.`` tensors while checking all text weights.
 Rollout TP4 keeps two target replicas on an eight-GPU node to bound host backups.
 Model checkpoints and DAPO data must already be downloaded; ``prepare`` converts
 the target with the existing checkpoint utility. ``print`` only shows the plan.
@@ -158,7 +160,8 @@ def _training_args(args: ScriptArgs) -> str:
         "--attention-softmax-in-fp32 --attention-backend flash --colocate --offload-train-target cpu "
         f"--actor-num-nodes 1 --actor-num-gpus-per-node {args.num_gpus_per_node} "
         f"--num-gpus-per-node {args.num_gpus_per_node} --seed {args.seed} "
-        "--ci-test --check-weight-update-selector target --use-tensorboard "
+        "--ci-test --check-weight-update-selector target --check-weight-update-skip-list visual. "
+        "--use-tensorboard "
         f"--tb-project-name {shlex.quote(str(args.artifact_dir))} --tb-experiment-name probe "
         f"--save-debug-rollout-data {shlex.quote(str(args.artifact_dir / 'rollouts/{rollout_id}.pt'))} "
         f"--save-debug-train-data {shlex.quote(str(args.artifact_dir / 'train/{rollout_id}_{rank}.pt'))} "
