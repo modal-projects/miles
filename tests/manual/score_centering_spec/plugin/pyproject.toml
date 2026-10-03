@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miles-score-centering-probe"
+version = "0.0.1"
+description = "Opt-in verifier trace for the Miles score-centering experiment"
+
+[project.entry-points."sglang.srt.plugins"]
+miles_score_centering_probe = "miles_sc_probe:install"
+
+[tool.setuptools]
+py-modules = ["miles_sc_probe"]
