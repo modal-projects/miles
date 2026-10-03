@@ -150,8 +150,8 @@ python -m tests.manual.score_centering_spec.benchmark \
   --arm regular --output /artifacts/timing-regular --repeats 3
 ```
 
-The 32-token warmup exercises multiple verification/decode blocks and the
-selected capture mode outside timing. Report medians and spread over repeated
+The full 256-token warmup exercises the measured workload and the selected
+capture mode outside timing. Report medians and spread over repeated
 runs. The benchmark includes HTTP transport and JSON response decoding;
 artifact serialization and sample validation happen after the timer. Compare
 capture overhead within each arm and spec/non-spec speed at the same capture
@@ -166,12 +166,20 @@ steps. The initial synchronization and two post-update synchronizations exercise
 two rollouts after target updates. The standard training loop skips the final
 handoff because no rollout follows it. Both arms start from the same
 converted checkpoint and use the same dataset, objective and training settings.
+Thinking is disabled and the response cap is 2048 tokens. The existing `dapo`
+reward with `--reward-key score` grades the dataset's `Answer:` format. The
+`deepscaler` scorer requires a generated reasoning closer and boxed answer,
+so it would silently produce zero rewards for this no-thinking prompt format.
+Before a full run, verify that a small generation batch has correct and incorrect
+answers within at least one prompt group; zero-variation rewards cannot test
+useful training gradients.
 The target checkpoint also contains a vision encoder that this text-only recipe
 does not train. Both arms use `--check-weight-update-selector target` and the
-narrow `--check-weight-update-skip-list visual.` rule: startup preserves the
-frozen vision tensors and checks every language-model tensor after transfer.
-Without that rule the startup checker randomizes the vision encoder, which a
-language-only update cannot restore.
+narrow `--check-weight-update-skip-list visual.` rule to check every trained
+language-model tensor after transfer. No image inputs are used. The skip avoids
+deliberately resetting vision tensors but does not preserve them across the
+existing memory-offload path; nonfatal vision differences remain in the logs
+and are excluded from evidence of trained target updates.
 
 ```bash
 export CUDA_DEVICE_MAX_CONNECTIONS=1

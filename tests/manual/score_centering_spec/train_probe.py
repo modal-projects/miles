@@ -4,8 +4,9 @@ The Qwen dense recipe supplies the model definition, TP4 and CPU Adam offload.
 Both arms start from the same converted checkpoint and synchronize real updates.
 The default three optimizer steps use an initial synchronization and two
 post-update synchronizations; the last step needs no further rollout handoff.
-The text-only trainer leaves the checkpoint's vision encoder frozen; the weight
-checker therefore preserves ``visual.`` tensors while checking all text weights.
+The text-only trainer does not update the checkpoint's vision encoder. The
+checker excludes ``visual.`` tensors and checks all trained language weights;
+this probe makes no claim about vision preservation across memory offload.
 Rollout TP4 keeps two target replicas on an eight-GPU node to bound host backups.
 Model checkpoints and DAPO data must already be downloaded; ``prepare`` converts
 the target with the existing checkpoint utility. ``print`` only shows the plan.
@@ -60,7 +61,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
     num_rollout: int = 3
     rollout_batch_size: int = 8
     n_samples_per_prompt: int = 4
-    rollout_max_response_len: int = 1024
+    rollout_max_response_len: int = 2048
     draft_tokens: int = 8
     seed: int = 42
 
@@ -109,7 +110,7 @@ def _training_args(args: ScriptArgs) -> str:
     rollout = (
         f"--prompt-data {shlex.quote(str(args.dataset))} --input-key prompt --label-key label "
         "--apply-chat-template --apply-chat-template-kwargs '{\"enable_thinking\": false}' "
-        "--rollout-shuffle --rm-type deepscaler "
+        "--rollout-shuffle --rm-type dapo --reward-key score "
         f"--num-rollout {args.num_rollout} --rollout-batch-size {args.rollout_batch_size} "
         f"--n-samples-per-prompt {args.n_samples_per_prompt} "
         f"--global-batch-size {args.rollout_batch_size * args.n_samples_per_prompt} "

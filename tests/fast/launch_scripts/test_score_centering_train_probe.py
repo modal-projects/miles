@@ -1,10 +1,14 @@
 """Keep the paired training experiment controlled and independent of live GPUs."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from tests.manual.score_centering_spec import train_probe
+
+from miles.rollout.rm_hub import async_rm
+from miles.utils.types import Sample
 
 
 def _without_speculation(argv):
@@ -32,6 +36,7 @@ def test_pair_differs_only_in_speculation_and_artifact_paths(sampling):
     assert "--ci-disable-weight-update-checker" not in regular_argv
     assert regular_argv[regular_argv.index("--check-weight-update-selector") + 1] == "target"
     assert regular_argv[regular_argv.index("--check-weight-update-skip-list") + 1] == "visual."
+    assert regular_argv[regular_argv.index("--rollout-max-response-len") + 1] == "2048"
     assert regular_argv[regular_argv.index("--loss-type") + 1] == "score_centering"
     assert regular_argv[regular_argv.index("--global-batch-size") + 1] == "32"
     assert regular_argv[regular_argv.index("--num-steps-per-rollout") + 1] == "1"
@@ -84,3 +89,18 @@ def test_preparation_uses_the_same_model_definition_and_conversion_utility(monke
         megatron_path=args.megatron_path,
         extra_args="--tensor-model-parallel-size 4 --pipeline-model-parallel-size 1",
     )
+
+
+@pytest.mark.parametrize("answer,expected", [("3", 1.0), ("4", -1.0)])
+async def test_no_thinking_dapo_answer_format_produces_real_rewards(answer, expected):
+    argv = train_probe._manifest(train_probe.ScriptArgs())["train_argv"]
+    args = SimpleNamespace(
+        rm_type=argv[argv.index("--rm-type") + 1],
+        reward_key=argv[argv.index("--reward-key") + 1],
+        custom_rm_path=None,
+    )
+    sample = Sample(
+        prompt="Solve the problem. End with Answer:", response=f"The result is {answer}.\nAnswer: {answer}", label="3"
+    )
+    sample.reward = await async_rm(args, sample)
+    assert sample.get_reward_value(args) == expected
