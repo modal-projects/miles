@@ -30,6 +30,7 @@ from miles.utils.ft_utils.health_checker import (
     SimpleHealthCheckerConfig,
 )
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
+from miles.utils.score_centering import validate_score_centering_server_info
 from miles.utils.workers.launch_gate import GATE_PORT_NAME, activate_launch_gate
 from miles.utils.workers.worker_provider.base import BaseWorkerProvider
 
@@ -59,6 +60,7 @@ class ServerCell:
     meta: ServerCellMetadata
     router_api_client: SGLangRouterApiClient
     provider: BaseWorkerProvider
+    for_evaluation: bool = False
     health_checker_activeness: Callable[[], ActiveAndEpoch] = lambda: ActiveAndEpoch(active=True, epoch=0)
     _health_checker: BaseHealthChecker = dataclasses.field(init=False)
     _env_reporter: EngineEnvReporter = dataclasses.field(init=False)
@@ -179,7 +181,12 @@ class ServerCell:
             return
 
         if self.args.check_weight_update_equal and self.meta.update_weights:
-            await self.check_weights(action="snapshot", allow_quant_error=False, selector="all", skip_list=None)
+            await self.check_weights(
+                action="snapshot",
+                allow_quant_error=False,
+                selector=self.args.check_weight_update_selector,
+                skip_list=None,
+            )
 
         if self.meta.needs_offload:
             api_client = SGLangApiClient(server_url=addr_info.server_url)
@@ -191,7 +198,7 @@ class ServerCell:
             await self.check_weights(
                 action="reset_tensors",
                 allow_quant_error=False,
-                selector="all",
+                selector=self.args.check_weight_update_selector,
                 skip_list=self.args.check_weight_update_skip_list,
             )
 
@@ -209,6 +216,14 @@ class ServerCell:
         self._mark_serving()
 
     async def _register_with_router(self, addr_info: CellAddrInfo) -> None:
+        if getattr(self.args, "loss_type", None) == "score_centering" and not self.for_evaluation:
+            # Replacements can join while fully async generation is already
+            # running, so validate before the router can send any requests.
+            info = await self.api_client.get_server_info()
+            try:
+                validate_score_centering_server_info(info)
+            except ValueError as error:
+                raise ValueError(f"Score-centering rollout server {addr_info.server_url}: {error}") from error
         await self.router_api_client.add_worker(
             worker_url=addr_info.server_url,
             worker_type=self.meta.worker_type,

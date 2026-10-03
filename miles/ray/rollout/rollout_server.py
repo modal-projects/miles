@@ -116,6 +116,7 @@ class RolloutServer:
             router_api_client=self._router_api_client,
             meta=cell_meta,
             provider=self.engine_provider,
+            for_evaluation=self.args.eval_num_gpus > 0 and self.model_name == "eval",
             health_checker_activeness=self.health_checker_activeness.get,
         )
         self.server_cells[cell_id] = cell

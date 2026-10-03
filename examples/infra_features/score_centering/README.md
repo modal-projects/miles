@@ -93,8 +93,21 @@ Custom rollout producers must supply these fields with probabilities from the ac
 - The shared loss is wired into Megatron and FSDP. Candidate selection supports tensor parallelism, packed (`thd`) and padded (`bshd`) zigzag context parallelism, and packed all-gather context parallelism.
 - Sampling requires a fixed positive temperature and `min_p=0` on every call. Filtered sampling, including top-p filtering, automatically uses support mode and requires a positive `top_k`, for example `--rollout-top-p 0.9 --rollout-top-k 64 --rollout-top-logprobs-num 128`. Global filtered rollout settings automatically enable sampling-support replay; per-request overrides are checked when each request is built. See the [sampling-support replay guide](../../../docs/advanced/sampling-support-replay.md) for its request and server requirements.
 - Filtered sampling requires SGLang with support log probabilities (SGLang PR [#40932](https://github.com/sgl-project/sglang/pull/40932), included in the `sglang-miles` branch by [#41047](https://github.com/sgl-project/sglang/pull/41047), merge commit [`ae04cb14046896b6d453758c5769d639deedd353`](https://github.com/sgl-project/sglang/commit/ae04cb14046896b6d453758c5769d639deedd353) or a descendant containing it). External servers must set `SGLANG_RETURN_ORIGINAL_LOGPROB=0` like Miles-managed workers. OpenAI session responses must expose the SGLang fields above in `choices[0].meta_info`; a generic OpenAI-compatible server without that metadata is insufficient.
-- Constrained/custom sampling, speculative decoding, true-on-policy mode, OPD, multi-LoRA/Tinker losses, sequence masking, custom policy-loss reducers, custom train-data converters, and logprob recomputation via prefill are rejected. Multimodal token expansion is not supported. The initial advantage estimator is GRPO.
+- DFlash and DFlash2 checkpoints are supported through `--sglang-speculative-algorithm DFLASH`, subject to the worker requirements below. Other speculative algorithms remain rejected.
+- Constrained/custom sampling, true-on-policy mode, OPD, multi-LoRA/Tinker losses, sequence masking, custom policy-loss reducers, custom train-data converters, and logprob recomputation via prefill are rejected. Multimodal token expansion is not supported. The initial advantage estimator is GRPO.
 - Retaining `k=128` uses about 1 KiB per response position for the two arrays, before transport overhead. Eligible support-mode training batches replace the duplicate ID array with one int32 count per response position, saving `4 * (k - 1)` bytes per position in training transport and storage. Source Samples and session payloads keep the original storage cost. Larger `k` improves the unfiltered tail approximation at additional storage and compute cost.
+
+### Speculative rollouts
+
+Enable DFlash or DFlash2 with `--sglang-speculative-algorithm DFLASH` and the usual draft-model options. The loss uses target probabilities. Without sampling filters, Miles records the top `K` target probabilities. With top-k or top-p sampling, it records every token allowed by the filter and each token's probability after filtering.
+
+Use an `sglang-miles` build that supports exact DFlash sampling and reports this support to Miles. Filtered sampling also needs [SGLang #34201](https://github.com/sgl-project/sglang/pull/34201). Each worker must report `dflash_sampling_verify_available: true` in its `/server_info` `internal_states` entry. Miles rejects workers that lack this support or fall back to greedy verification.
+
+Keep `speculative_accept_threshold_single` and `speculative_accept_threshold_acc` at `1.0`. Do not enable simulated acceptance (`SGLANG_SIMULATE_ACC_LEN>0`). For external servers, set `SGLANG_EXPOSE_OWN_ENV_VARS=1` and `SGLANG_RETURN_ORIGINAL_LOGPROB=0`. Miles sets these environment variables for workers that it manages.
+
+Miles checks each group's final settings after applying overrides. It also checks every worker before each training rollout, including external and replacement workers. Keep these settings unchanged during a rollout. Evaluation calls do not collect score-centering probabilities.
+
+For comparisons with speculation disabled, use the same sampling settings. When both top-k and top-p are enabled, also use the same filtering order. Equal random seeds do not guarantee equal output text.
 
 ## Metrics and verification
 

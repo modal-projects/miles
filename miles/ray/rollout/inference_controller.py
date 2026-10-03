@@ -28,6 +28,7 @@ from miles.utils.ft_utils.api_server.models import CellStatus
 from miles.utils.init_once import InitOnce, init_once
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import SimpleTicker
+from miles.utils.score_centering import validate_score_centering_server_info
 from miles.utils.test_utils.fault_injector import FailureMode
 from miles.utils.workers.registration.hub import RegistrationHub
 from miles.utils.workers.registration.models import RegistrationSnapshot
@@ -148,12 +149,34 @@ class InferenceController:
 
     @with_lock
     async def prepare_rollout(self, rollout_id: int, model_id: str | None = None) -> None:
+        await self._validate_score_centering_engines(model_id)
         await self._health_monitoring_resume(model_id)
         await dashboard_hooks.register_engines(self.servers, provider=self._engine_provider)
 
     @with_lock
     async def prepare_eval(self, model_id: str | None = None) -> None:
         await self._health_monitoring_resume(model_id)
+
+    @requires_lock
+    async def _validate_score_centering_engines(self, model_id: str | None) -> None:
+        if getattr(self.args, "loss_type", None) != "score_centering":
+            return
+        # Scheduler thresholds can change at runtime. Recheck before each training
+        # rollout, including replacement and external workers whose effective
+        # settings are not described by the controller's launch flags.
+        cells = [
+            cell
+            for srv in self._get_servers_of_model_id(model_id)
+            if not (self.args.eval_num_gpus > 0 and srv.model_name == "eval")
+            for cell in srv.server_cells.values()
+            if cell.is_pending_weights_or_serving
+        ]
+        infos = await asyncio.gather(*[cell.api_client.get_server_info() for cell in cells])
+        for cell, info in zip(cells, infos, strict=True):
+            try:
+                validate_score_centering_server_info(info)
+            except ValueError as error:
+                raise ValueError(f"Score-centering rollout server {cell.server_url}: {error}") from error
 
     @with_lock
     async def dispose(self) -> None:
