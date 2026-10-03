@@ -20,11 +20,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--endpoint", default="http://127.0.0.1:30000")
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--warmup-tokens", type=int, default=256)
     parser.add_argument("--model", default="/models/Qwen3.8-27B")
     parser.add_argument("--server-manifest", type=Path, default=Path("/artifacts/server-process.json"))
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
+    if args.warmup_tokens < 1:
+        parser.error("--warmup-tokens must be positive")
     args.output.mkdir(parents=True, exist_ok=True)
     args.endpoint = args.endpoint.rstrip("/")
     server_manifest = json.loads(args.server_manifest.read_text())
@@ -49,7 +52,7 @@ def main() -> None:
         "requests_per_trial": 8,
         "output_tokens_per_request": 256,
         "ignore_eos": True,
-        "warmup_tokens": 32,
+        "warmup_tokens": args.warmup_tokens,
         "repeats": args.repeats,
         "cases": [asdict(c) for c in cases],
     }
@@ -68,7 +71,7 @@ def main() -> None:
                     return request
 
                 with ThreadPoolExecutor(max_workers=8) as executor:
-                    list(executor.map(lambda i: generate(args.endpoint, payload(i, 32)), range(8)))
+                    list(executor.map(lambda i: generate(args.endpoint, payload(i, args.warmup_tokens)), range(8)))
                     started = time.perf_counter()
                     records = list(
                         executor.map(
