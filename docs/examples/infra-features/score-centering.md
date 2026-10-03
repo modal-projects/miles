@@ -102,15 +102,15 @@ Custom rollout producers must supply these fields with probabilities from the ac
 
 ### Speculative rollouts
 
-Enable DFlash with the normal SGLang draft-model options. Candidate recording retains the two contracts above: unfiltered sampling records the top `K` target probabilities, while filtered sampling records the full realized support and its post-filter probabilities. The draft probabilities and acceptance probabilities are not the behavior-policy probabilities used by the loss.
+Enable DFlash or DFlash2 with `--sglang-speculative-algorithm DFLASH` and the usual draft-model options. The loss uses target probabilities. Without sampling filters, Miles records the top `K` target probabilities. With top-k or top-p sampling, it records every token allowed by the filter and each token's probability after filtering.
 
-The SGLang worker must support exact non-greedy DFlash verification and report `dflash_sampling_verify_available: true` in each `/server_info` `internal_states` entry. Builds that silently fall back to greedy verification are rejected. Both `speculative_accept_threshold_single` and `speculative_accept_threshold_acc` must remain `1.0`; simulated acceptance (`SGLANG_SIMULATE_ACC_LEN>0`) is unsupported. External servers must enable `SGLANG_EXPOSE_OWN_ENV_VARS=1` so Miles can check the worker's environment, including `SGLANG_RETURN_ORIGINAL_LOGPROB=0`. Miles-managed workers already expose these values.
+Use an `sglang-miles` build that supports exact DFlash sampling and reports this support to Miles. Filtered sampling also needs [SGLang #34201](https://github.com/sgl-project/sglang/pull/34201). Each worker must report `dflash_sampling_verify_available: true` in its `/server_info` `internal_states` entry. Miles rejects workers that lack this support or fall back to greedy verification.
 
-Miles validates per-group settings after their existing override merge and checks each serving worker's effective configuration before every training rollout, including replacement and external workers. Keep these launch constraints unchanged during a rollout. Dedicated evaluation engines and evaluation calls do not collect score-centering probabilities.
+Keep `speculative_accept_threshold_single` and `speculative_accept_threshold_acc` at `1.0`. Do not enable simulated acceptance (`SGLANG_SIMULATE_ACC_LEN>0`). For external servers, set `SGLANG_EXPOSE_OWN_ENV_VARS=1` and `SGLANG_RETURN_ORIGINAL_LOGPROB=0`. Miles sets these environment variables for workers that it manages.
 
-Filtered speculative sampling additionally requires SGLang's DFlash support-probability capture ([SGLang #34201](https://github.com/sgl-project/sglang/pull/34201)). Use an `sglang-miles` build containing that change and the worker capability reporting above. When comparing speculative and regular runs with both top-k and top-p enabled, explicitly match their filtering order as well as the sampling parameters.
+Miles checks each group's final settings after applying overrides. It also checks every worker before each training rollout, including external and replacement workers. Keep these settings unchanged during a rollout. Evaluation calls do not collect score-centering probabilities.
 
-Correct speculative capture does not imply identical generated text for equal random seeds. Check captured probabilities against the verifier's committed token positions, and treat same-prefix regular decoding as a numerical comparison. Short training runs validate the collection, loss and weight-update path; they do not establish long-run training stability.
+For comparisons with speculation disabled, use the same sampling settings. When both top-k and top-p are enabled, also use the same filtering order. Equal random seeds do not guarantee equal output text.
 
 ## Metrics and verification
 

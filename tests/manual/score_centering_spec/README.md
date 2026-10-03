@@ -1,10 +1,10 @@
-# DFlash score-centering validation
+# Reproduce the DFlash score-centering tests
 
-These probes separate sampling correctness, captured metadata, loss arithmetic,
-model-forward numerical differences, and actual training integration. Matching
-generated strings at the same random seed is not a correctness criterion.
+Start with [the results summary](RESULTS.md). The [detailed record](DETAILS.md)
+contains measurements, diagnostics, and artifact locations.
 
-Recorded observations and limitations are in [RESULTS.md](RESULTS.md).
+This guide contains the commands and configuration for reproducing those tests.
+It is supporting material for the proposed Miles change.
 
 ## Revisions and scope
 
@@ -250,7 +250,7 @@ The recorded experiment also has read-only checks for every saved token's
 metadata/support and for matching actual prompts and initial language weights
 across arms. Their helpers and exact commands are preserved in
 `training-audit-helpers.tar.gz` and its `training-reproduction.json`; archive
-locations and hashes are listed in [RESULTS.md](RESULTS.md). With the recorded
+locations and hashes are listed in [DETAILS.md](DETAILS.md#evidence-and-limits). With the recorded
 Miles/SGLang sources on `PYTHONPATH`, extract the training archives and helper
 archive under `/artifacts`, then run:
 
