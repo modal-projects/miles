@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from starlette.responses import Response
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
+from miles.rollout.generate_utils.score_centering import TopLogprobs
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import (
     SessionNotFoundError,
@@ -60,6 +61,43 @@ class ProxyRequest:
 def _render_json(payload) -> bytes:
     """Encode like Starlette's JSONResponse (compact, non-ASCII preserved)."""
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
+def _record_response(response: dict) -> dict:
+    """Copy ``response`` as the session record keeps it.
+
+    Top-logprob candidates (score centering requests 128 per token) are most of a
+    reply and stay in the session until its trajectory is collected. The training
+    path reads them from ``meta_info``, kept there as one ``TopLogprobs``; their
+    OpenAI copy, which only the client reads, is dropped.
+    """
+    choices = []
+    for choice in response.get("choices", []):
+        meta = choice.get("meta_info")
+        if isinstance(meta, dict) and meta.get("output_top_logprobs"):
+            try:
+                candidates = TopLogprobs.from_rows(meta["output_top_logprobs"])
+            except (TypeError, ValueError, IndexError, OverflowError):
+                # Malformed rows stay as they came, so collecting the sample reports them as before.
+                candidates = meta["output_top_logprobs"]
+            choice = {**choice, "meta_info": {**meta, "output_top_logprobs": candidates}}
+        content = (choice.get("logprobs") or {}).get("content")
+        if content and any(token.get("top_logprobs") for token in content):
+            content = [{**token, "top_logprobs": []} for token in content]
+            choice = {**choice, "logprobs": {**choice["logprobs"], "content": content}}
+        choices.append(choice)
+    return {**response, "choices": choices}
+
+
+def _dumpable_record(record: SessionRecord) -> SessionRecord:
+    """``record`` with its compact candidates as rows again, for the JSON dump."""
+    choices = []
+    for choice in record.response.get("choices", []):
+        meta = choice.get("meta_info")
+        if isinstance(meta, dict) and isinstance(meta.get("output_top_logprobs"), TopLogprobs):
+            choice = {**choice, "meta_info": {**meta, "output_top_logprobs": meta["output_top_logprobs"].tolist()}}
+        choices.append(choice)
+    return record.model_copy(update={"response": {**record.response, "choices": choices}})
 
 
 def _lcp_len(a: list[int], b: list[int]) -> int:
@@ -108,7 +146,9 @@ def _strip_replay_payloads(response: dict, top_logprobs: int = 0) -> dict:
                 choice = {**choice, "meta_info": meta}
         content = (choice.get("logprobs") or {}).get("content")
         if content and any(len(token.get("top_logprobs") or ()) > top_logprobs for token in content):
-            content = [{**token, "top_logprobs": (token.get("top_logprobs") or [])[:top_logprobs]} for token in content]
+            content = [
+                {**token, "top_logprobs": (token.get("top_logprobs") or [])[:top_logprobs]} for token in content
+            ]
             choice = {**choice, "logprobs": {**choice["logprobs"], "content": content}}
         stripped_choices.append(choice)
     return {**response, "choices": stripped_choices}
@@ -307,7 +347,8 @@ class SessionCore:
     async def get_session(self, session_id: str) -> Response:
         session = self.registry.get_session(session_id)
         metadata = self._session_metadata(session_id, session)
-        payload = GetSessionResponse(session_id=session_id, records=session.records, metadata=metadata)
+        records = [_dumpable_record(record) for record in session.records]
+        payload = GetSessionResponse(session_id=session_id, records=records, metadata=metadata)
         return Response(
             content=_render_json(payload.model_dump(mode="json")), status_code=200, media_type=JSON_MEDIA_TYPE
         )
@@ -478,7 +519,7 @@ class SessionCore:
                 path="/v1/chat/completions",
                 status_code=result["status_code"],
                 request=request_body,
-                response=response,
+                response=_record_response(response),
             )
             session.append_record(record)
         # --- lock released ---

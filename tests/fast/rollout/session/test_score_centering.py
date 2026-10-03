@@ -11,8 +11,8 @@ from tests.fast.fixtures.score_centering_fixtures import _args, _meta, _Tokenize
 from tests.fast.fixtures.session_fixtures import make_session_server_config
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
-from miles.rollout.generate_utils.score_centering import validate_score_centering_sample
-from miles.rollout.session.core import SessionCore, _chat_client_response
+from miles.rollout.generate_utils.score_centering import TopLogprobs, validate_score_centering_sample
+from miles.rollout.session.core import SessionCore, _chat_client_response, _dumpable_record, _record_response
 from miles.rollout.session.errors import MessageValidationError
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.request_args import prepare_chat_request
@@ -67,7 +67,9 @@ def test_training_candidates_reach_the_record_but_not_the_client(client_top_logp
         for row in rows
     ]
     response = {
-        "choices": [{"logprobs": {"content": content}, "meta_info": {"output_top_logprobs": rows, "weight_version": 3}}]
+        "choices": [
+            {"logprobs": {"content": content}, "meta_info": {"output_top_logprobs": rows, "weight_version": 3}}
+        ]
     }
     reply = _chat_client_response({"status_code": 200, "headers": {}}, response, prepared)
     choice = json.loads(reply.body)["choices"][0]
@@ -80,6 +82,55 @@ def test_training_candidates_reach_the_record_but_not_the_client(client_top_logp
     # The record shares ``response``: training still sees every candidate.
     assert response["choices"][0]["meta_info"]["output_top_logprobs"] is rows
     assert all(len(token["top_logprobs"]) == 4 for token in response["choices"][0]["logprobs"]["content"])
+
+
+def test_record_keeps_candidates_compact_for_training_and_the_dump() -> None:
+    meta = _meta([2, 3], [0.5, 0.25])
+    content = [
+        {"token": "t", "logprob": logp, "top_logprobs": [{"token": "t", "logprob": logp}]}
+        for logp, _, _ in meta["output_token_logprobs"]
+    ]
+    response = {"choices": [{"logprobs": {"content": content}, "meta_info": meta, "finish_reason": "stop"}]}
+    stored = _record_response(response)
+    choice = stored["choices"][0]
+    assert isinstance(choice["meta_info"]["output_top_logprobs"], TopLogprobs)
+    assert [token["top_logprobs"] for token in choice["logprobs"]["content"]] == [[], []]
+    # The client reply is built from the original response, which is left as it was.
+    assert response["choices"][0]["meta_info"] is meta and content[0]["top_logprobs"]
+    records = [
+        SessionRecord(
+            timestamp=2.0,
+            request_timestamp=1.0,
+            method="POST",
+            path="v1/chat/completions",
+            status_code=200,
+            request={"input_ids": [0, 1], "top_logprobs": 3},
+            response=body,
+        )
+        for body in (response, stored)
+    ]
+    args = _args(save_debug_trajectory_data=None, sglang_speculative_algorithm=None)
+    (from_rows,), (from_compact,) = (compute_samples_from_openai_records(args, [r], _Tokenizer()) for r in records)
+    for field in ("rollout_topk_token_ids", "rollout_topk_log_probs"):
+        np.testing.assert_array_equal(getattr(from_rows, field), getattr(from_compact, field))
+    dumped = _dumpable_record(records[1]).model_dump(mode="json")["response"]["choices"][0]["meta_info"]
+    assert dumped["output_top_logprobs"] == [
+        [[logp, token] for logp, token, _ in row] for row in meta["output_top_logprobs"]
+    ]
+
+
+def test_record_keeps_malformed_candidates_for_collection_to_report() -> None:
+    rows = [[5], [[-0.7, 2, None]]]
+    response = {"choices": [{"meta_info": {"output_top_logprobs": rows}}]}
+    assert _record_response(response)["choices"][0]["meta_info"]["output_top_logprobs"] is rows
+
+
+@pytest.mark.parametrize("value,expected", [(None, 0), (3, 3), ("3", 3), ("many", 0), ([], 0), (-2, 0)])
+def test_client_top_logprobs_never_fails_the_request(value: object, expected: int) -> None:
+    config = make_session_server_config(loss_type="score_centering", rollout_temperature=0.7)
+    tokenizer = SimpleNamespace(resolve_request_args=lambda request, **kwargs: request)
+    client = {} if value is None else {"top_logprobs": value}
+    assert prepare_chat_request(client, tokenizer, config=config, turn_args=None).client_top_logprobs == expected
 
 
 def test_session_producer_trims_candidates_with_tito_tokens() -> None:

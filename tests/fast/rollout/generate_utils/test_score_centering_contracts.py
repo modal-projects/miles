@@ -7,6 +7,7 @@ import pytest
 from tests.fast.fixtures.score_centering_fixtures import _args, _turn
 
 from miles.rollout.generate_utils.score_centering import (
+    TopLogprobs,
     append_score_centering_observations,
     append_score_centering_topk,
     configure_score_centering_request,
@@ -137,6 +138,70 @@ def test_missing_or_mismatched_probabilities_fail_before_training() -> None:
         validate_score_centering_sample(sample, 3)
     with pytest.raises(ValueError, match="output_top_logprobs"):
         append_score_centering_topk(Sample(response_length=1), {"output_token_logprobs": [(-1.0, 2, None)]}, 3)
+
+
+_ROWS = [
+    [(float(np.log(0.5)), 2, "a"), (float(np.log(0.25)), 3, "b"), (float(np.log(0.125)), 4, "c")],
+    [(float(np.log(0.75)), 3, "b")],
+]
+
+
+@pytest.mark.parametrize("k", [2, 3, 5])
+def _random_rows(count: int, seed: int) -> list:
+    rng = np.random.default_rng(seed)
+    rows = []
+    for _ in range(count):
+        width = int(rng.integers(1, 12))
+        # Head probabilities with some mass left for the tail, as SGLang's top-k rows have.
+        probabilities = rng.dirichlet(np.ones(width + 1))[:width]
+        token_ids = rng.choice(1000, size=width, replace=False)
+        rows.append([(float(np.log(p)), int(t), "x") for p, t in zip(probabilities, token_ids, strict=True)])
+    return rows
+
+
+def _collected(rows, candidates, k: int) -> Sample:
+    sample = Sample(response_length=len(rows))
+    meta = {"output_token_logprobs": [row[0] for row in rows], "output_top_logprobs": candidates}
+    append_score_centering_topk(sample, meta, k)
+    return sample
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 5, 8, 16])
+@pytest.mark.parametrize("rows", [_ROWS, _random_rows(200, seed=0)], ids=["fixed", "random"])
+def test_compact_candidates_match_rows(rows: list, k: int) -> None:
+    from_rows, from_compact = (_collected(rows, candidates, k) for candidates in (rows, TopLogprobs.from_rows(rows)))
+    for field in ("rollout_topk_token_ids", "rollout_topk_log_probs"):
+        expected, actual = getattr(from_rows, field), getattr(from_compact, field)
+        assert actual.dtype == expected.dtype
+        np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "rows,error",
+    [
+        ([[(-0.7, 2, None)], []], "Missing"),
+        ([[(-0.7, 2.0, None)]] * 2, "non-negative integer"),
+        ([[(-0.7, True, None)]] * 2, "non-negative integer"),
+        ([[(-0.7, 2, None), (-1.4, -3, None)]] * 2, "non-negative integer"),
+        ([[(-1.4, 2, None), (-1.4, 2, None)]] * 2, "Duplicate"),
+        ([[(0.5, 2, None)]] * 2, "Invalid"),
+        ([[(float(np.log(0.75)), 2, None), (float(np.log(0.5)), 3, None)]] * 2, "Invalid"),
+        ([[(None, 2, None)]] * 2, "Invalid"),
+    ],
+)
+def test_compact_candidates_fail_like_rows(rows: list, error: str) -> None:
+    for candidates in (rows, TopLogprobs.from_rows(rows)):
+        meta = {"output_token_logprobs": [(-1.0, 2, None)] * 2, "output_top_logprobs": candidates}
+        with pytest.raises(ValueError, match=error):
+            append_score_centering_topk(Sample(response_length=2), meta, 3)
+
+
+def test_compact_candidates_check_only_the_first_k_like_rows() -> None:
+    # Entries past k are never kept, so neither path checks them.
+    rows = [[(-0.7, 2, None), (-1.4, 3, None), (-2.1, "x", None), (-2.8, 2, None)]] * 2
+    from_rows, from_compact = (_collected(rows, candidates, 2) for candidates in (rows, TopLogprobs.from_rows(rows)))
+    np.testing.assert_array_equal(from_compact.rollout_topk_token_ids, from_rows.rollout_topk_token_ids)
+    np.testing.assert_array_equal(from_compact.rollout_topk_log_probs, from_rows.rollout_topk_log_probs)
 
 
 @pytest.mark.parametrize("mode", ["selected", "support"])

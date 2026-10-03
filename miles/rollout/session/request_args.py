@@ -97,8 +97,19 @@ def prepare_chat_request(
         body=request_args,
         template_args=extract_template_args(request_args),
         client_stream=client_stream,
-        client_top_logprobs=int(client_args.get("top_logprobs") or 0),
+        client_top_logprobs=_client_top_logprobs(client_args),
     )
+
+
+def _client_top_logprobs(client_args: dict[str, Any]) -> int:
+    """The client's ``top_logprobs``; a value that is not a count asks for none.
+
+    The backend still validates the request it receives, so this only sizes the reply.
+    """
+    try:
+        return max(int(client_args.get("top_logprobs") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def apply_session_sampling_defaults(

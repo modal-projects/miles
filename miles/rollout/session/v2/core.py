@@ -9,6 +9,8 @@ from miles.rollout.session.core import (
     ProxyRequest,
     SessionCore,
     _chat_client_response,
+    _dumpable_record,
+    _record_response,
     _render_json,
     _samples_response,
     attach_rollout_source,
@@ -68,7 +70,7 @@ class SessionCoreV2(SessionCore):
         session = self.registry.get_session(session_id)
         metadata = self._session_metadata(session_id, session)
         latest = session.latest()
-        records = [node.record for node in latest.path_nodes()] if latest is not None else []
+        records = [_dumpable_record(node.record) for node in latest.path_nodes()] if latest is not None else []
         payload = GetSessionResponse(session_id=session_id, records=records, metadata=metadata)
         return Response(
             content=_render_json(payload.model_dump(mode="json")), status_code=200, media_type=JSON_MEDIA_TYPE
@@ -222,7 +224,7 @@ class SessionCoreV2(SessionCore):
                 path="/v1/chat/completions",
                 status_code=result["status_code"],
                 request=request_body,
-                response=response,
+                response=_record_response(response),
             )
             commit_generation(
                 session,

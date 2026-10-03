@@ -1,7 +1,7 @@
 """Collect the sampler's distribution at generation time for score centering."""
 
 from argparse import Namespace
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -9,6 +9,55 @@ import numpy as np
 from miles.utils.sampling_mask import RolloutSamplingMask
 from miles.utils.score_centering import score_centering_top_k, validate_score_centering_sampling
 from miles.utils.types import Sample
+
+
+class TopLogprobs:
+    """Per-token top-logprob candidates as [tokens, width] arrays.
+
+    Holds what SGLang's ``output_top_logprobs`` rows of ``[logprob, token_id, text]``
+    hold, without the text: each row's length, its IDs (-1 past the row's end and
+    for an ID that is not a non-negative int, which ``invalid_ids`` flags), and its
+    logprobs in float64, the precision the rows are checked in. A session keeps
+    candidates for every generated token until its trajectory is collected; as rows
+    they cost hundreds of Python objects per token, which every garbage-collector
+    pass walks.
+    """
+
+    __slots__ = ("lengths", "ids", "invalid_ids", "logprobs")
+
+    def __init__(self, lengths: np.ndarray, ids: np.ndarray, invalid_ids: np.ndarray, logprobs: np.ndarray) -> None:
+        self.lengths = lengths
+        self.ids = ids
+        self.invalid_ids = invalid_ids
+        self.logprobs = logprobs
+
+    @classmethod
+    def from_rows(cls, rows: Sequence[Sequence[Sequence[Any]] | None]) -> "TopLogprobs":
+        width = max((len(row) for row in rows if row), default=0)
+        lengths = np.zeros(len(rows), dtype=np.int64)
+        ids = np.full((len(rows), width), -1, dtype=np.int32)
+        invalid_ids = np.zeros((len(rows), width), dtype=bool)
+        logprobs = np.full((len(rows), width), -np.inf, dtype=np.float64)
+        for i, row in enumerate(rows):
+            if not row:
+                continue
+            token_ids = [entry[1] for entry in row]
+            valid = [isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in token_ids]
+            lengths[i] = len(row)
+            ids[i, : len(row)] = [t if ok else -1 for t, ok in zip(token_ids, valid, strict=True)]
+            invalid_ids[i, : len(row)] = np.logical_not(valid)
+            logprobs[i, : len(row)] = np.asarray([entry[0] for entry in row], dtype=np.float64)
+        return cls(lengths, ids, invalid_ids, logprobs)
+
+    def __len__(self) -> int:
+        return len(self.lengths)
+
+    def tolist(self) -> list[list[list[float | int]]]:
+        """Rows of ``[logprob, token_id]`` again, for JSON."""
+        return [
+            [[float(p), int(t)] for p, t in zip(row_logprobs[:length], row_ids[:length], strict=True)]
+            for length, row_logprobs, row_ids in zip(self.lengths, self.logprobs, self.ids, strict=True)
+        ]
 
 
 def configure_score_centering_request(args: Namespace, request: dict[str, Any], *, openai: bool = False) -> None:
@@ -33,6 +82,25 @@ def configure_score_centering_request(args: Namespace, request: dict[str, Any], 
     else:
         request.pop("sampling_logprobs_mode", None)
         request["top_logprobs_num"] = max(k, request.get("top_logprobs_num", 0) or 0)
+
+
+def _check_top_logprobs(rows: TopLogprobs, k: int) -> np.ndarray:
+    """Make the per-row checks of ``append_score_centering_topk`` over whole arrays,
+    on each row's first ``k`` candidates; return which [tokens, k] slots they fill."""
+    if not rows.lengths.all():
+        raise ValueError(f"Missing score-centering candidates at generated position {int(np.argmin(rows.lengths))}")
+    ids, logprobs = rows.ids[:, :k], rows.logprobs[:, :k]
+    present = np.arange(ids.shape[1]) < np.minimum(rows.lengths, k)[:, None]
+    if rows.invalid_ids[:, :k].any():
+        raise ValueError("Score-centering candidates must have non-negative integer token IDs")
+    # Absent slots get distinct negative keys, so only present IDs can collide.
+    keys = np.sort(np.where(present, ids, -1 - np.arange(ids.shape[1])), axis=-1)
+    if (np.diff(keys, axis=-1) == 0).any():
+        raise ValueError("Duplicate score-centering candidate token IDs")
+    logprobs = np.where(present, logprobs, -np.inf)
+    if np.isnan(logprobs).any() or (logprobs > 0).any() or (np.exp(logprobs).sum(-1) > 1 + 1e-5).any():
+        raise ValueError("Invalid score-centering candidate probabilities")
+    return present
 
 
 def append_score_centering_topk(
@@ -61,29 +129,37 @@ def append_score_centering_topk(
         raise ValueError("Score-centering candidate rows do not match generated tokens")
     ids = np.full((n, k), -1, dtype=np.int32)
     logps = np.full((n, k), -np.inf, dtype=np.float32)
-    for i, entries in enumerate(rows):
-        if not entries:
-            raise ValueError(f"Missing score-centering candidates at generated position {i}")
-        if support_mode:
-            token_ids = support_ids[i]
-            if len(entries) != len(token_ids) or len(entries) > k:
-                raise ValueError("Score-centering sampling support exceeds or disagrees with saved candidates")
-            probabilities = np.asarray(entries, dtype=np.float64)
-        else:
-            entries = entries[:k]
-            token_ids = [entry[1] for entry in entries]
-            probabilities = np.asarray([entry[0] for entry in entries], dtype=np.float64)
-        if any(not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0 for token_id in token_ids):
-            raise ValueError("Score-centering candidates must have non-negative integer token IDs")
-        if len(set(token_ids)) != len(token_ids):
-            raise ValueError("Duplicate score-centering candidate token IDs")
-        mass = np.exp(probabilities).sum()
-        if np.isnan(probabilities).any() or (probabilities > 0).any() or mass > 1 + 1e-5:
-            raise ValueError("Invalid score-centering candidate probabilities")
-        if support_mode and (not np.isfinite(probabilities).all() or not np.isclose(mass, 1.0, atol=1e-5)):
-            raise ValueError("Score-centering sampling support probabilities must sum to one")
-        ids[i, : len(entries)] = token_ids
-        logps[i, : len(entries)] = probabilities
+    if isinstance(rows, TopLogprobs):
+        present = _check_top_logprobs(rows, k)
+        width = present.shape[1]
+        ids[:, :width] = np.where(present, rows.ids[:, :width], -1)
+        logps[:, :width] = np.where(present, rows.logprobs[:, :width], -np.inf)
+    else:
+        for i, entries in enumerate(rows):
+            if not entries:
+                raise ValueError(f"Missing score-centering candidates at generated position {i}")
+            if support_mode:
+                token_ids = support_ids[i]
+                if len(entries) != len(token_ids) or len(entries) > k:
+                    raise ValueError("Score-centering sampling support exceeds or disagrees with saved candidates")
+                probabilities = np.asarray(entries, dtype=np.float64)
+            else:
+                entries = entries[:k]
+                token_ids = [entry[1] for entry in entries]
+                probabilities = np.asarray([entry[0] for entry in entries], dtype=np.float64)
+            if any(
+                not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0 for token_id in token_ids
+            ):
+                raise ValueError("Score-centering candidates must have non-negative integer token IDs")
+            if len(set(token_ids)) != len(token_ids):
+                raise ValueError("Duplicate score-centering candidate token IDs")
+            mass = np.exp(probabilities).sum()
+            if np.isnan(probabilities).any() or (probabilities > 0).any() or mass > 1 + 1e-5:
+                raise ValueError("Invalid score-centering candidate probabilities")
+            if support_mode and (not np.isfinite(probabilities).all() or not np.isclose(mass, 1.0, atol=1e-5)):
+                raise ValueError("Score-centering sampling support probabilities must sum to one")
+            ids[i, : len(entries)] = token_ids
+            logps[i, : len(entries)] = probabilities
     prefix_length = sample.response_length - n
     if support_mode and n:
         in_support, lengths = _candidate_support_membership(ids, sample.rollout_sampling_mask, prefix_length)
