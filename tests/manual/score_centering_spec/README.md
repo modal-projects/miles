@@ -137,23 +137,26 @@ use its existing order and explicitly select that same order in the patched
 control, so dependency changes are not confused with speculative decoding.
 
 For timings, **restart with `MILES_SCORE_CENTERING_TRACE_DIR` unset**. The observer
-copies GPU tensors to the CPU and synchronizes. Measure regular/speculative and
-capture on/off, with identical sampling settings, prompts, output limits and
-concurrency. For example, repeat the following with separate output directories
-and then with `--no-capture`:
+copies GPU tensors to the CPU and synchronizes. `benchmark` measures capture
+on/off for K32, K128 and filtered support, alternating order across three repeats.
+Each trial uses eight concurrent requests of exactly 256 tokens with `ignore_eos`
+set explicitly. Run it once for each server arm, preserving the exact launch
+command/environment in the supplied server manifest:
 
 ```bash
-python -m tests.manual.score_centering_spec.probe \
+python -m tests.manual.score_centering_spec.benchmark \
   --endpoint http://127.0.0.1:30000 --model /models/Qwen3.8-27B \
-  --output /artifacts/timing-regular-capture-1 --concurrency 8 \
-  --cases unfiltered128_t1,topk64_topp90_t1 --prompts 32 --lengths 256
+  --server-manifest /artifacts/server-process.json \
+  --arm regular --output /artifacts/timing-regular --repeats 3
 ```
 
-Warmup exercises multiple verification/decode blocks and the selected capture
-mode outside timing. Report medians and spread over repeated runs. The reported
-rate includes HTTP transport and result serialization; expensive diagnostic
-sample validation happens after the timer. Compare capture overhead within
-each arm and spec/non-spec speed at the same capture setting.
+The 32-token warmup exercises multiple verification/decode blocks and the
+selected capture mode outside timing. Report medians and spread over repeated
+runs. The benchmark includes HTTP transport and JSON response decoding;
+artifact serialization and sample validation happen after the timer. Compare
+capture overhead within each arm and spec/non-spec speed at the same capture
+setting. The generic `probe` also emits a timing, but includes artifact writes
+and should not be mixed into this benchmark table.
 
 ## Short training integration
 
@@ -171,7 +174,8 @@ Without that rule the startup checker randomizes the vision encoder, which a
 language-only update cannot restore.
 
 ```bash
-CUDA_DEVICE_MAX_CONNECTIONS=1 python -m tests.manual.score_centering_spec.train_probe \
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+python -m tests.manual.score_centering_spec.train_probe \
   --stage prepare --model-dir /models --checkpoint-dir /results --data-dir /datasets
 python -m tests.manual.score_centering_spec.train_probe \
   --stage run --model-dir /models --checkpoint-dir /results --data-dir /datasets \
