@@ -1,5 +1,7 @@
 """Keep the paired training experiment controlled and independent of live GPUs."""
 
+import hashlib
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -45,6 +47,7 @@ def test_pair_differs_only_in_speculation_and_artifact_paths(sampling):
     assert regular_argv[regular_argv.index("--sglang-mamba-ssm-dtype") + 1] == "float32"
     assert regular_argv[regular_argv.index("--sglang-sampling-mask-max-tokens") + 1] == "128"
     assert regular_argv[regular_argv.index("--sglang-max-running-requests") + 1] == "16"
+    assert regular_argv[regular_argv.index("--custom-rollout-log-function-path") + 1].endswith(".log_draft_checksums")
 
 
 def test_training_uses_standard_launcher_and_refuses_to_resume_an_old_arm(tmp_path, monkeypatch):
@@ -70,6 +73,10 @@ def test_training_uses_standard_launcher_and_refuses_to_resume_an_old_arm(tmp_pa
     assert backend.execute_train.call_args.kwargs["job_lifetime"] == "launcher"
     assert backend.execute_train.call_args.kwargs["megatron_model_type"] == "qwen3.8-27B"
     assert (args.artifact_dir / "manifest.json").is_file()
+    assert (
+        json.loads((args.artifact_dir / "manifest.json").read_text())["dataset"]["sha256"]
+        == hashlib.sha256(b"{}\n").hexdigest()
+    )
     with pytest.raises(FileExistsError):
         train_probe._execute(args)
     backend.execute_train.assert_called_once()

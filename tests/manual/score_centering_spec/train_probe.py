@@ -30,6 +30,7 @@ make a run inconclusive even if weight decay moves the parameters. These short
 runs check integration and synchronization, not long-run training parity.
 """
 
+import hashlib
 import json
 import shlex
 from dataclasses import dataclass
@@ -164,6 +165,7 @@ def _training_args(args: ScriptArgs) -> str:
         f"--actor-num-nodes 1 --actor-num-gpus-per-node {args.num_gpus_per_node} "
         f"--num-gpus-per-node {args.num_gpus_per_node} --seed {args.seed} "
         "--ci-test --check-weight-update-selector target --check-weight-update-skip-list visual. "
+        "--custom-rollout-log-function-path tests.manual.score_centering_spec.draft_checksums.log_draft_checksums "
         "--use-tensorboard "
         f"--tb-project-name {shlex.quote(str(args.artifact_dir))} --tb-experiment-name probe "
         f"--save-debug-rollout-data {shlex.quote(str(args.artifact_dir / 'rollouts/{rollout_id}.pt'))} "
@@ -206,6 +208,8 @@ def _execute(args: ScriptArgs) -> None:
             raise FileNotFoundError(path)
     args.artifact_dir.mkdir(parents=True, exist_ok=False)
     manifest = _manifest(args)
+    with args.dataset.open("rb") as stream:
+        manifest["dataset"] = dict(path=str(args.dataset), sha256=hashlib.file_digest(stream, "sha256").hexdigest())
     (args.artifact_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     args.create_backend().execute_train(
         train_args=_training_args(args),

@@ -200,6 +200,12 @@ losses and gradients, nonzero group advantages, actual target updates, successfu
 weight checks, and valid metadata on rollouts after those updates. The fixed
 draft is excluded from the target weight-reset/check protocol. If all groups
 have zero advantages, parameter movement from weight decay is inconclusive.
+The manifest includes the dataset file's SHA256. A read-only rollout-log hook
+records each engine's draft hashes after generation and before offload, and
+requires private draft tensors to remain unchanged after both target updates.
+The target's shared `draft.lm_head.*` tensors are recorded separately; target
+input embeddings are supplied externally and are not registered draft tensors.
+Missing private hashes fail this probe instead of implying preservation.
 
 ## Local regression checks
 
