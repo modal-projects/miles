@@ -18,7 +18,7 @@ from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_h
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
-from miles.backends.training_utils.weight_update.views import load_weight_views
+from miles.backends.training_utils.weight_update.views import load_export_weight_views, load_weight_views
 from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.rollout.inference_controller import UpdatableEngines
 from miles.ray.specs.train import compute_trainer_pool_id
@@ -162,6 +162,10 @@ class MegatronTrainRayActor(TrainRayActor):
             if i == dist.get_rank():
                 self.hf_config = load_hf_config(args.hf_checkpoint)
                 self.weight_views = load_weight_views(getattr(args, "update_weight_views", None))
+                # HF exports may save views the rollout does not serve (e.g. the BF16 policy itself).
+                self.export_weight_views = load_export_weight_views(
+                    getattr(args, "hf_export_weight_views", None), self.weight_views
+                )
                 self.tokenizer = load_tokenizer(
                     self.args.hf_checkpoint, chat_template_path=self.args.chat_template_path, trust_remote_code=True
                 )
@@ -314,7 +318,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 required_placement=WeightUpdatePlacement(gather_pp=True),
                 model_name=model_name,
                 quantization_config=None if is_lora else quantization_config,
-                weight_views=() if is_lora else self.weight_views,
+                weight_views=() if is_lora else self.export_weight_views,
             )
             self.snapshot_publisher = SnapshotPublisher(
                 iterator, build_lora_config(args, target_modules=args.lora_adapter_targets) if is_lora else None

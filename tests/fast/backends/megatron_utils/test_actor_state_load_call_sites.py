@@ -92,3 +92,30 @@ class TestWhenTheTrainerBuildsItsWeightUpdater:
     def test_the_reusable_load_never_offloads_by_itself(self):
         """A reload runs it with the trainer awake, and an offload there would strand the caller asleep."""
         assert _method_call_lines(_CORE_METHOD, _SLEEP_METHOD) == []
+
+
+class TestWhichViewsEachWeightPathWrites:
+    @staticmethod
+    def _weight_views_passed_to(callee: str) -> list[str]:
+        tree = ast.parse(_SOURCE.read_text())
+        method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == _WEIGHT_UPDATER_METHOD
+        )
+        return [
+            ast.unparse(keyword.value)
+            for call in ast.walk(method)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == callee
+            for keyword in call.keywords
+            if keyword.arg == "weight_views"
+        ]
+
+    def test_weight_updates_publish_the_rollout_views(self):
+        assert self._weight_views_passed_to("WeightUpdater") == ["self.weight_views"]
+
+    def test_hf_exports_write_the_export_views(self):
+        """The export may save views no rollout pool serves, such as the BF16 policy itself."""
+        assert self._weight_views_passed_to("get_hf_weight_iterator") == [
+            "() if is_lora else self.export_weight_views"
+        ]

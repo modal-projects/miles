@@ -633,6 +633,16 @@ def test_views_publish_hook_parses_and_defaults_to_per_view_publication():
     assert args.custom_update_weight_post_write_views_path == "hooks.publish"
 
 
+def test_hf_export_weight_views_parse_as_json_and_default_to_the_update_views():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    assert parser.parse_args(REQUIRED_ARGS).hf_export_weight_views is None
+    views = {"bf16": "/checkpoints/bf16", "nvfp4": "/checkpoints/nvfp4"}
+    args = parser.parse_args(["--hf-export-weight-views", json.dumps(views), *REQUIRED_ARGS])
+    assert args.hf_export_weight_views == views
+
+
 def test_prompt_mean_loss_and_router_freeze_parse_as_flags():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)

@@ -13,6 +13,7 @@ from miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_fp8 impor
 )
 from miles.backends.training_utils.weight_update.views import (
     get_quantized_weight_basenames,
+    load_export_weight_views,
     load_weight_views,
 )
 from tools.convert_hf_to_fp8 import ConversionResult, process_file
@@ -125,6 +126,28 @@ def test_weight_view_names_are_opaque_safe_path_components(tmp_path: Path) -> No
 
         with pytest.raises(ValueError, match="invalid weight view name"):
             load_weight_views({"../bf16": str(checkpoint)})
+
+
+def test_hf_exports_default_to_the_rollout_views_and_may_add_others(tmp_path: Path) -> None:
+    for name in ("bf16", "nvfp4"):
+        (tmp_path / name).mkdir()
+    with patch(
+        "miles.backends.training_utils.weight_update.views.load_hf_config",
+        return_value=SimpleNamespace(quantization_config=None),
+    ):
+        rollout = load_weight_views({"nvfp4": str(tmp_path / "nvfp4")})
+        assert load_export_weight_views(None, rollout) is rollout
+        assert load_export_weight_views(None, ()) == ()
+
+        exported = load_export_weight_views(
+            {"bf16": str(tmp_path / "bf16"), "nvfp4": str(tmp_path / "nvfp4")}, rollout
+        )
+        assert [(view.name, view.checkpoint) for view in exported] == [
+            ("bf16", str(tmp_path / "bf16")),
+            ("nvfp4", str(tmp_path / "nvfp4")),
+        ]
+        with pytest.raises(ValueError, match="--hf-export-weight-views must be a non-empty JSON object"):
+            load_export_weight_views({}, rollout)
 
 
 def test_fp8_live_export_follows_the_canonical_module_set() -> None:

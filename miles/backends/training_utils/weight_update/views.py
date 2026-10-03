@@ -34,12 +34,12 @@ def _source_only_suffixes(quantization_config: dict | None) -> tuple[str, ...]:
 _VIEW_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
-def load_weight_views(config: object) -> tuple[WeightView, ...]:
+def load_weight_views(config: object, option: str = "--update-weight-views") -> tuple[WeightView, ...]:
     """Load each view's quantization policy from its canonical checkpoint."""
     if config is None:
         return ()
     if not isinstance(config, Mapping) or not config:
-        raise ValueError("--update-weight-views must be a non-empty JSON object")
+        raise ValueError(f"{option} must be a non-empty JSON object")
 
     views = []
     for name, checkpoint in config.items():
@@ -62,3 +62,10 @@ def load_weight_views(config: object) -> tuple[WeightView, ...]:
             )
         )
     return tuple(views)
+
+
+def load_export_weight_views(config: object, update_views: tuple[WeightView, ...]) -> tuple[WeightView, ...]:
+    """The views every HF export writes: ``--hf-export-weight-views``, else the rollout's own views."""
+    if config is None:
+        return update_views
+    return load_weight_views(config, "--hf-export-weight-views")

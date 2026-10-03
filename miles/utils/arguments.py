@@ -1638,6 +1638,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--hf-export-weight-views",
+                type=json.loads,
+                default=None,
+                help=(
+                    "JSON object mapping weight view names to canonical HF checkpoint directories, as in "
+                    "--update-weight-views. Every HF export (--save-hf and eval snapshots) writes one "
+                    "subdirectory per view. Defaults to --update-weight-views, so a run can save views its "
+                    "rollout does not serve."
+                ),
+            )
+            parser.add_argument(
                 "--save-trigger-sentinel",
                 type=str,
                 default=None,
@@ -3855,6 +3866,8 @@ def miles_validate_args(args):
             )
     elif args.update_weight_views is not None:
         raise ValueError("--update-weight-views requires --update-weight-transfer-mode disk-delta")
+    if args.hf_export_weight_views is not None:
+        assert args.megatron_to_hf_mode == "raw", "--hf-export-weight-views requires --megatron-to-hf-mode raw"
 
     if args.colocate:
         if args.offload_train is None:
