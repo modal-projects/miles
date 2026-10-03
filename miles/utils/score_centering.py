@@ -40,7 +40,7 @@ def validate_score_centering_args(args: Namespace) -> None:
     for option, reason in incompatible.items():
         if getattr(args, option, None):
             raise ValueError(f"Score centering is incompatible with --{option.replace('_', '-')}: {reason}")
-    if os.environ.get("SGLANG_RETURN_ORIGINAL_LOGPROB", "").lower() in ("1", "true"):
+    if os.environ.get("SGLANG_RETURN_ORIGINAL_LOGPROB", "").lower() in ("1", "true", "yes", "y"):
         raise ValueError("Score centering requires SGLANG_RETURN_ORIGINAL_LOGPROB=0 on rollout servers")
     # YAML groups can override these defaults; validate their effective values at
     # engine launch. External engines are checked from their own /server_info.
@@ -93,6 +93,14 @@ def validate_score_centering_server_info(server_info: Mapping[str, Any]) -> None
         raise ValueError("Score centering requires speculative engines to report internal_states in /server_info")
     for state in states:
         effective = {**server_info, **state}
+        environ = state.get("env_vars")
+        if isinstance(environ, Mapping) and str(environ.get("SGLANG_RETURN_ORIGINAL_LOGPROB", "0")).lower() in (
+            "1",
+            "true",
+            "yes",
+            "y",
+        ):
+            raise ValueError("Score centering requires SGLANG_RETURN_ORIGINAL_LOGPROB=0 on rollout servers")
         if effective.get("speculative_algorithm") is None:
             continue
         if state.get("dflash_sampling_verify_available") is not True:
@@ -103,9 +111,6 @@ def validate_score_centering_server_info(server_info: Mapping[str, Any]) -> None
         for field in ("speculative_accept_threshold_single", "speculative_accept_threshold_acc"):
             if field not in state:
                 raise ValueError(f"Score centering requires speculative engines to report {field} in internal_states")
-        environ = state.get("env_vars")
         if not isinstance(environ, Mapping):
             raise ValueError("Score centering requires SGLANG_EXPOSE_OWN_ENV_VARS=1 on speculative rollout servers")
-        if str(environ.get("SGLANG_RETURN_ORIGINAL_LOGPROB", "0")).lower() in ("1", "true"):
-            raise ValueError("Score centering requires SGLANG_RETURN_ORIGINAL_LOGPROB=0 on rollout servers")
         validate_score_centering_speculative_config(effective, environ=environ)

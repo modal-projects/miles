@@ -78,6 +78,13 @@ def test_simulated_acceptance_is_rejected(value):
         )
 
 
+@pytest.mark.parametrize("value", ["1", "true", "yes", "y", "YES", "Y"])
+def test_original_logprobs_reject_every_sglang_true_spelling(value, monkeypatch):
+    monkeypatch.setenv("SGLANG_RETURN_ORIGINAL_LOGPROB", value)
+    with pytest.raises(ValueError, match="SGLANG_RETURN_ORIGINAL_LOGPROB"):
+        validate_score_centering_args(_args())
+
+
 def test_runtime_checks_each_dp_worker_and_uses_effective_thresholds():
     info = _server_info()
     validate_score_centering_server_info(info)
@@ -116,6 +123,8 @@ def test_runtime_rejects_greedy_fallback_and_unrecognized_capability_values(capa
         ({"SGLANG_SIMULATE_ACC_LEN": "4"}, "SGLANG_SIMULATE_ACC_LEN"),
         ({"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"}, "SGLANG_RETURN_ORIGINAL_LOGPROB"),
         ({"SGLANG_RETURN_ORIGINAL_LOGPROB": "true"}, "SGLANG_RETURN_ORIGINAL_LOGPROB"),
+        ({"SGLANG_RETURN_ORIGINAL_LOGPROB": "yes"}, "SGLANG_RETURN_ORIGINAL_LOGPROB"),
+        ({"SGLANG_RETURN_ORIGINAL_LOGPROB": "Y"}, "SGLANG_RETURN_ORIGINAL_LOGPROB"),
     ],
 )
 def test_runtime_checks_remote_environment(env, match):
@@ -131,6 +140,26 @@ def test_speculative_server_must_report_worker_states():
 def test_non_speculative_workers_do_not_need_speculative_capabilities():
     validate_score_centering_server_info({"speculative_algorithm": None, "internal_states": [{}]})
     validate_score_centering_speculative_config({"speculative_algorithm": None}, environ={})
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "y", "YES", "Y"])
+def test_non_speculative_workers_reject_reported_original_logprobs(value):
+    with pytest.raises(ValueError, match="SGLANG_RETURN_ORIGINAL_LOGPROB"):
+        validate_score_centering_server_info(
+            {
+                "speculative_algorithm": None,
+                "internal_states": [{"env_vars": {"SGLANG_RETURN_ORIGINAL_LOGPROB": value}}],
+            }
+        )
+
+
+def test_non_speculative_workers_accept_reported_sampling_logprobs():
+    validate_score_centering_server_info(
+        {
+            "speculative_algorithm": None,
+            "internal_states": [{"env_vars": {"SGLANG_RETURN_ORIGINAL_LOGPROB": "0"}}],
+        }
+    )
 
 
 @pytest.mark.parametrize("info", [{}, {"internal_states": [{}]}])

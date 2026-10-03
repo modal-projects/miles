@@ -809,6 +809,20 @@ class TestInferenceEnginePortSchema:
 
 
 class TestInferenceEngineGatedLaunch:
+    def test_only_dedicated_eval_engines_receive_the_eval_launch_role(self, monkeypatch):
+        args = make_args(eval_num_gpus=1, eval_num_gpus_per_engine=1)
+        recorded: list[bool] = []
+
+        def _record(**kwargs) -> str:
+            recorded.append(kwargs["for_evaluation"])
+            return "launch-cmd"
+
+        monkeypatch.setattr(inference_specs, "compute_engine_launch_cmd", _record)
+        for spec in specs_inference_engine(args):
+            spec.launch_command(_make_engine_ctx())
+
+        assert recorded == [False, True]
+
     def test_the_launch_command_is_told_the_cells_own_gate_port(self, tmp_path, monkeypatch):
         """An engine launched without its gate port would start ungated and ignore the release."""
         config_path = tmp_path / "sglang.yaml"

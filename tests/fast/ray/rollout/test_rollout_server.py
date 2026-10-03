@@ -290,6 +290,26 @@ class TestEngineListOrdering:
 
 
 class TestAddCellRollback:
+    @pytest.mark.parametrize(
+        "model_name,eval_num_gpus,expected", [("default", 1, False), ("eval", 1, True), ("eval", 0, False)]
+    )
+    async def test_only_dedicated_eval_cells_receive_the_eval_admission_role(
+        self, monkeypatch, model_name, eval_num_gpus, expected
+    ):
+        srv = RolloutServer(
+            server_cells={},
+            args=make_args(eval_num_gpus=eval_num_gpus),
+            context_lock=_make_lock(),
+            engine_provider=_StubProvider(),
+            model_name=model_name,
+        )
+        monkeypatch.setattr(ServerCell, "init", _noop_async)
+
+        async with srv.context_lock:
+            await srv.add_cell(self._make_meta())
+            assert next(iter(srv.server_cells.values())).for_evaluation is expected
+            await srv.dispose()
+
     def _make_meta(
         self, *, needs_offload: bool = False, cell_id: str = "inference-engine-0-0-0"
     ) -> ServerCellMetadata:

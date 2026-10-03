@@ -145,6 +145,16 @@ class TestScoreCenteringSpeculativeOverrides:
         )
         assert parse_server_args_argv(shlex.split(command)[3:]).speculative_algorithm == "EAGLE"
 
+    def test_dedicated_eval_engines_keep_their_own_sampling_configuration(self):
+        command = _cmd(
+            args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm="DFLASH"),
+            sglang_overrides={"speculative_algorithm": "EAGLE", "speculative_accept_threshold_acc": 0.9},
+            for_evaluation=True,
+        )
+        parsed = parse_server_args_argv(shlex.split(command)[3:])
+        assert parsed.speculative_algorithm == "EAGLE"
+        assert parsed.speculative_accept_threshold_acc == 0.9
+
 
 class TestLoraTargetModules:
     @pytest.mark.parametrize(
