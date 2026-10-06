@@ -56,6 +56,8 @@ def make_engine_args(**overrides: Any) -> Namespace:
         debug_skip_weight_update=False,
         multi_lora=False,
         colocate=False,
+        loss_type="policy_loss",
+        use_sampling_support_replay=False,
     )
     defaults.update(overrides)
     return Namespace(**defaults)
