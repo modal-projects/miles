@@ -115,36 +115,10 @@ class TestComputeEngineLaunchCmd:
         assert parsed.api_key == "secret"
 
 
-class TestScoreCenteringSpeculativeOverrides:
-    @pytest.mark.parametrize("algorithm", [None, "DFLASH"])
-    def test_group_algorithm_overrides_the_global_default(self, algorithm):
-        command = _cmd(
-            args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm="EAGLE"),
-            sglang_overrides={"speculative_algorithm": algorithm},
-        )
-        assert parse_server_args_argv(shlex.split(command)[3:]).speculative_algorithm == algorithm
-
-    def test_a_group_cannot_enable_an_unsupported_algorithm(self):
-        with pytest.raises(ValueError, match="only with --sglang-speculative-algorithm DFLASH"):
-            _cmd(
-                args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm=None),
-                sglang_overrides={"speculative_algorithm": "EAGLE"},
-            )
-
-    def test_a_group_cannot_relax_dflash_acceptance(self):
-        with pytest.raises(ValueError, match="exact DFlash sampling"):
-            _cmd(
-                args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm="DFLASH"),
-                sglang_overrides={"speculative_accept_threshold_acc": 0.9},
-            )
-
-    def test_dedicated_eval_engines_keep_their_own_configuration(self):
-        command = _cmd(
-            args=make_engine_args(loss_type="score_centering", sglang_speculative_algorithm="DFLASH"),
-            sglang_overrides={"speculative_algorithm": "EAGLE"},
-            for_evaluation=True,
-        )
-        assert parse_server_args_argv(shlex.split(command)[3:]).speculative_algorithm == "EAGLE"
+def test_score_centering_checks_the_server_group_speculative_algorithm():
+    args = make_engine_args(loss_type="score_centering", use_sampling_support_replay=False)
+    with pytest.raises(ValueError, match="DFLASH"):
+        _cmd(args=args, sglang_overrides={"speculative_algorithm": "EAGLE"})
 
 
 class TestLoraTargetModules:

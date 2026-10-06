@@ -325,7 +325,6 @@ def _compute_spec_inference_engine(
             engine_info_bootstrap_port=ctx.self_addrs["engine_info_bootstrap"].port,
             gated_launch_port=ctx.self_addrs[GATE_PORT_NAME].port,
             random_seed=random_seed,
-            for_evaluation=args.eval_num_gpus > 0 and model_cfg.name == "eval",
         )
 
     num_gpus_per_engine = server_group_config.num_gpus_per_engine

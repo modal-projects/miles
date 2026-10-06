@@ -44,8 +44,6 @@ def validate_score_centering_args(args: Namespace) -> None:
             raise ValueError(f"Score centering is incompatible with --{option.replace('_', '-')}: {reason}")
     if os.environ.get("SGLANG_RETURN_ORIGINAL_LOGPROB", "").lower() in ("1", "true"):
         raise ValueError("Score centering requires SGLANG_RETURN_ORIGINAL_LOGPROB=0 on rollout servers")
-    # Server groups can override these defaults, so their effective values are
-    # checked at engine launch. External servers must follow the documented setup.
     if not getattr(args, "sglang_config", None) and not getattr(args, "rollout_external", False):
         validate_score_centering_speculative_config(
             {name.removeprefix("sglang_"): value for name, value in vars(args).items() if name.startswith("sglang_")},
@@ -57,12 +55,6 @@ def validate_score_centering_args(args: Namespace) -> None:
 def validate_score_centering_speculative_config(
     server_args: Mapping[str, Any], *, environ: Mapping[str, str], filtered_sampling: bool
 ) -> None:
-    """Require committed DFlash tokens to be exact samples from the recorded target policy.
-
-    Speculative decoding preserves the target distribution only with exact sampled
-    verification. SGLang implements that verification for DFlash on CUDA; other
-    platforms fall back to greedy verification, which still reports target logprobs.
-    """
     algorithm = server_args.get("speculative_algorithm")
     if algorithm is None:
         return

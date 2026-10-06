@@ -52,7 +52,6 @@ def compute_engine_launch_cmd(
     engine_info_bootstrap_port: int,
     gated_launch_port: int,
     random_seed: int,
-    for_evaluation: bool = False,
 ) -> str:
     _assert_launch_gate_served()
 
@@ -71,7 +70,6 @@ def compute_engine_launch_cmd(
         num_gpus_per_engine=num_gpus_per_engine,
         gated_launch_port=gated_launch_port,
         random_seed=random_seed,
-        for_evaluation=for_evaluation,
     )
 
     launch_args = {**server_args_dict, "host": server_args_dict["host"].strip("[]")}
@@ -94,7 +92,6 @@ def _compute_server_args(
     num_gpus_per_engine: int | None,
     gated_launch_port: int,
     random_seed: int,
-    for_evaluation: bool = False,
 ):
     _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     nnodes = max(1, _gpus_per_engine // args.num_gpus_per_node)
@@ -212,9 +209,7 @@ def _compute_server_args(
     if kwargs.get("device") is None:
         kwargs["device"] = "cuda"
 
-    if args.loss_type == "score_centering" and not for_evaluation:
-        # Check the merged settings: a server group's overrides win over the
-        # global --sglang-* defaults, including enabling or disabling speculation.
+    if getattr(args, "loss_type", None) == "score_centering":
         validate_score_centering_speculative_config(
             kwargs, environ=os.environ, filtered_sampling=args.use_sampling_support_replay
         )
