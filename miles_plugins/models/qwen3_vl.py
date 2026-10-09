@@ -3,7 +3,8 @@
 Bridge's Qwen3VLModel.forward resets position_ids=None and recomputes via the
 module-level get_rope_index over the whole [1, total] packed row, so MRoPE positions
 don't restart per packed segment (wrong for multimodal). We hijack that call: stash
-correct per-segment positions and have a patched get_rope_index return them.
+correct per-segment positions and have a patched get_rope_index return them. When CP has
+already pre-sharded the row, the rank-local positions are passed as explicit position_ids.
 """
 
 from __future__ import annotations
@@ -120,6 +121,7 @@ def _patch_model_forward_and_rope_index() -> None:
             _tls.packed_positions = packed
         if ctx is not None:
             _tls.cp_local = ctx
+            kwargs = _with_cp_local_position_ids(kwargs, packed)
         try:
             return orig_forward(self, *args, **kwargs)
         finally:
@@ -129,6 +131,14 @@ def _patch_model_forward_and_rope_index() -> None:
     Qwen3VLModel.forward = patched_forward
     setattr(Qwen3VLModel, _PATCHED, True)
     setattr(model_mod, _PATCHED, True)
+
+
+def _with_cp_local_position_ids(kwargs, packed):
+    """Bridge rejects a pre-sharded CP row without explicit rank-local 3D MRoPE position_ids
+    (before get_rope_index is reached), so pass miles' positions to it directly."""
+    if packed is None or kwargs.get("position_ids") is not None:
+        return kwargs
+    return {**kwargs, "position_ids": packed}
 
 
 def _patch_preprocess_packed_seqs_identity(model_mod) -> None:
