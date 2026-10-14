@@ -17,10 +17,21 @@ from ..misc_utils import strip_param_name_prefix
 class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._adapter_export_cpu = False
 
         from megatron.bridge import AutoBridge
 
         self._bridge = AutoBridge.from_hf_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
+
+    def materialize_adapter(self, adapter, *, materialize=True):
+        # Disk snapshots need CPU tensors. Stage each converted tensor before
+        # the exporter builds its full list; copying the final list is too late.
+        previous = self._adapter_export_cpu
+        self._adapter_export_cpu = True
+        try:
+            return super().materialize_adapter(adapter, materialize=materialize)
+        finally:
+            self._adapter_export_cpu = previous
 
     def _iter_hf_param_units(self, weights, *, materialize):
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in weights.items()}
@@ -74,7 +85,11 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
                 **self._source_name_kwargs(self._bridge.export_adapter_weights),
             )
             named_weights = self._postprocess_and_quantize(named_weights, "lora")
-            return [(h, w) for h, w, _m in named_weights if is_lora_weight_name(h)]
+            return [
+                (h, w.detach().to("cpu", copy=True) if self._adapter_export_cpu else w)
+                for h, w, _m in named_weights
+                if is_lora_weight_name(h)
+            ]
 
     @staticmethod
     def _source_name_kwargs(export_fn) -> dict:

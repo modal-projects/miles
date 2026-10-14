@@ -44,6 +44,9 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
     provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
     provider.sequence_parallel = args.sequence_parallel
     provider.context_parallel_size = args.context_parallel_size
+    provider.cp_comm_type = (
+        args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type
+    )
 
     # loss / sequence handling
     provider.calculate_per_token_loss = args.calculate_per_token_loss  # CP>1 VL models assert this
