@@ -4,6 +4,7 @@ or data-plane logic."""
 
 import logging
 from argparse import Namespace
+from contextlib import contextmanager
 
 import torch
 
@@ -48,3 +49,23 @@ def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) ->
             return tensor.narrow(rank_dim, 0, adapter_rank)
         return tensor
     return tensor
+
+
+@contextmanager
+def unwrap_multi_lora_linears(model):
+    """Swap every multi-LoRA wrapper for its base linear, so loaders that walk the model
+    (mbridge's HF load, torch_dist) see exactly the base model's modules and names."""
+    from megatron.bridge.peft.multi_lora_layers import MultiLoRALinear
+
+    swapped = []
+    for chunk in model if isinstance(model, (list, tuple)) else [model]:
+        for parent in list(chunk.modules()):
+            for name, child in list(parent.named_children()):
+                if isinstance(child, MultiLoRALinear):
+                    setattr(parent, name, child.to_wrap)
+                    swapped.append((parent, name, child))
+    try:
+        yield
+    finally:
+        for parent, name, wrapper in swapped:
+            setattr(parent, name, wrapper)
