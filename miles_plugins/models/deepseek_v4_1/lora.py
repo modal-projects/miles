@@ -84,6 +84,13 @@ def apply_deepseek_v41_multi_lora(model, args):
     lora = create_multi_lora_instance(args, target_modules=targets)
     model = lora(model, training=True)
     use_tp_exact_multi_lora_forward(model)
+    # TE drops the gradient through a gathered layernorm output, which would cut the adapter's input gradient.
+    gathered = [
+        module.base_linear_name
+        for module in model.modules()
+        if isinstance(module, MultiLoRALinear) and getattr(module.to_wrap, "return_layernorm_output_gathered", False)
+    ]
+    assert not gathered, f"DeepSeek-V4.1 multi-LoRA does not support layernorm-fused targets: {gathered}"
 
     for module in model.modules():
         if isinstance(module, TopKRouter):
