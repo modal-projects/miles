@@ -78,11 +78,12 @@ def apply_deepseek_v41_multi_lora(model, args):
     from megatron.bridge.peft.multi_lora_layers import MultiLoRALinear
     from megatron.core.transformer.moe.router import TopKRouter
 
-    from miles.backends.megatron_utils.lora.slots import create_multi_lora_instance
+    from miles.backends.megatron_utils.lora.slots import create_multi_lora_instance, use_tp_exact_multi_lora_forward
 
     targets = deepseek_v41_megatron_targets(args.hf_lora_targets)
     lora = create_multi_lora_instance(args, target_modules=targets)
     model = lora(model, training=True)
+    use_tp_exact_multi_lora_forward(model)
 
     for module in model.modules():
         if isinstance(module, TopKRouter):
