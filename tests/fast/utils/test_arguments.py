@@ -2269,11 +2269,72 @@ class TestMultiLoRAValidation:
         with pytest.raises(AssertionError, match="pipeline-model-parallel-size 1"):
             miles_validate_args(args)
 
-    def test_rejects_bshd_qkv_format(self):
+    @pytest.mark.parametrize("micro_batch_size,dynamic", [(2, False), (1, True)])
+    def test_rejects_multi_sample_bshd(self, micro_batch_size, dynamic):
         # bshd interleaves samples in the sequence-major flattening the spans assume.
         args = self._parse([])
         args.qkv_format = "bshd"
-        with pytest.raises(AssertionError, match="qkv-format thd"):
+        args.micro_batch_size = micro_batch_size
+        args.use_dynamic_batch_size = dynamic
+        if dynamic:
+            args.max_tokens_per_gpu = 1024
+        with pytest.raises(AssertionError, match="qkv-format thd, or bshd with --micro-batch-size 1"):
+            miles_validate_args(args)
+
+    def test_accepts_single_sample_bshd(self):
+        args = self._parse([])
+        args.qkv_format = "bshd"
+        args.micro_batch_size = 1
+        args.use_dynamic_batch_size = False
+
+        miles_validate_args(args)
+
+    def test_forces_bridge_for_models_without_a_raw_definition(self):
+        args = self._parse([])
+        assert args.megatron_to_hf_mode == "raw"
+
+        miles_validate_args(args)
+
+        assert args.megatron_to_hf_mode == "bridge"
+
+    def _use_deepseek_v41(self, monkeypatch):
+        config = {"model_type": "deepseek_v41", "n_shared_experts": 1}
+        monkeypatch.setattr(
+            "miles.utils.lora.arguments.load_hf_config",
+            lambda path: SimpleNamespace(model_type="deepseek_v41", to_dict=lambda: dict(config)),
+        )
+
+    def test_deepseek_v41_keeps_raw_mode_with_checkpoint_targets(self, monkeypatch):
+        self._use_deepseek_v41(monkeypatch)
+
+        def unexpected_bridge(*args, **kwargs):
+            pytest.fail("raw multi-LoRA must not initialize Bridge")
+
+        monkeypatch.setattr(
+            "miles.backends.megatron_utils.lora.target_modules.normalize_lora_targets_to_hf",
+            unexpected_bridge,
+        )
+        args = self._parse(["--target-modules", "attn,*.shared_experts.w1,*.shared_experts.w2,*.shared_experts.w3"])
+
+        miles_validate_args(args)
+
+        assert args.megatron_to_hf_mode == "raw"
+        assert args.hf_lora_targets == [
+            "layers.*.attn.wq_a",
+            "layers.*.attn.wkv",
+            "layers.*.attn.wq_b",
+            "layers.*.attn.wo_b",
+            "layers.*.ffn.shared_experts.w1",
+            "layers.*.ffn.shared_experts.w2",
+            "layers.*.ffn.shared_experts.w3",
+        ]
+        assert args.lora_adapter_targets == args.hf_lora_targets
+
+    def test_deepseek_v41_rejects_routed_experts_for_now(self, monkeypatch):
+        self._use_deepseek_v41(monkeypatch)
+        args = self._parse(["--target-modules", "attn,mlp"])
+
+        with pytest.raises(NotImplementedError, match="routed experts"):
             miles_validate_args(args)
 
     def test_rejects_shared_outer_expert_loras(self):

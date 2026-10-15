@@ -7,6 +7,9 @@ from typing import Any
 
 LORA_ADAPTER_NAME = "miles_lora"
 
+# Models whose multi-LoRA runs on the Miles model definition rather than Megatron-Bridge.
+RAW_MULTI_LORA_MODEL_TYPES = frozenset({"deepseek_v41"})
+
 
 def matches_lora_target(module: str, target: str) -> bool:
     return fnmatchcase(module if "." in target else module.rsplit(".", 1)[-1], target)
