@@ -4,6 +4,7 @@ import numpy as np
 
 from miles.tinker.core.types import UserInputError
 from miles.tinker.server.encoding import build_datum
+from miles.tinker.tinker_compat_utils import set_topk_shape
 from tinker.proto import tinker_public_pb2 as public_pb
 
 PROTO_CONTENT_TYPE = "application/x-protobuf"
@@ -125,7 +126,7 @@ def encode_sample_response(result: dict) -> bytes:
     if result.get("topk_prompt_logprobs") is not None:
         topk = result["topk_prompt_logprobs"]
         token_ids = np.asarray(topk["token_ids"], dtype=np.int32)
-        message.topk_prompt_logprobs.prompt_length, message.topk_prompt_logprobs.k = token_ids.shape
+        set_topk_shape(message.topk_prompt_logprobs, *token_ids.shape)
         message.topk_prompt_logprobs.token_ids = token_ids.tobytes()
         message.topk_prompt_logprobs.logprobs = np.asarray(topk["logprobs"], dtype=np.float32).tobytes()
     return message.SerializeToString()
