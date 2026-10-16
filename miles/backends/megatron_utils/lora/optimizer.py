@@ -19,8 +19,18 @@ from megatron.core.optimizer.layer_wise_optimizer import LayerWiseDistributedOpt
 from megatron.core.optimizer.optimizer_config import OptimizerConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
 
+from miles.backends.megatron_utils.lora.dimuon import Dimuon, build_factor_specs, dimuon_init_state_fn
+
 
 logger = logging.getLogger(__name__)
+
+# Per-slot optimizer families; the launch-time optimizer stays Adam (see validate below).
+SLOT_OPTIMIZER_FAMILIES = ("adam", "dimuon")
+# Adam hyperparameters dropped when a slot's param groups are rebuilt for Dimuon; Megatron's
+# own group keys (wd_mult, lr_mult, is_expert_parallel, ...) are kept.
+_ADAM_GROUP_KEYS = frozenset(
+    {"betas", "eps", "weight_decay", "amsgrad", "foreach", "maximize", "capturable", "differentiable", "fused"}
+)
 
 
 def validate_multi_lora_optimizer_args(args: Namespace) -> None:
@@ -106,8 +116,10 @@ class SlotOptimizer:
     only this slot's parameters and state: reloads cannot round other tenants'
     FP32 masters, and the parameter all-gather moves only this slot."""
 
-    def __init__(self, args: Namespace, model, slot: int) -> None:
+    def __init__(self, args: Namespace, model, slot: int, optimizer: str = "adam") -> None:
+        assert optimizer in SLOT_OPTIMIZER_FAMILIES, f"unknown slot optimizer {optimizer!r}"
         self.slot = slot
+        self.family = optimizer
         self._model = model
         slot_params = adapter_slot_parameters(model, slot)
         assert slot_params, f"adapter slot {slot} has no parameters; is this a multi-LoRA model?"
@@ -120,24 +132,49 @@ class SlotOptimizer:
             config, model, slot_params, use_gloo_process_groups=args.use_gloo_process_groups
         )
         assert base_optimizers, f"adapter slot {slot} produced no optimizer children"
+        init_state_fn = _adam_init_state_fn
+        if optimizer == "dimuon":
+            # Same param partition as the Adam children; LayerWise then shards and wraps them alike.
+            base_optimizers = [
+                Dimuon([{k: v for k, v in g.items() if k not in _ADAM_GROUP_KEYS} for g in opt.param_groups])
+                for opt in base_optimizers
+            ]
+            init_state_fn = dimuon_init_state_fn
         self._inner = LayerWiseDistributedOptimizer(
             base_optimizers,
             config,
             ProcessGroupCollection.use_mpu_process_groups(),
-            init_state_fn_list=[_adam_init_state_fn] * len(base_optimizers),
+            init_state_fn_list=[init_state_fn] * len(base_optimizers),
             model_chunks=list(model),
         )
+        if optimizer == "dimuon":
+            # after LayerWise: the FP32 masters it created are what Dimuon steps
+            specs = build_factor_specs(list(model), slot)
+            for child in self._inner.chained_optimizers:
+                base = getattr(child, "optimizer", child)
+                assert isinstance(base, Dimuon), f"dimuon slot {slot} has a non-Dimuon child {type(base)}"
+                base.set_specs(specs)
         # params are scattered whole across DP ranks; per-child norm/clip reductions must span the world
         for child in self._inner.chained_optimizers:
             child.grad_stats_parallel_group = None
 
-    def apply_adam_params(self, adam_params: dict) -> None:
+    def apply_params(self, params: dict) -> None:
+        """Per-step hyperparameters; ``params["type"]`` (default ``"adam"``) must match the slot's family."""
+        family = params.get("type", "adam")
+        if family != self.family:
+            raise ValueError(f"slot {self.slot} uses {self.family!r} but optim_step sent {family!r} params")
         for child in self._inner.chained_optimizers:
             for group in child.param_groups:
-                group["lr"] = adam_params["learning_rate"]
-                group["betas"] = (adam_params["beta1"], adam_params["beta2"])
-                group["eps"] = adam_params["eps"]
-                group["weight_decay"] = adam_params["weight_decay"]
+                group["lr"] = params["learning_rate"]
+                if family == "dimuon":
+                    group["momentum"] = params["beta1"]
+                else:
+                    group["betas"] = (params["beta1"], params["beta2"])
+                    group["eps"] = params["eps"]
+                    group["weight_decay"] = params["weight_decay"]
+
+    def apply_adam_params(self, adam_params: dict) -> None:
+        self.apply_params(adam_params)
 
     def prepare_grads(self) -> None:
         for child in self._inner.chained_optimizers:
@@ -203,7 +240,7 @@ def step_slot_optimizers(
     """Step slots in the same order on every rank; execution failures invalidate the cell."""
     slots = sorted(adam_params_by_slot)
     for slot in slots:
-        slot_optimizers[slot].apply_adam_params(adam_params_by_slot[slot])
+        slot_optimizers[slot].apply_params(adam_params_by_slot[slot])
         slot_optimizers[slot].prepare_grads()
 
     outcomes = {
