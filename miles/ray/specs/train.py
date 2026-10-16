@@ -241,6 +241,14 @@ def _compute_spec_trainer(
     )
 
 
+def raw_multi_lora_needs_eager_module_loading(args) -> bool:
+    """With lazy module loading, the first use of a kernel can synchronize the CUDA context.
+    DeepSeek-V4.1 multi-LoRA runs expert parallelism across nodes with per-rank token counts,
+    so cuBLAS picks first-use grouped-GEMM kernels on some ranks mid-forward, while expert
+    all-to-all kernels are in flight; that synchronization can deadlock every rank."""
+    return is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "raw"
+
+
 def compute_trainer_env_vars(args, ctx: WorkerLaunchContext, *, fp8_scales: str) -> dict[str, str]:
     env_vars = {
         # because sglang will always set NCCL_CUMEM_ENABLE to 0
@@ -252,6 +260,9 @@ def compute_trainer_env_vars(args, ctx: WorkerLaunchContext, *, fp8_scales: str)
         **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
         **args.train_env_vars,
     }
+
+    if raw_multi_lora_needs_eager_module_loading(args) and "CUDA_MODULE_LOADING" not in args.train_env_vars:
+        env_vars["CUDA_MODULE_LOADING"] = "EAGER"
 
     if source_patcher_config := args.dumper_source_patcher_config_train:
         env_vars["DUMPER_SOURCE_PATCHER_CONFIG"] = source_patcher_config

@@ -989,3 +989,27 @@ class TestProviderSelection:
 
         assert provider is capability.static_provider
         assert capability.requested_static_pool_ids == ["trainer-controller-actor"]
+
+
+@pytest.mark.parametrize(
+    "multi_lora,mode,train_env_vars,expected",
+    [
+        (True, "raw", {}, "EAGER"),
+        (True, "raw", {"CUDA_MODULE_LOADING": "LAZY"}, "LAZY"),
+        (True, "bridge", {}, None),
+        (False, "raw", {}, None),
+    ],
+)
+def test_raw_multi_lora_trainers_load_cuda_modules_eagerly(multi_lora, mode, train_env_vars, expected):
+    args = SimpleNamespace(
+        multi_lora=multi_lora,
+        megatron_to_hf_mode=mode,
+        train_env_vars=train_env_vars,
+        dumper_source_patcher_config_train=None,
+        offload_train=False,
+        train_backend="megatron",
+    )
+
+    env_vars = train_specs.compute_trainer_env_vars(args, None, fp8_scales="0")
+
+    assert env_vars.get("CUDA_MODULE_LOADING") == expected

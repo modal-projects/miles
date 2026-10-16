@@ -7,6 +7,7 @@ loading and HF export use the V4.1 checkpoint layout directly instead of AutoBri
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Sequence
 
 import torch
@@ -80,6 +81,12 @@ def apply_deepseek_v41_multi_lora(model, args):
 
     from miles.backends.megatron_utils.lora.slots import create_multi_lora_instance, use_tp_exact_multi_lora_forward
 
+    if os.environ.get("CUDA_MODULE_LOADING") != "EAGER":
+        logger.warning(
+            "CUDA_MODULE_LOADING=%s: lazy kernel loading can deadlock cross-node expert all-to-all; "
+            "launch DeepSeek-V4.1 multi-LoRA trainers with CUDA_MODULE_LOADING=EAGER",
+            os.environ.get("CUDA_MODULE_LOADING"),
+        )
     targets = deepseek_v41_megatron_targets(args.hf_lora_targets)
     lora = create_multi_lora_instance(args, target_modules=targets)
     model = lora(model, training=True)
