@@ -23,6 +23,7 @@ from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParall
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.training import global_vars
 from tests.ci.ci_register import register_cuda_ci
 from torch.utils._pytree import tree_flatten, tree_map
 
@@ -74,6 +75,16 @@ class DimuonModel(MegatronModule):
             self.layers.append(MultiLoRALinear(base, n_adapters=2, dim=MAX_RANK, alpha=16, full_name=name))
         tp = parallel_state.get_tensor_model_parallel_world_size()
         self.splits = [QKV_SPLIT, None, (FFN // tp, FFN // tp)]
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        # Delegate like Megatron's model classes do; the default would see a plain ModuleList and mark
+        # TP-sharded adapters as replicated, so TP rank 1 would silently reload rank 0's shard.
+        metadata = dict(metadata or {})
+        metadata.setdefault("dp_cp_group", parallel_state.get_data_parallel_group(with_context_parallel=True))
+        sharded = {}
+        for index, layer in enumerate(self.layers):
+            sharded.update(layer.sharded_state_dict(f"{prefix}layers.{index}.", sharded_offsets, metadata))
+        return sharded
 
 
 def tp_info(param):
@@ -153,6 +164,8 @@ def run_worker(checkpoint_dir, tp):
     dist.init_process_group("nccl", timeout=timedelta(seconds=120))
     assert dist.get_world_size() == 2
     parallel_state.initialize_model_parallel(tensor_model_parallel_size=tp)
+    # the gated linear_fc1 checkpoint factory merges through cat_with_oom_fallback, which reads global args
+    global_vars.set_args(Namespace(low_memory_resume=False))
     init_gloo_group()
     model_parallel_cuda_manual_seed(1234)
     config = TransformerConfig(
@@ -217,14 +230,8 @@ def run_worker(checkpoint_dir, tp):
     print(f"{tag} fused qkv blocks are normalized independently", flush=True)
 
     if tp > 1:
-        # Slot checkpoint resume at TP>1 restores TP rank 1 incorrectly for Adam slots too (pre-existing,
-        # reproduced with this model); checkpoint coverage for Dimuon stays at TP=1 until that is fixed.
-        print(f"{tag} skipping checkpoint resume at tp>1", flush=True)
-        dist.barrier()
-        parallel_state.destroy_model_parallel()
-        dist.destroy_process_group()
-        return
-
+        sharded = [v for v in model[0].module.sharded_state_dict().values() if hasattr(v, "global_shape")]
+        assert any(tuple(v.global_shape) != tuple(v.local_shape) for v in sharded), "adapters must be TP-sharded"
     saved = snapshot(model, source)
     for child in source._inner.chained_optimizers:
         for state in child.optimizer.state.values():
