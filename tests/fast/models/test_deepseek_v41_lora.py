@@ -4,6 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from miles.utils.lora import utils as lora_utils
 from miles.utils.lora.hf_lora_targets import expand_hf_lora_targets, get_hf_lora_targets, resolve_hf_lora_targets
 from miles.utils.lora.utils import AdapterSpec, get_adapter_target_modules
 from miles_plugins.models.deepseek_v4_1.lora_export import export_deepseek_v41_multi_lora
@@ -210,3 +211,22 @@ def test_export_rejects_a_model_without_adapters():
     )
     with pytest.raises(RuntimeError, match="found no adapters"):
         export_deepseek_v41_multi_lora([model], AdapterSpec(slot=0, rank=4, alpha=8.0), gather=_no_tp)
+
+
+@pytest.mark.parametrize(
+    "multi_lora,mode,model_type,expected",
+    [
+        (True, "raw", "deepseek_v41", True),
+        (True, "bridge", "deepseek_v41", False),
+        (False, "raw", "deepseek_v41", False),
+        (True, "raw", "deepseek_v3", NotImplementedError),
+    ],
+)
+def test_raw_multi_lora_is_limited_to_supported_models(monkeypatch, multi_lora, mode, model_type, expected):
+    monkeypatch.setattr(lora_utils, "_hf_model_type", lambda checkpoint: model_type)
+    args = SimpleNamespace(multi_lora=multi_lora, megatron_to_hf_mode=mode, hf_checkpoint="/checkpoint")
+    if expected is NotImplementedError:
+        with pytest.raises(NotImplementedError, match="deepseek_v3"):
+            lora_utils.is_raw_multi_lora_enabled(args)
+    else:
+        assert lora_utils.is_raw_multi_lora_enabled(args) is expected

@@ -42,7 +42,7 @@ from miles.backends.training_utils.weight_update.snapshot_publisher import Snaps
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.audit_utils.witness.module import witness_dump_and_clear_stale
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
-from miles.utils.lora.utils import is_multi_lora_enabled
+from miles.utils.lora.utils import is_multi_lora_enabled, is_raw_multi_lora_enabled
 from miles.utils.memory_utils import clear_memory
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.tracking_utils.structured_log import log_structured
@@ -151,7 +151,7 @@ def setup_model_and_optimizer(
     assert not args.moe_use_upcycling
     assert args.load is not None or args.pretrained_checkpoint is not None
 
-    if is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "raw":
+    if is_raw_multi_lora_enabled(args):
         from miles_plugins.models.deepseek_v4_1.lora import wrap_model_provider_with_deepseek_v41_multi_lora
 
         provider_func = wrap_model_provider_with_deepseek_v41_multi_lora(get_model_provider_func(args, role), args)
@@ -979,7 +979,7 @@ def load_model_state(
     role: str,
     checkpointing_context: dict | None,
 ) -> LoadCheckpointOutput:
-    if is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "raw":
+    if is_raw_multi_lora_enabled(args):
         from miles_plugins.models.deepseek_v4_1.lora import unwrap_multi_lora_linears
 
         load_ctx = unwrap_multi_lora_linears(model)

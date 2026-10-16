@@ -120,7 +120,9 @@ def unwrap_multi_lora_linears(model):
 
 
 def _tp_exact_multi_lora_forward(self, x, *args, **kwargs):
-    """``MultiLoRALinear.forward`` with the gradients of TP-sharded adapters summed over TP."""
+    """``MultiLoRALinear.forward`` with the gradients of TP-sharded adapters summed over TP.
+
+    Remove once the pinned Megatron-Bridge includes NVIDIA-NeMo/Megatron-Bridge#6513."""
     linear_output, bias, layernorm_output = self.base_linear_forward(x, *args, **kwargs)
     if not self._adapter_enabled:
         return linear_output, bias

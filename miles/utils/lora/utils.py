@@ -1,3 +1,4 @@
+import functools
 import json
 from argparse import Namespace
 from dataclasses import dataclass
@@ -5,10 +6,29 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from miles.utils.hf_utils.config import load_hf_config
+
 LORA_ADAPTER_NAME = "miles_lora"
 
 # Models whose multi-LoRA runs on the Miles model definition rather than Megatron-Bridge.
 RAW_MULTI_LORA_MODEL_TYPES = frozenset({"deepseek_v41"})
+
+
+@functools.cache
+def _hf_model_type(checkpoint: str) -> str:
+    return load_hf_config(checkpoint).model_type
+
+
+def is_raw_multi_lora_enabled(args: Any) -> bool:
+    """Multi-LoRA with ``--megatron-to-hf-mode raw``; raises for a model outside RAW_MULTI_LORA_MODEL_TYPES."""
+    if not (is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "raw"):
+        return False
+    model_type = _hf_model_type(args.hf_checkpoint)
+    if model_type not in RAW_MULTI_LORA_MODEL_TYPES:
+        raise NotImplementedError(
+            f"Multi-LoRA with --megatron-to-hf-mode raw supports {sorted(RAW_MULTI_LORA_MODEL_TYPES)}, not {model_type}"
+        )
+    return True
 
 
 def matches_lora_target(module: str, target: str) -> bool:
