@@ -179,9 +179,7 @@ def _gather_tp(tensor: torch.Tensor, dim: int) -> torch.Tensor:
     if world_size == 1:
         return tensor
     parts = [torch.empty_like(tensor) for _ in range(world_size)]
-    torch.distributed.all_gather(
-        parts, tensor.contiguous(), group=parallel_state.get_tensor_model_parallel_group()
-    )
+    torch.distributed.all_gather(parts, tensor.contiguous(), group=parallel_state.get_tensor_model_parallel_group())
     return torch.cat(parts, dim=dim)
 
 

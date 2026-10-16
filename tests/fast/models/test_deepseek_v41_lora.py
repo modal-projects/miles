@@ -99,7 +99,9 @@ def _layer(layer_number, *, rank=4, hidden=8, ffn=6):
         linear_fc1=_wrapper((rank, hidden), (2 * ffn, rank), a_dim=0, b_dim=0),
         linear_fc2=_wrapper((rank, ffn), (hidden, rank), a_dim=1, b_dim=0),
     )
-    return SimpleNamespace(layer_number=layer_number, self_attention=attention, mlp=SimpleNamespace(shared_experts=shared))
+    return SimpleNamespace(
+        layer_number=layer_number, self_attention=attention, mlp=SimpleNamespace(shared_experts=shared)
+    )
 
 
 def _model(*layer_numbers):
@@ -112,7 +114,9 @@ def _no_tp(tensor, dim):
 
 
 def test_export_names_and_shapes_follow_the_checkpoint():
-    exported = dict(export_deepseek_v41_multi_lora([_model(1, 2)], AdapterSpec(slot=1, rank=4, alpha=8.0), gather=_no_tp))
+    exported = dict(
+        export_deepseek_v41_multi_lora([_model(1, 2)], AdapterSpec(slot=1, rank=4, alpha=8.0), gather=_no_tp)
+    )
 
     assert get_adapter_target_modules(exported) == sorted(
         f"layers.{layer}.{module}"
