@@ -126,7 +126,7 @@ class HfWeightIteratorDirect(MegatronHfWeightIteratorBase):
 
     def _export_pp_local_lora(self, adapter):
         if adapter is not None:
-            from miles_plugins.models.deepseek_v4_1.lora import export_deepseek_v41_multi_lora
+            from miles_plugins.models.deepseek_v4_1.lora_export import export_deepseek_v41_multi_lora
 
             return export_deepseek_v41_multi_lora(self.model, adapter)
         # TODO: will rewrite in native lora refactor

@@ -6,19 +6,19 @@ import torch.nn as nn
 
 from miles.utils.lora.hf_lora_targets import expand_hf_lora_targets, get_hf_lora_targets, resolve_hf_lora_targets
 from miles.utils.lora.utils import AdapterSpec, get_adapter_target_modules
-from miles_plugins.models.deepseek_v4_1.lora import (
+from miles_plugins.models.deepseek_v4_1.lora_export import export_deepseek_v41_multi_lora
+from miles_plugins.models.deepseek_v4_1.lora_targets import (
     SUPPORTED_TARGETS,
     deepseek_v41_megatron_targets,
-    export_deepseek_v41_multi_lora,
     resolve_deepseek_v41_adapter_targets,
 )
 
 _HF_CONFIG = {"model_type": "deepseek_v41", "n_shared_experts": 1}
-_PHASE_ONE_SELECTION = ["attn", "*.shared_experts.w1", "*.shared_experts.w2", "*.shared_experts.w3"]
+_SUPPORTED_SELECTION = ["attn", "*.shared_experts.w1", "*.shared_experts.w2", "*.shared_experts.w3"]
 
 
-def _phase_one_targets():
-    targets = resolve_hf_lora_targets(_HF_CONFIG, target_modules=_PHASE_ONE_SELECTION)
+def _supported_targets():
+    targets = resolve_hf_lora_targets(_HF_CONFIG, target_modules=_SUPPORTED_SELECTION)
     return expand_hf_lora_targets(targets, get_hf_lora_targets(_HF_CONFIG))
 
 
@@ -35,8 +35,8 @@ def test_layout_uses_checkpoint_names():
     assert layout.unembed == ("head",)
 
 
-def test_phase_one_targets_map_to_megatron_modules():
-    targets = _phase_one_targets()
+def test_supported_targets_map_to_megatron_modules():
+    targets = _supported_targets()
     assert set(resolve_deepseek_v41_adapter_targets(targets)) == set(SUPPORTED_TARGETS)
     assert deepseek_v41_megatron_targets(targets) == [
         "decoder.layers.*.self_attention.linear_q_down_proj",
@@ -57,7 +57,7 @@ def test_phase_one_targets_map_to_megatron_modules():
         (["*.shared_experts.w1"], ValueError, "select all of them or none"),
     ],
 )
-def test_rejects_targets_outside_phase_one(selection, error, message):
+def test_rejects_unsupported_targets(selection, error, message):
     targets = resolve_hf_lora_targets(_HF_CONFIG, target_modules=selection)
     targets = expand_hf_lora_targets(targets, get_hf_lora_targets(_HF_CONFIG))
     with pytest.raises(error, match=message):

@@ -980,7 +980,7 @@ def load_model_state(
     checkpointing_context: dict | None,
 ) -> LoadCheckpointOutput:
     if is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "raw":
-        from .lora.slots import unwrap_multi_lora_linears
+        from miles_plugins.models.deepseek_v4_1.lora import unwrap_multi_lora_linears
 
         load_ctx = unwrap_multi_lora_linears(model)
     elif is_multi_lora_enabled(args):

@@ -18,7 +18,7 @@ from miles.utils.lora.utils import (
     matches_lora_target,
     targets_expert_leaves,
 )
-from miles_plugins.models.deepseek_v4_1.lora import resolve_deepseek_v41_adapter_targets
+from miles_plugins.models.deepseek_v4_1.lora_targets import resolve_deepseek_v41_adapter_targets
 from miles_plugins.models.inkling.lora import resolve_inkling_adapter_targets
 from miles_plugins.models.kimi_k3.lora import resolve_kimi_k3_adapter_targets
 
