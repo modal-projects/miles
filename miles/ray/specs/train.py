@@ -242,10 +242,6 @@ def _compute_spec_trainer(
 
 
 def raw_multi_lora_needs_eager_module_loading(args) -> bool:
-    """With lazy module loading, the first use of a kernel can synchronize the CUDA context.
-    DeepSeek-V4.1 multi-LoRA runs expert parallelism across nodes with per-rank token counts,
-    so cuBLAS picks first-use grouped-GEMM kernels on some ranks mid-forward, while expert
-    all-to-all kernels are in flight; that synchronization can deadlock every rank."""
     return is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "raw"
 
 

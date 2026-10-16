@@ -1,8 +1,4 @@
-"""Multi-LoRA for DeepSeek-V4.1 on the Miles model definition (``--megatron-to-hf-mode raw``).
-
-Adapters come from Megatron-Bridge's multi-LoRA layers, but target selection, base-weight
-loading and HF export use the V4.1 checkpoint layout directly instead of AutoBridge.
-"""
+"""Multi-LoRA for DeepSeek-V4.1 on the Miles model definition (``--megatron-to-hf-mode raw``)."""
 
 from __future__ import annotations
 
