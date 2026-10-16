@@ -1,4 +1,4 @@
-"""Dimuon-lite math, without Megatron: per-block sign, sqrt(rank) norm, splits, TP sharding."""
+"""Dimuon-lite math without Megatron, covering the block sign, the sqrt(rank) norm, splits and TP sharding."""
 
 import math
 
@@ -77,7 +77,7 @@ def test_padded_rank_stays_zero():
 
 
 def test_fused_qkv_blocks_are_independent():
-    """B of linear_qkv: rows are (groups, q|k|v); each projection gets its own sign and norm."""
+    """B of linear_qkv has rows ordered by query group, and each of q, k and v gets its own sign and norm."""
     torch.manual_seed(0)
     groups, q, kv, r = 4, 32, 8, 8
     split = (q, kv, kv)
@@ -112,7 +112,7 @@ def test_tp_shards_match_unsharded(partition_dim):
 
 
 def test_tp_sharded_gate_up_splits_per_shard():
-    """Gated linear_fc1 B under TP: each shard is [gate_shard; up_shard], gathered as g0,u0,g1,u1."""
+    """Each TP shard of gated linear_fc1 B holds gate rows then up rows, and each is signed separately."""
     torch.manual_seed(0)
     world, ffn_shard, r = 2, 64, 8
     gate = torch.randn(world * ffn_shard, r)
@@ -146,7 +146,7 @@ def test_optimizer_step_size_and_momentum():
     opt = Dimuon([a, b], lr=lr, momentum=beta)
     opt.set_specs({id(a): FactorSpec(rank=rank), id(b): FactorSpec(rank=rank)})
 
-    # step 1 from the standard init: A's gradient is zero, so A must not move
+    # Step 1 from the standard init gives A a zero gradient, so A must not move
     g1 = torch.randn(128, rank)
     a.grad, b.grad = torch.zeros_like(a), g1.clone()
     a0 = a.detach().clone()
@@ -155,7 +155,7 @@ def test_optimizer_step_size_and_momentum():
     step1 = -b.detach().clone()
     assert step1.norm().item() == pytest.approx(lr * rank_scale(rank) * math.sqrt(rank), rel=1e-5)
 
-    # step 2: the direction comes from the EMA beta*m1 + (1-beta)*g2, with m1 = (1-beta)*g1
+    # Step 2 takes its direction from the momentum EMA over g1 and g2
     g2 = torch.randn(128, rank)
     b.grad = g2.clone()
     before = b.detach().clone()

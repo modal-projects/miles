@@ -1,31 +1,19 @@
-"""Dimuon-lite: a per-factor Muon-type optimizer for multi-LoRA slots.
+"""Dimuon-lite, a per-factor Muon-type optimizer for multi-LoRA slots.
 
-Each LoRA factor (A: ``[rank, in]``, B: ``[out, rank]``; packed experts add a
-leading ``[num_local_experts]`` axis) is updated as
+Each LoRA factor gets EMA momentum, a Polar Express matrix sign per matrix block,
+Frobenius normalization to ``sqrt(rank)`` per block, and a step of
+``lr * (rank / 32) ** 0.175``. This matches Tinker Dimuon's measured first update
+for each factor. Tinker's later damping-dependent correction is not reproduced.
 
-    m      <- beta1 * m + (1 - beta1) * g                      (EMA momentum)
-    O      <- polar_express(m, steps=5)                         (per matrix block)
-    O      <- O * sqrt(rank) / ||O||_F                          (per matrix block)
-    param  <- param - lr * (rank / reference_rank)^exponent * O
+B of a fused ``linear_qkv`` splits into q, k and v row blocks per query group, and B
+of a gated ``linear_fc1`` splits into gate and up row blocks, so projections never
+share a direction. A of a fused module is one shared matrix and is signed whole.
 
-which matches the behavior measured on Tinker's Dimuon for each factor's first
-update: Frobenius norm ``sqrt(rank)`` per factor, the ``(r/32)^0.175`` rank
-correction, no shape scale and no weight decay. Tinker's later updates add a
-damping-dependent correction that is not reproduced here.
+TP-sharded factors are all-gathered, signed whole on every TP rank and sliced back.
+Padded rank rows of A and columns of B stay zero because their gradients are zero
+and the iteration preserves zero rows and columns.
 
-Fused projections are split into per-projection blocks before the matrix sign,
-so one projection's gradient never mixes into another's direction: B of a fused
-``linear_qkv`` is split into q/k/v row blocks per query group, and B of a gated
-``linear_fc1`` into gate/up row blocks. A of a fused module is a single matrix
-shared by its projections and is orthogonalized whole.
-
-Tensor-parallel shards are all-gathered, orthogonalized whole on every TP rank,
-and sliced back, so each rank applies the exact update of the unsharded matrix.
-
-Padded rank rows of A and columns of B stay exactly zero: their gradients are
-zero, and the polynomial iteration and scaling preserve zero rows and columns.
-
-The math below is plain torch so it can be tested without Megatron.
+The math is plain torch so it runs without Megatron.
 """
 
 from __future__ import annotations
@@ -70,15 +58,14 @@ def polar_express(x: torch.Tensor, steps: int = NUM_POLAR_STEPS, eps: float = _E
 
 @dataclass(frozen=True)
 class FactorSpec:
-    """How to turn one LoRA factor parameter into Dimuon matrix blocks.
+    """How one LoRA factor parameter maps onto Dimuon matrix blocks.
 
-    ``rank`` is the slot's actual adapter rank (not the padded maximum).
-    ``row_split`` splits rows of the *unsharded* matrix into projection blocks:
-    the rows are viewed as ``(groups, sum(row_split))`` and block ``j`` collects
-    the ``row_split[j]`` rows of every group. ``None`` means one block.
-    ``partition_dim`` is the tensor-parallel shard axis of the trailing 2-D
-    matrix (0 or 1), or ``None`` when the parameter is not TP-sharded.
-    ``batched`` marks packed expert tensors with a leading expert axis.
+    ``rank`` is the slot's actual adapter rank, not the padded maximum.
+    ``row_split`` gives the per-group row sizes of the projection blocks in the
+    unsharded matrix, whose rows read as ``(groups, sum(row_split))``. ``None`` means
+    one block. ``partition_dim`` is the TP shard axis of the trailing 2-D matrix, or
+    ``None`` when the parameter is not TP-sharded. ``batched`` marks packed expert
+    tensors with a leading expert axis.
     """
 
     rank: int
@@ -162,10 +149,10 @@ def factor_direction(
 
 
 class Dimuon(torch.optim.Optimizer):
-    """Dimuon-lite over LoRA factor parameters; every parameter needs a :class:`FactorSpec`.
+    """Dimuon-lite over LoRA factor parameters, each of which needs a ``FactorSpec``.
 
-    Specs are keyed by ``id(param)`` of the tensors this optimizer steps (the FP32
-    masters once Megatron wraps it) and are registered with :meth:`set_specs`."""
+    Specs are keyed by ``id(param)`` of the tensors this optimizer steps, which are the
+    FP32 masters once Megatron wraps it, and are registered with ``set_specs``."""
 
     def __init__(
         self,
@@ -237,7 +224,7 @@ def fused_row_split(module) -> tuple[int, ...] | None:
             return (q, q, kv, kv)
         return (q, kv, kv)
     if name == "linear_fc1" and getattr(config, "gated_linear_unit", False):
-        out = module.adapters[0].linear_out.weight.shape[-2]  # local rows: 2 * ffn_shard
+        out = module.adapters[0].linear_out.weight.shape[-2]  # local rows, twice the ffn shard
         assert out % 2 == 0, f"gated linear_fc1 adapter rows {out} are not even"
         return (out // 2, out // 2)
     return None

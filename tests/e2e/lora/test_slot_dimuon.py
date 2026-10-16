@@ -1,8 +1,8 @@
-"""Dimuon slot optimizer under Megatron: updates match the unsharded reference, padded rank stays
-zero, fused projections are split, and a slot checkpoint resumes the momentum exactly.
+"""Dimuon slot optimizer under Megatron. Updates match the unsharded reference, padded rank
+stays zero, fused projections are split, and a slot checkpoint resumes the momentum exactly.
 
-Runs twice on 2 GPUs: DP=2 (LayerWise shards whole params across ranks) and TP=2 (adapters are
-tensor-parallel sharded; the column-parallel A is sharded on its rank axis)."""
+Runs on 2 GPUs once with DP=2, where LayerWise shards whole params across ranks, and once with
+TP=2, where adapters are tensor-parallel sharded and the column-parallel A is sharded on its rank axis."""
 
 import argparse
 import os
@@ -38,7 +38,7 @@ MAX_RANK, RANK = 8, 4
 # lr is large so each update dwarfs BF16 rounding of the weights it is added to
 DIMUON = dict(type="dimuon", learning_rate=1.0, beta1=0.9, grad_clip_norm=0.0)
 ADAM = dict(learning_rate=3e-4, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)
-HIDDEN, HEADS, GROUPS, KV = 16, 4, 2, 4  # q per group = HEADS // GROUPS * KV = 8; qkv rows = GROUPS * 16
+HIDDEN, HEADS, GROUPS, KV = 16, 4, 2, 4  # Each query group has 8 q rows and 4 rows each of k and v
 QKV_SPLIT = (HEADS // GROUPS * KV, KV, KV)
 FFN = 16
 
@@ -77,8 +77,8 @@ class DimuonModel(MegatronModule):
         self.splits = [QKV_SPLIT, None, (FFN // tp, FFN // tp)]
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-        # Delegate like Megatron's model classes do; the default would see a plain ModuleList and mark
-        # TP-sharded adapters as replicated, so TP rank 1 would silently reload rank 0's shard.
+        # Delegate like Megatron's model classes do. The default treats a plain ModuleList's
+        # TP-sharded adapters as replicated, so TP rank 1 would reload rank 0's shard.
         metadata = dict(metadata or {})
         metadata.setdefault("dp_cp_group", parallel_state.get_data_parallel_group(with_context_parallel=True))
         sharded = {}
@@ -122,9 +122,9 @@ def set_grads(model, slot, step):
         g = torch.sin(torch.arange(full_like.numel(), device=param.device, dtype=torch.float32) * 0.37 + index + step)
         g = g.reshape(full_like.shape)
         if index % 2 == 0:
-            g[RANK:] = 0  # A: padded rank rows
+            g[RANK:] = 0  # padded rank rows of A
         else:
-            g[:, RANK:] = 0  # B: padded rank columns
+            g[:, RANK:] = 0  # padded rank columns of B
         dim, group = tp_info(param)
         local = g if dim is None else g.chunk(dist.get_world_size(group), dim=dim)[dist.get_rank(group)]
         param.main_grad.copy_(local)
@@ -222,7 +222,7 @@ def run_worker(checkpoint_dir, tp):
                 assert torch.count_nonzero(w1[:, RANK:]) == 0, "padded B columns must stay zero"
         print(f"{tag} step {step}: all factors match the unsharded reference", flush=True)
 
-    # fused blocks are normalized separately: each q/k/v (and gate/up) block of B has norm lr*scale*sqrt(rank)
+    # Each q, k and v block of the fused B is normalized on its own to lr * scale * sqrt(rank)
     qkv_b = after[1] - before[1]
     blocks = qkv_b.view(GROUPS, sum(QKV_SPLIT), MAX_RANK).split(QKV_SPLIT, dim=1)
     for block in blocks:

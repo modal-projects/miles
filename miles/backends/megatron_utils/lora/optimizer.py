@@ -24,10 +24,10 @@ from miles.backends.megatron_utils.lora.dimuon import Dimuon, build_factor_specs
 
 logger = logging.getLogger(__name__)
 
-# Per-slot optimizer families; the launch-time optimizer stays Adam (see validate below).
+# Per-slot optimizer families. The launch-time optimizer stays Adam.
 SLOT_OPTIMIZER_FAMILIES = ("adam", "dimuon")
-# Adam hyperparameters dropped when a slot's param groups are rebuilt for Dimuon; Megatron's
-# own group keys (wd_mult, lr_mult, is_expert_parallel, ...) are kept.
+# Adam hyperparameters dropped when a slot's param groups are rebuilt for Dimuon.
+# Megatron's own group keys such as wd_mult and is_expert_parallel are kept.
 _ADAM_GROUP_KEYS = frozenset(
     {"betas", "eps", "weight_decay", "amsgrad", "foreach", "maximize", "capturable", "differentiable", "fused"}
 )
@@ -134,7 +134,7 @@ class SlotOptimizer:
         assert base_optimizers, f"adapter slot {slot} produced no optimizer children"
         init_state_fn = _adam_init_state_fn
         if optimizer == "dimuon":
-            # Same param partition as the Adam children; LayerWise then shards and wraps them alike.
+            # Keep the Adam children's param partition so LayerWise shards and wraps Dimuon alike.
             base_optimizers = [
                 Dimuon([{k: v for k, v in g.items() if k not in _ADAM_GROUP_KEYS} for g in opt.param_groups])
                 for opt in base_optimizers
@@ -148,7 +148,7 @@ class SlotOptimizer:
             model_chunks=list(model),
         )
         if optimizer == "dimuon":
-            # after LayerWise: the FP32 masters it created are what Dimuon steps
+            # Register specs after LayerWise because Dimuon steps the FP32 masters it creates.
             specs = build_factor_specs(list(model), slot)
             for child in self._inner.chained_optimizers:
                 base = getattr(child, "optimizer", child)
@@ -159,7 +159,9 @@ class SlotOptimizer:
             child.grad_stats_parallel_group = None
 
     def apply_params(self, params: dict) -> None:
-        """Per-step hyperparameters; ``params["type"]`` (default ``"adam"``) must match the slot's family."""
+        """Applies per-step hyperparameters to every param group of the slot.
+
+        Raises ValueError when ``params["type"]`` (default adam) is not the slot's family."""
         family = params.get("type", "adam")
         if family != self.family:
             raise ValueError(f"slot {self.slot} uses {self.family!r} but optim_step sent {family!r} params")
