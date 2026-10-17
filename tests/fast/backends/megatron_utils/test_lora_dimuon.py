@@ -1,6 +1,7 @@
 """Dimuon-lite math without Megatron, covering the block sign, the sqrt(rank) norm, splits and TP sharding."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ from miles.backends.megatron_utils.lora.dimuon import (
     Dimuon,
     FactorSpec,
     factor_direction,
+    fused_row_split,
     normalized_sign,
     polar_express,
     rank_scale,
@@ -170,3 +172,20 @@ def test_optimizer_requires_specs():
     p.grad = torch.randn(4, 8)
     with pytest.raises(KeyError):
         Dimuon([p]).step()
+
+
+def _qkv_module(*, attention_output_gate):
+    config = SimpleNamespace(
+        kv_channels=4, num_attention_heads=4, num_query_groups=2, attention_output_gate=attention_output_gate
+    )
+    return SimpleNamespace(
+        base_linear_name="decoder.layers.0.self_attention.linear_qkv", to_wrap=SimpleNamespace(config=config)
+    )
+
+
+def test_qkv_split_has_query_key_and_value_blocks():
+    assert fused_row_split(_qkv_module(attention_output_gate=False)) == (8, 4, 4)
+
+
+def test_gated_attention_keeps_query_and_gate_in_one_block_like_hf_q_proj():
+    assert fused_row_split(_qkv_module(attention_output_gate=True)) == (16, 4, 4)

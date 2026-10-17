@@ -212,8 +212,10 @@ def fused_row_split(module) -> tuple[int, ...] | None:
     """Projection row split for B of a fused ``linear_qkv`` / gated ``linear_fc1``, else ``None``.
 
     q/k/v rows are interleaved per query group (Megatron's layout), so the split is
-    per group. Gate/up rows of a TP shard are ``[gate_shard; up_shard]``, so after
-    gathering the shards the rows read ``[g0; u0; g1; u1; ...]`` and the split is
+    per group. With an attention output gate each group's rows are query then gate,
+    and both stay in one block because HF ``q_proj`` holds query and gate together.
+    Gate/up rows of a TP shard are ``[gate_shard; up_shard]``, so after gathering the
+    shards the rows read ``[g0; u0; g1; u1; ...]`` and the split is
     ``(ffn_shard, ffn_shard)`` per shard."""
     name = module.base_linear_name.rsplit(".", 1)[-1]
     config = module.to_wrap.config
@@ -221,7 +223,7 @@ def fused_row_split(module) -> tuple[int, ...] | None:
         kv = config.kv_channels
         q = config.num_attention_heads // config.num_query_groups * kv
         if getattr(config, "attention_output_gate", False):
-            return (q, q, kv, kv)
+            return (2 * q, kv, kv)
         return (q, kv, kv)
     if name == "linear_fc1" and getattr(config, "gated_linear_unit", False):
         out = module.adapters[0].linear_out.weight.shape[-2]  # local rows, twice the ffn shard
