@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from tests.fast.ray.rollout.conftest import make_args, make_sample
 
@@ -8,6 +10,7 @@ from miles.ray.rollout.rollout_data_conversion import (
     postprocess_rollout_data,
     validate_compact_rollout_ids,
 )
+from miles.utils.dp_schedule import build_dp_schedule
 
 
 class TestComputeDynamicGlobalBatchSize:
@@ -107,3 +110,87 @@ class TestValidateRolloutIdAnnotated:
     def test_compact_singleton_leaf_needs_no_annotation(self):
         """A single-sample leaf at depth >= 2 is unambiguous — no rollout_id required."""
         validate_compact_rollout_ids([[[make_sample(index=0)]]])
+
+
+def _compact_samples(rollout_sizes: list[int]):
+    """Flat samples of rollouts with these sample counts; each rollout shares one rollout_id."""
+    samples = []
+    for rollout_id, size in enumerate(rollout_sizes):
+        for _ in range(size):
+            samples.append(make_sample(index=len(samples), rollout_id=rollout_id))
+    return samples
+
+
+def _parallel_config(dp_size, vpp_size=1, microbatch_group_size_per_vp_stage=None):
+    return {
+        "dp_size": dp_size,
+        "cp_size": 1,
+        "vpp_size": vpp_size,
+        "microbatch_group_size_per_vp_stage": microbatch_group_size_per_vp_stage,
+    }
+
+
+class TestCompactDynamicGlobalBatchSize:
+    def _postprocess(self, rollout_sizes, train_parallel_config):
+        args = make_args(global_batch_size=64, disable_rollout_trim_samples=False, use_dynamic_global_batch_size=True)
+        return postprocess_rollout_data(args, _compact_samples(rollout_sizes), train_parallel_config)
+
+    def test_records_a_rollout_count_without_trimming(self):
+        """Without the metadata, the dynamic global batch size check in convert_samples_to_train_data fails."""
+        out, meta = self._postprocess([1, 2, 1], _parallel_config(dp_size=2))
+        assert meta["dynamic_global_batch_size"] == 3
+        assert len(out) == 4
+
+    def test_keeps_the_most_rollouts_with_an_aligned_sample_count(self):
+        # Sample counts after each rollout: 1, 3, 4, 5. Only 4 splits over 2 DP ranks.
+        _out, meta = self._postprocess([1, 2, 1, 1], _parallel_config(dp_size=2))
+        assert meta["dynamic_global_batch_size"] == 3
+
+    def test_aligns_to_the_vpp_microbatch_group(self):
+        config = _parallel_config(dp_size=2, vpp_size=2, microbatch_group_size_per_vp_stage=2)
+        _out, meta = self._postprocess([1] * 5 + [2], config)
+        assert meta["dynamic_global_batch_size"] == 4
+
+    def test_falls_back_to_all_rollouts_when_no_prefix_aligns(self):
+        _out, meta = self._postprocess([1, 2], _parallel_config(dp_size=4))
+        assert meta["dynamic_global_batch_size"] == 2
+
+    def test_not_recorded_without_dynamic_global_batch_size(self):
+        args = make_args(global_batch_size=2, disable_rollout_trim_samples=False, use_dynamic_global_batch_size=False)
+        out, meta = postprocess_rollout_data(args, _compact_samples([1, 2, 1]), _parallel_config(dp_size=2))
+        assert meta == {}
+        assert len(out) == 4
+
+    def test_dp_schedule_accepts_an_odd_compact_batch(self):
+        """Each sample fills a micro-batch alone, so 5 samples cannot make the 6 micro-batches dp_size=2 needs."""
+        config = _parallel_config(dp_size=2)
+        rollout_sizes = [2, 1, 1, 1]
+        out, meta = self._postprocess(rollout_sizes, config)
+        schedule_args = SimpleNamespace(
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=100,
+            balance_data=False,
+            balance_by_flops=False,
+        )
+        total_lengths = [60] * len(out)
+        rollout_ids = [s.rollout_id for s in out]
+
+        with pytest.raises(AssertionError, match="micro-batches"):
+            build_dp_schedule(
+                schedule_args,
+                config,
+                total_lengths,
+                global_batch_size=len(rollout_sizes),
+                rollout_indices=rollout_ids,
+            )
+
+        partitions, _indices, num_microbatches, num_rollouts = build_dp_schedule(
+            schedule_args,
+            config,
+            total_lengths,
+            global_batch_size=meta["dynamic_global_batch_size"],
+            rollout_indices=rollout_ids,
+        )
+        assert num_rollouts == [3]
+        assert num_microbatches == [2]
+        assert sorted(i for rank in partitions for i in rank) == [0, 1, 2, 3]

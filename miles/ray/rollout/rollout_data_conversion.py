@@ -1,7 +1,9 @@
 import itertools
 import logging
+from collections import Counter
 
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
+from miles.utils.dp_schedule import microbatch_alignment
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,11 @@ def postprocess_rollout_data(args, data, train_parallel_config):
     # Compact rollouts must not be trimmed by sample count; the schedule drops
     # whole trailing rollouts instead.
     is_compact = any(s.rollout_id is not None for s in data)
+
+    if not args.disable_rollout_trim_samples and is_compact and args.use_dynamic_global_batch_size:
+        metadata["dynamic_global_batch_size"] = _compute_compact_dynamic_global_batch_size(
+            data, train_parallel_config=train_parallel_config
+        )
 
     if not args.disable_rollout_trim_samples and not is_compact:
         global_batch_size = args.global_batch_size
@@ -102,3 +109,25 @@ def _compute_dynamic_global_batch_size(args, train_parallel_config, num_samples:
         )
 
     return dynamic_gbs
+
+
+def _compute_compact_dynamic_global_batch_size(data: list[Sample], train_parallel_config) -> int:
+    """Rollouts in the one training step of a compact batch (the DP schedule counts rollouts).
+
+    Keeps the most leading whole rollouts whose sample count is a multiple of the micro-batch
+    alignment: a long sample can fill a micro-batch alone, so an odd count can leave the DP
+    schedule one micro-batch short. Falls back to all rollouts when no prefix aligns.
+    """
+    align = microbatch_alignment(train_parallel_config)
+    sizes = Counter(s.rollout_id if s.rollout_id is not None else s.index for s in data)
+    total = keep = 0
+    for num_rollouts, num_samples in enumerate(sizes.values(), 1):
+        total += num_samples
+        if total % align == 0:
+            keep = num_rollouts
+    if keep != len(sizes):
+        logger.info(
+            f"Compact dynamic global_batch_size: {keep or len(sizes)} of {len(sizes)} rollouts "
+            f"(num_samples={len(data)}, alignment={align})"
+        )
+    return keep or len(sizes)

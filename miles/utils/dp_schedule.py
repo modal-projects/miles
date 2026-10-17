@@ -24,6 +24,13 @@ def has_full_schedule_config(train_parallel_config: dict | None) -> bool:
     return all(key in train_parallel_config for key in SCHEDULE_CONFIG_KEYS)
 
 
+def microbatch_alignment(train_parallel_config: dict) -> int:
+    """Each step's micro-batch count must be a multiple of this: dp_size, times the group size under VPP."""
+    vpp_size = train_parallel_config.get("vpp_size") or 1
+    mb_group = train_parallel_config.get("microbatch_group_size_per_vp_stage")
+    return train_parallel_config["dp_size"] * (mb_group if vpp_size > 1 else 1)
+
+
 def _calculate_workloads(step_lengths, args):
     return [calculate_fwd_flops([sl], args) for sl in step_lengths]
 
@@ -44,7 +51,7 @@ def build_dp_schedule(
     mb_group = train_parallel_config["microbatch_group_size_per_vp_stage"]
 
     # micro-batch size per step must divide evenly across dp and vpp
-    align_to = dp_size * (mb_group if vpp_size > 1 else 1)
+    align_to = microbatch_alignment(train_parallel_config)
 
     max_per_bin = None
     if args.use_dynamic_batch_size:
