@@ -33,6 +33,7 @@ from miles.utils.disk_delta import (
     load_delta_lineage_checksums,
     make_tensor_reader,
     overwrite_encode,
+    prepare_delta_directory,
 )
 from miles.utils.distributed_utils import get_gloo_group
 
@@ -188,7 +189,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
             if self._view_protocols:
                 self._capture_view_baselines(iter_buckets)
             else:
-                self._capture_baseline(iter_buckets)
+                self._capture_baseline(iter_buckets, base_version=weight_version - 1)
             self._baseline_captured = True
             return False
         if self._view_protocols:
@@ -324,25 +325,24 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         for name in names:
             self._view_protocols[name]._record_metrics(weight_version)
 
-    def _capture_baseline(self, iter_buckets) -> None:
-        """Capture the baseline snapshot the first delta diffs against (no publish), and clear any
-        stale stream from a prior run. Seeds from hf_checkpoint — what each host materializes its
+    def _capture_baseline(self, iter_buckets, *, base_version: int) -> None:
+        """Capture the baseline snapshot the first delta diffs against (no publish). Keeps the
+        published versions through ``base_version`` (the resume point) and deletes newer ones from
+        an abandoned attempt. Seeds from hf_checkpoint — what each host materializes its
         base from — so the invariant ``snapshot == engine base`` holds even where the megatron->HF
         round-trip trims vocab-padding rows (embed/lm_head). Every emitted tensor must have the same
-        layout as that canonical checkpoint because deltas operate on raw bytes. pull_weights(0)
+        layout as that canonical checkpoint because deltas operate on raw bytes. pull_weights(base_version)
         makes each host materialize its local base now, overlapped with the snapshot gather, so the
         first real sync only pays the delta apply."""
-        # a prior run's versions would apply against the wrong base; start the dir clean
         pulls = []
         if dist.get_rank() == 0:
-            shutil.rmtree(self.delta_dir, ignore_errors=True)
-            os.makedirs(self.delta_dir, exist_ok=True)
+            prepare_delta_directory(self.delta_dir, base_version=base_version)
             if self._post_write_hook is not None:
                 self._post_write_hook(self.args, self.delta_dir, list(self.rollout_engines))
             pulls = [
                 async_utils.submit(
                     client.pull_weights(
-                        target_version=0,
+                        target_version=base_version,
                         local_checkpoint_dir=self.args.update_weight_local_checkpoint_dir,
                         source_dir=self.args.update_weight_disk_dir,
                     )
@@ -403,7 +403,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
                         async_utils.submit(
                             client.update_weights_from_disk(
                                 model_path=self.args.update_weight_local_checkpoint_dir,
-                                weight_version="0",
+                                weight_version=str(base_version),
                             )
                         )
                         for client in self.rollout_engines
@@ -412,7 +412,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
                 check_weight_sync_results(results, is_lora=False)
             else:
                 # TODO: temporarily weaken checkers; should enhance and fix related logics
-                _update_weight_version_if_unset(self.rollout_engines, "0")
+                _update_weight_version_if_unset(self.rollout_engines, str(base_version))
             logger.info(
                 "[disk delta] captured baseline snapshot of %d tensors from %s",
                 len(self._snapshot),
