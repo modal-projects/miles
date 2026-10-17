@@ -607,3 +607,33 @@ def test_a_view_that_fails_to_drain_does_not_hold_back_a_drained_sibling() -> No
 
     hook.assert_called_once_with(Namespace(), {"fp8": children["fp8"]._version_dir}, [])
     children["nvfp4"]._write_delta_files.assert_not_called()
+
+
+@pytest.mark.parametrize("base_version", [0, 3])
+def test_baseline_prepares_directory_at_updater_version(tmp_path, base_version):
+    protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    protocol.args = Namespace(check_weight_update_equal=False, hf_checkpoint=str(tmp_path))
+    protocol.delta_dir = str(tmp_path)
+    protocol._baseline_captured = False
+    protocol._view_protocols = {}
+    protocol._post_write_hook = MagicMock()
+    protocol.rollout_engines = []
+    protocol.is_sender = False
+    protocol._snapshot = {}
+    retained = tmp_path / "weight_v000003"
+    retained.mkdir()
+    (retained / "model.safetensors.index.json").write_text("{}")
+    suffix = tmp_path / "weight_v000004"
+    suffix.mkdir()
+    with (
+        patch(f"{_DELTA_MODULE}.dist.get_rank", return_value=0),
+        patch(f"{_DELTA_MODULE}.dist.get_world_size", return_value=1),
+        patch(f"{_DELTA_MODULE}.dist.barrier"),
+        patch(f"{_DELTA_MODULE}.dist.all_gather_object"),
+        patch(f"{_DELTA_MODULE}.get_gloo_group"),
+        patch(f"{_DELTA_MODULE}._update_weight_version_if_unset"),
+    ):
+        assert protocol.begin_sync(base_version + 1, lambda **kwargs: iter(())) is False
+    assert retained.exists() == (base_version > 0)
+    assert not suffix.exists()
+    protocol._post_write_hook.assert_called_once_with(protocol.args, str(tmp_path), [])
