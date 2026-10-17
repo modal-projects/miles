@@ -104,6 +104,15 @@ def _kimi_k3_targets(config):
     return attention, tuple(mlp)
 
 
+def _deepseek_v41_targets(config):
+    # wo_a is a grouped einsum weight, not a linear module, so it takes no adapter.
+    attention = _prefix_paths("attn", "wq_a", "wkv", "wq_b", "wo_b")
+    mlp = _prefix_paths("ffn.experts.*", "w1", "w2", "w3")
+    if config["n_shared_experts"]:
+        mlp += _prefix_paths("ffn.shared_experts", "w1", "w2", "w3")
+    return attention, mlp
+
+
 def _glm4_moe_targets(config):
     return _QKVO_ATTENTION, _deepseek_mlp_targets(config)
 
@@ -203,6 +212,7 @@ _HF_LORA_MODELS = {
     "deepseek_v2": _HfLoraModelSpec(_deepseek_targets),
     "deepseek_v3": _HfLoraModelSpec(_deepseek_targets),
     "deepseek_v32": _HfLoraModelSpec(_deepseek_targets),
+    "deepseek_v41": _HfLoraModelSpec(_deepseek_v41_targets, layer_prefix="layers.*", unembed="head"),
     "kimi_k2": _HfLoraModelSpec(_kimi_targets),
     "kimi_k25": _HfLoraModelSpec(
         _kimi_targets,

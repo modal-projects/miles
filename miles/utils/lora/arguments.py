@@ -12,7 +12,13 @@ from miles.utils.lora.hf_lora_targets import (
     parse_lora_targets,
     resolve_hf_lora_targets,
 )
-from miles.utils.lora.utils import is_lora_enabled, matches_lora_target, targets_expert_leaves
+from miles.utils.lora.utils import (
+    RAW_MULTI_LORA_MODEL_TYPES,
+    is_lora_enabled,
+    matches_lora_target,
+    targets_expert_leaves,
+)
+from miles_plugins.models.deepseek_v4_1.lora_targets import resolve_deepseek_v41_adapter_targets
 from miles_plugins.models.inkling.lora import resolve_inkling_adapter_targets
 from miles_plugins.models.kimi_k3.lora import resolve_kimi_k3_adapter_targets
 
@@ -213,6 +219,8 @@ def _resolve_lora_targets(args, hf_config):
                 canonical=args.lora_type == "canonical_lora",
                 experts_shared_outer_loras=args.experts_shared_outer_loras,
             )
+        elif hf_config.model_type in RAW_MULTI_LORA_MODEL_TYPES:
+            adapter_targets = resolve_deepseek_v41_adapter_targets(hf_targets)
     return hf_targets, adapter_targets
 
 
@@ -233,10 +241,14 @@ def validate_multi_lora_args(args: Any) -> None:
         "Multi-LoRA requires --pipeline-model-parallel-size 1: a pipelined schedule would "
         "recompute activations against a later micro-batch's adapter routing."
     )
-    # Per-slot token spans assume sequence-major contiguous sample packing, which only 'thd' provides.
-    assert getattr(args, "qkv_format", "thd") == "thd", (
-        "Multi-LoRA requires --qkv-format thd: per-adapter token spans assume the "
-        f"micro-batch packs samples contiguously, which bshd does not (got {args.qkv_format!r})."
+    # Per-slot token spans assume sequence-major contiguous sample packing: thd, or bshd with one sample.
+    qkv_format = getattr(args, "qkv_format", "thd")
+    single_sample_bshd = (
+        qkv_format == "bshd" and args.micro_batch_size == 1 and not getattr(args, "use_dynamic_batch_size", False)
+    )
+    assert qkv_format == "thd" or single_sample_bshd, (
+        "Multi-LoRA requires --qkv-format thd, or bshd with --micro-batch-size 1 and no dynamic batch size: "
+        f"per-adapter token spans assume the micro-batch packs samples contiguously (got {qkv_format!r})."
     )
     assert not getattr(args, "experts_shared_outer_loras", False), (
         "Multi-LoRA does not support --experts-shared-outer-loras; MoE expert adapters "
@@ -271,4 +283,7 @@ def validate_multi_lora_args(args: Any) -> None:
         "Multi-LoRA requires --optimizer adam: the per-slot SlotOptimizer only "
         f"implements Adam semantics; got --optimizer {args.optimizer}"
     )
-    args.megatron_to_hf_mode = "bridge"
+    if args.megatron_to_hf_mode != "raw" or load_hf_config(args.hf_checkpoint).model_type not in (
+        RAW_MULTI_LORA_MODEL_TYPES
+    ):
+        args.megatron_to_hf_mode = "bridge"
