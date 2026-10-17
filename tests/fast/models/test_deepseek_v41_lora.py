@@ -140,19 +140,6 @@ def test_export_names_and_shapes_follow_the_checkpoint():
     assert exported["layers.0.attn.wq_a.lora_A.weight"][0, 0] == 1000
 
 
-def test_export_splits_fused_shared_expert_fc1():
-    model = _model(1)
-    fc1 = model.module.module.decoder.layers[0].mlp.shared_experts.linear_fc1.adapters[0]
-    exported = dict(export_deepseek_v41_multi_lora([model], AdapterSpec(slot=0, rank=4, alpha=8.0), gather=_no_tp))
-
-    w1_b, w3_b = fc1.linear_out.weight.detach().chunk(2)
-    torch.testing.assert_close(exported["layers.0.ffn.shared_experts.w1.lora_B.weight"], w1_b)
-    torch.testing.assert_close(exported["layers.0.ffn.shared_experts.w3.lora_B.weight"], w3_b)
-    lora_a = fc1.linear_in.weight.detach()
-    torch.testing.assert_close(exported["layers.0.ffn.shared_experts.w1.lora_A.weight"], lora_a)
-    torch.testing.assert_close(exported["layers.0.ffn.shared_experts.w3.lora_A.weight"], lora_a)
-
-
 def test_export_gathers_tp_shards_along_their_partition_dim():
     """Two TP ranks hold [w1_r; w3_r] each; a plain concat would interleave w1 and w3 rows."""
 
@@ -164,14 +151,20 @@ def test_export_gathers_tp_shards_along_their_partition_dim():
     # column-parallel lora_A is sharded on its rank dim, so two ranks of 4 make max rank 8
     exported = dict(export_deepseek_v41_multi_lora([model], AdapterSpec(slot=0, rank=8, alpha=8.0), gather=two_ranks))
 
-    local_b = layer.mlp.shared_experts.linear_fc1.adapters[0].linear_out.weight.detach()
-    w1_local, w3_local = local_b.chunk(2)
+    fc1 = layer.mlp.shared_experts.linear_fc1.adapters[0]
+    w1_local, w3_local = fc1.linear_out.weight.detach().chunk(2)
     torch.testing.assert_close(
         exported["layers.0.ffn.shared_experts.w1.lora_B.weight"], torch.cat([w1_local, w1_local + 0.5])
     )
     torch.testing.assert_close(
         exported["layers.0.ffn.shared_experts.w3.lora_B.weight"], torch.cat([w3_local, w3_local + 0.5])
     )
+    # w1 and w3 share the fused adapter's lora_A, gathered along its rank dim
+    lora_a = fc1.linear_in.weight.detach()
+    for leaf in ("w1", "w3"):
+        torch.testing.assert_close(
+            exported[f"layers.0.ffn.shared_experts.{leaf}.lora_A.weight"], torch.cat([lora_a, lora_a + 0.5])
+        )
     # replicated (wq_a), column (wq_b: rank-sharded A, output-sharded B), row (wo_b: input-sharded A)
     assert exported["layers.0.attn.wq_a.lora_A.weight"].shape == (4, 8)
     assert exported["layers.0.attn.wq_b.lora_A.weight"].shape == (8, 5)

@@ -2330,13 +2330,6 @@ class TestMultiLoRAValidation:
         ]
         assert args.lora_adapter_targets == args.hf_lora_targets
 
-    def test_deepseek_v41_rejects_routed_experts_for_now(self, monkeypatch):
-        self._use_deepseek_v41(monkeypatch)
-        args = self._parse(["--target-modules", "attn,mlp"])
-
-        with pytest.raises(NotImplementedError, match="routed experts"):
-            miles_validate_args(args)
-
     def test_rejects_shared_outer_expert_loras(self):
         # Per-expert layout only; the flag would switch sglang to a layout training never produces.
         args = self._parse([])

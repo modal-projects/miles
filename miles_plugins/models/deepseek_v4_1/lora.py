@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Sequence
 from contextlib import contextmanager
 from types import MethodType
@@ -33,12 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 def apply_deepseek_v41_multi_lora(model, args):
-    if os.environ.get("CUDA_MODULE_LOADING") != "EAGER":
-        logger.warning(
-            "CUDA_MODULE_LOADING=%s: lazy kernel loading can deadlock cross-node expert all-to-all; "
-            "launch DeepSeek-V4.1 multi-LoRA trainers with CUDA_MODULE_LOADING=EAGER",
-            os.environ.get("CUDA_MODULE_LOADING"),
-        )
     targets = deepseek_v41_megatron_targets(args.hf_lora_targets)
     lora = create_multi_lora_instance(args, target_modules=targets)
     model = lora(model, training=True)
