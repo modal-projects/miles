@@ -10,7 +10,6 @@ from tests.fast.rollout.inference_rollout.conftest import (
 )
 
 import miles.rollout.inference_rollout.inference_rollout_common as inference_rollout_common
-from miles.rollout import sglang_rollout
 from miles.rollout.base_types import (
     GenerateFnInput,
     GenerateFnOutput,
@@ -25,12 +24,12 @@ from miles.utils.types import Sample
 
 @pytest.mark.parametrize("survivors", [0, 1, 7, 8])
 @pytest.mark.parametrize("retain", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_group_reward_sees_only_retained_trajectories(monkeypatch, survivors, retain, legacy):
-    async def generate(_state, sample, *args, **kwargs):
+async def test_group_reward_sees_only_retained_trajectories(survivors, retain):
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        sample = input.sample
         sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
         sample.response = "answer" if sample.index < survivors else ""
-        return sample
+        return GenerateFnOutput(samples=sample)
 
     state = make_state(generate)
     state.args.keep_partial_groups_on_abort = retain
@@ -42,13 +41,8 @@ async def test_group_reward_sees_only_retained_trajectories(monkeypatch, survivo
         scored.append(list(samples))
         return [float(sample.index) for sample in samples]
 
-    module = sglang_rollout if legacy else inference_rollout_common
-    monkeypatch.setattr(module, "generate_and_rm", generate)
-    if legacy:
-        monkeypatch.setattr(module, "GenerateState", lambda args: state)
-
     with function_registry.temporary(state.args.custom_rm_path, score):
-        result = await module.generate_and_rm_group(state.args if legacy else state, sources, {})
+        result = await inference_rollout_common.generate_and_rm_group(state, sources, {})
 
     expected = sources[:survivors] if retain else sources
     assert scored == ([expected] if expected else [])
