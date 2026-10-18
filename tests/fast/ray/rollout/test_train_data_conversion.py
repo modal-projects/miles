@@ -589,6 +589,35 @@ class TestPostProcessRewards:
 
         assert processed == pytest.approx([-1.0, -2.0, 1.0, 2.0])
 
+    @pytest.mark.parametrize("grpo_std_normalization", [False, True])
+    def test_partial_groups_normalize_survivors_and_keep_singletons(self, grpo_std_normalization):
+        args = make_args(keep_partial_groups_on_abort=True, grpo_std_normalization=grpo_std_normalization)
+        samples = [
+            make_sample(group_index=0, index=0, reward=0.0),
+            make_sample(group_index=0, index=1, reward=2.0),
+            make_sample(group_index=1, index=2, reward=10.0),
+        ]
+
+        raw, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
+        scale = 2**0.5 + 1e-6 if grpo_std_normalization else 1.0
+        assert raw == [0.0, 2.0, 10.0]
+        assert processed == pytest.approx([-1.0 / scale, 1.0 / scale, 0.0])
+
+    @pytest.mark.parametrize("prompt_group_sizes", [None, [2, 1]])
+    def test_partial_groups_require_prompt_boundaries(self, prompt_group_sizes):
+        args = make_args(keep_partial_groups_on_abort=True)
+        samples = [make_sample(group_index=None, index=i, reward=float(i)) for i in range(3)]
+
+        if prompt_group_sizes is None:
+            with pytest.raises(ValueError, match="requires group_index or explicit prompt_group_sizes"):
+                _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+        else:
+            _, processed = _post_process_rewards(
+                args, samples, custom_reward_post_process_func=None, prompt_group_sizes=prompt_group_sizes
+            )
+            assert processed == pytest.approx([-0.5, 0.5, 0.0])
+
     @pytest.mark.parametrize(
         ("rewards", "expected"),
         [

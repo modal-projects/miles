@@ -209,6 +209,29 @@ Staleness control decides which of those groups training is allowed to see:
 | `--max-weight-staleness` | Maximum gap between a group's oldest weight version and the current engine version. Unset by default, which disables the filter |
 | `--async-unused-samples-handler` | What happens to a group training does not use, either aborted or too stale. The default `drop` discards it; `retry` recycles its prompts into the data source for regeneration. Dynamic-filter rejects are always dropped |
 
+### Retaining partially aborted groups
+
+By default, one aborted trajectory rejects its entire prompt group. Opt in with
+`--keep-partial-groups-on-abort --use-dynamic-global-batch-size` to retain the other
+trajectories. This applies to synchronous and fully asynchronous rollout. The
+existing dynamic-batching prerequisites still apply.
+
+Any nonempty survivor group, including a singleton, proceeds through the remaining
+filters. Group reward evaluation (`--group-rm`) receives only survivors; custom
+group reward functions must accept variable-sized groups. Reward normalization uses
+the retained trajectories and their `group_index` (or explicit prompt boundaries).
+The generate function must currently return a `Sample`, not a list, and leave
+`rollout_id` unset. Compact-output retention is not supported.
+
+The collector still requests `rollout_batch_size` accepted prompt groups, not extra
+trajectories to refill the original global batch size. Training uses the resulting
+dynamic batch size, subject to the backend's existing alignment requirements.
+
+In fully async mode, retaining a partial group does not retry its missing members.
+An entirely aborted group follows `--async-unused-samples-handler`. If a retained
+group becomes stale before consumption, that same handler applies to its original
+input group. Missing-reward and dynamic-filter rejections remain direct drops.
+
 When those knobs are not enough, `--custom-async-data-buffer-path` replaces the buffer
 itself. This is a larger step than setting any flag above: your `DataBuffer` subclass
 takes over the full interface and therefore every group-level decision, and the flags in

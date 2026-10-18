@@ -11,6 +11,7 @@ from miles.rollout.fully_async_data_buffer import (
     DataBufferInput,
     DefaultMultiDataBuffer,
 )
+from miles.utils.function_registry import function_registry
 
 
 class _RecordingBuffer(DataBuffer):
@@ -90,6 +91,7 @@ def _make_args() -> Namespace:
         async_data_buffer_capacity_factor=1.0,
         custom_async_data_buffer_path_per_model=None,
         dynamic_sampling_filter_path=None,
+        keep_partial_groups_on_abort=False,
         max_weight_staleness=None,
         megatron_config=encode_megatron_config("solver", "verifier"),
         reward_key=None,
@@ -145,6 +147,7 @@ def _make_single_policy_args(**overrides) -> Namespace:
     defaults = dict(
         async_data_buffer_capacity_factor=1000.0,
         dynamic_sampling_filter_path=None,
+        keep_partial_groups_on_abort=False,
         enable_sample_ownership_checker=False,
         max_weight_staleness=None,
         reward_key=None,
@@ -194,6 +197,66 @@ def _make_buffer(**overrides) -> _BufferUnderTest:
         )
     )
     return _BufferUnderTest(buffer=buffer, unused=unused)
+
+
+@pytest.mark.parametrize("survivors", [0, 1, 7, 8])
+async def test_partial_retention_admits_nonempty_groups_without_retry(survivors):
+    under_test = _make_buffer(keep_partial_groups_on_abort=True)
+    group = [
+        Sample(
+            index=i,
+            status=Sample.Status.COMPLETED if i < survivors else Sample.Status.ABORTED,
+            reward=float(i) if i < survivors else None,
+        )
+        for i in range(8)
+    ]
+
+    await _put(under_test.buffer, group)
+
+    if survivors:
+        entry = await _get_one(under_test.buffer)
+        assert entry.group == group[:survivors]
+        assert entry.prompt_group is group
+        assert under_test.unused == []
+    else:
+        assert under_test.buffer.get_metrics()["rollout/fully_async/queue_size"] == 0
+        assert under_test.unused == [(group, UnusedReason.ABORTED)]
+
+
+async def test_partial_retention_precedes_missing_reward_and_dynamic_filters():
+    seen = []
+
+    def keep(args, group, **kwargs):
+        seen.append(list(group))
+        return DynamicFilterOutput(keep=True)
+
+    with function_registry.temporary("test:retain_survivors", keep):
+        under_test = _make_buffer(
+            keep_partial_groups_on_abort=True, dynamic_sampling_filter_path="test:retain_survivors"
+        )
+    group = _make_finished_group(1)
+    group[-1].status = Sample.Status.ABORTED
+    group[-1].reward = None
+
+    await _put(under_test.buffer, group)
+
+    assert seen == [group[:1]]
+    assert (await _get_one(under_test.buffer)).group == group[:1]
+    assert under_test.unused == []
+
+
+async def test_retained_group_with_missing_reward_is_still_dropped():
+    under_test = _make_buffer(keep_partial_groups_on_abort=True)
+    group = _make_finished_group(1)
+    group[0].reward = None
+    group[1].status = Sample.Status.ABORTED
+
+    await _put(under_test.buffer, group)
+
+    metrics = under_test.buffer.get_metrics()
+    assert metrics["rollout/fully_async/queue_size"] == 0
+    assert metrics["rollout/dynamic_filter/drop_group_has_missing_reward"] == 1
+    assert under_test.unused == []
 
 
 async def _put(buffer: DataBuffer, group: Group) -> None:

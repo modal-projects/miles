@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from tests.fast.rollout.inference_rollout.conftest import (
     StampRecordingGenerate,
     make_eval_args,
@@ -9,6 +10,7 @@ from tests.fast.rollout.inference_rollout.conftest import (
 )
 
 import miles.rollout.inference_rollout.inference_rollout_common as inference_rollout_common
+from miles.rollout import sglang_rollout
 from miles.rollout.base_types import (
     GenerateFnInput,
     GenerateFnOutput,
@@ -17,6 +19,65 @@ from miles.rollout.base_types import (
     RolloutFnTrainInput,
 )
 from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
+from miles.utils.function_registry import function_registry
+from miles.utils.types import Sample
+
+
+@pytest.mark.parametrize("survivors", [0, 1, 7, 8])
+@pytest.mark.parametrize("retain", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_group_reward_sees_only_retained_trajectories(monkeypatch, survivors, retain, legacy):
+    async def generate(_state, sample, *args, **kwargs):
+        sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
+        sample.response = "answer" if sample.index < survivors else ""
+        return sample
+
+    state = make_state(generate)
+    state.args.keep_partial_groups_on_abort = retain
+    state.args.custom_rm_path = "test:partial_group_reward"
+    sources = [Sample(index=i, prompt="prompt") for i in range(8)]
+    scored = []
+
+    async def score(args, samples):
+        scored.append(list(samples))
+        return [float(sample.index) for sample in samples]
+
+    module = sglang_rollout if legacy else inference_rollout_common
+    monkeypatch.setattr(module, "generate_and_rm", generate)
+    if legacy:
+        monkeypatch.setattr(module, "GenerateState", lambda args: state)
+
+    with function_registry.temporary(state.args.custom_rm_path, score):
+        result = await module.generate_and_rm_group(state.args if legacy else state, sources, {})
+
+    expected = sources[:survivors] if retain else sources
+    assert scored == ([expected] if expected else [])
+    assert result == sources
+    assert all(sample.reward is None for sample in result if sample not in expected)
+
+
+async def test_retention_does_not_recompute_independent_rewards(monkeypatch):
+    async def generate(input):
+        sample = input.sample
+        sample.status = Sample.Status.COMPLETED if sample.index == 0 else Sample.Status.ABORTED
+        sample.reward = 1.0 if sample.index == 0 else None
+        return GenerateFnOutput(samples=sample)
+
+    state = make_state(generate)
+    state.args.keep_partial_groups_on_abort = True
+    state.args.group_rm = False
+
+    async def unexpected_reward(*args, **kwargs):
+        pytest.fail("The generator already supplied the independent reward")
+
+    monkeypatch.setattr(inference_rollout_common, "async_rm", unexpected_reward)
+    monkeypatch.setattr(inference_rollout_common, "batched_async_rm", unexpected_reward)
+
+    result = await inference_rollout_common.generate_and_rm_group(
+        state, [Sample(index=0, prompt="prompt"), Sample(index=1, prompt="prompt")], {}
+    )
+
+    assert [sample.reward for sample in result] == [1.0, None]
 
 
 def test_inference_rollout_fn_exposes_the_constructor_input(monkeypatch) -> None:
