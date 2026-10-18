@@ -887,6 +887,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--keep-partial-groups-on-abort",
+                action="store_true",
+                help=(
+                    "Retain non-aborted trajectories from partially aborted prompt groups in synchronous and "
+                    "fully async rollout. Requires --use-dynamic-global-batch-size. "
+                    "Only non-compact outputs (one Sample per trajectory) are supported."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-submission-granularity",
                 type=str,
                 choices=["group", "sample"],
@@ -969,15 +978,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "(default) discards the group; retry recycles its prompts into the data "
                     "source for regeneration. Groups rejected by "
                     "--dynamic-sampling-filter-path are always dropped."
-                ),
-            )
-            parser.add_argument(
-                "--keep-partial-groups-on-abort",
-                action="store_true",
-                help=(
-                    "Retain non-aborted trajectories from partially aborted prompt groups in synchronous and "
-                    "fully async rollout. Requires --use-dynamic-global-batch-size. "
-                    "Only non-compact outputs (one Sample per trajectory) are supported."
                 ),
             )
             parser.add_argument(
