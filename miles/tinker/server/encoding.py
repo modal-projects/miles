@@ -9,8 +9,8 @@ import pydantic
 
 from miles.tinker.core.input_validation import validate_save_options
 from miles.tinker.core.types import LOSS_INPUT_KEYS, UserInputError
-from tinker import types as tinker_types
 from miles.tinker.tinker_compat_utils import MASK_LOGPROB
+from tinker import types as tinker_types
 
 # materialized at the boundary so core and the executor can require every key
 ADAM_PARAM_DEFAULTS = tinker_types.AdamParams().model_dump()
