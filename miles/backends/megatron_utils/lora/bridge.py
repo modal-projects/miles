@@ -153,9 +153,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.sequence_parallel = args.sequence_parallel
     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     provider.context_parallel_size = args.context_parallel_size
-    provider.cp_comm_type = (
-        args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type
-    )
+    provider.cp_comm_type = args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type
     provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
     provider.recompute_granularity = args.recompute_granularity
     provider.recompute_method = args.recompute_method
