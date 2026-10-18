@@ -9,6 +9,7 @@ from miles.ray.rollout.rollout_data_conversion import (
     postprocess_rollout_data,
     validate_compact_rollout_ids,
 )
+from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_scheduled_raw
 
 
 class TestComputeDynamicGlobalBatchSize:
@@ -38,6 +39,42 @@ class TestComputeDynamicGlobalBatchSize:
 
 
 class TestPostprocessRolloutData:
+    @pytest.mark.parametrize("chunk_counts", [[3], [3, 1, 2], [1, 1, 1]])
+    @pytest.mark.parametrize("disable_rollout_trim_samples", [False, True])
+    def test_dynamic_compact_batch_counts_trajectories_and_schedules_every_chunk(
+        self, chunk_counts, disable_rollout_trim_samples
+    ):
+        args = make_args(
+            use_dynamic_global_batch_size=True,
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=32,
+            global_batch_size=8,
+            balance_by_flops=False,
+            disable_rollout_trim_samples=disable_rollout_trim_samples,
+        )
+        parallel = make_train_parallel_config(
+            dp_size=2, microbatch_group_size_per_vp_stage=1, supports_precomputed_schedule=True
+        )
+        trajectories = [
+            [make_sample(index=rid, rollout_id=rid, reward=float(rid)) for _ in range(chunks)]
+            for rid, chunks in enumerate(chunk_counts)
+        ]
+
+        samples, metadata = postprocess_rollout_data(args, [trajectories], parallel)
+        data = convert_samples_to_train_data(
+            args,
+            samples,
+            metadata,
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=parallel)
+
+        assert metadata["dynamic_global_batch_size"] == len(chunk_counts)
+        assert len(samples) == sum(chunk_counts)
+        assert sorted(pos for shard in shards for pos in shard["partition"]) == list(range(sum(chunk_counts)))
+        assert all(shard["num_rollouts"] == [len(chunk_counts)] for shard in shards)
+
     def test_aligned_input_passes_through_unchanged(self):
         """Happy path: len(data) % global_batch_size == 0 → no trim, no metadata."""
         args = make_args(global_batch_size=4, disable_rollout_trim_samples=False, use_dynamic_global_batch_size=False)
