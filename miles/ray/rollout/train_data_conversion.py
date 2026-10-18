@@ -371,6 +371,9 @@ def split_train_data_by_dp(
     if can_precompute_dp_schedule(args, data, train_parallel_config):
         shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
     else:
+        rollout_ids = data.get("rollout_ids", [])
+        if args.use_dynamic_global_batch_size and len(set(rollout_ids)) != len(rollout_ids):
+            raise ValueError("Dynamic batches with multiple samples per trajectory require rollout-side DP scheduling")
         shards = split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config.dp_size)
     return shards
 

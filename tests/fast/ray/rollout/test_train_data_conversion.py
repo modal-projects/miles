@@ -782,6 +782,13 @@ class TestPostProcessRewardsProperties:
 
 
 class TestSplitTrainDataByDp:
+    def test_dynamic_compact_batch_cannot_fall_back_to_row_count_scheduling(self):
+        args = make_args(use_dynamic_global_batch_size=True)
+        data = {"rollout_ids": [0, 0, 1], "dynamic_global_batch_size": 2}
+
+        with pytest.raises(ValueError, match="require rollout-side DP scheduling"):
+            split_train_data_by_dp(args, data, train_parallel_config=make_train_parallel_config())
+
     def test_strided_partition_when_balance_data_off(self):
         args = make_args(balance_data=False)
         data = {

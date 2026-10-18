@@ -24,16 +24,18 @@ def postprocess_rollout_data(
     # whole trailing rollouts instead.
     is_compact = any(s.rollout_id is not None for s in data)
 
-    if not is_compact:
-        global_batch_size = args.global_batch_size
-        if args.use_dynamic_global_batch_size:
+    global_batch_size = args.global_batch_size
+    if args.use_dynamic_global_batch_size:
+        if is_compact:
+            global_batch_size = len({s.rollout_id if s.rollout_id is not None else s.index for s in data})
+        else:
             logger.info(f"Collected {len(data)} samples from rollout to train with dynamic global batch size")
-            dynamic_global_batch_size = _compute_dynamic_global_batch_size(
+            global_batch_size = _compute_dynamic_global_batch_size(
                 args, train_parallel_config=train_parallel_config, num_samples=len(data)
             )
-            metadata["dynamic_global_batch_size"] = dynamic_global_batch_size
-            global_batch_size = dynamic_global_batch_size
+        metadata["dynamic_global_batch_size"] = global_batch_size
 
+    if not is_compact:
         if not args.disable_rollout_trim_samples and len(data) % global_batch_size != 0:
             trim_len = (len(data) // global_batch_size) * global_batch_size
             if trim_len == 0:
