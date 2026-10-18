@@ -67,8 +67,11 @@ def test_retention_does_not_replace_reward_or_status_filters():
     assert retain_non_aborted_trajectories(group) == group
 
 
-def test_empty_survivor_group_is_rejected_as_aborted():
-    assert apply_aborted_filter(Namespace(), []) == FilterOutput(keep=False, reason="group_has_aborted")
+@pytest.mark.parametrize("retain", [False, True])
+def test_empty_survivor_group_is_rejected_as_aborted(retain):
+    output = apply_aborted_filter(Namespace(keep_partial_groups_on_abort=retain), [])
+    assert output.keep is not retain
+    assert output.reason == ("group_has_aborted" if retain else None)
 
 
 @pytest.mark.parametrize(

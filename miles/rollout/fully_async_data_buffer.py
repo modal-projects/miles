@@ -86,6 +86,7 @@ class DataBufferConstructorInput:
 class DataBufferInput:
     prompt_group: list[Sample]  # resubmittable, for recycling
     group: Group  # finished samples
+    aborted_sample_indices: list[int] | None = None
 
 
 MULTI_POLICY_CHECKPOINT_UNSUPPORTED = "multi-policy rollout state is not checkpointed"
@@ -190,7 +191,15 @@ class DefaultDataBuffer(DataBuffer):
 
     def _preput_filter(self, input: DataBufferInput) -> bool:
         if self._args.keep_partial_groups_on_abort:
-            input.group = retain_non_aborted_trajectories(input.group)
+            retained = retain_non_aborted_trajectories(input.group)
+            if self._args.enable_sample_ownership_checker:
+                retained_ids = {id(sample) for sample in retained}
+                input.aborted_sample_indices = [
+                    sample.lineage.source_sample_index if sample.lineage is not None else sample.index
+                    for sample in input.group
+                    if id(sample) not in retained_ids
+                ]
+            input.group = retained
         output = apply_aborted_filter(self._args, input.group)
         if not output.keep:
             self._metric_aborted_groups += 1
@@ -238,10 +247,10 @@ class DefaultDataBuffer(DataBuffer):
             del self._buffer[:num_groups]
             self._cond.notify_all()  # wake producers blocked on a full buffer
             for entry in entries:
-                if self._args.keep_partial_groups_on_abort:
+                if entry.aborted_sample_indices:
                     # A buffered group may still be retried; removals become final only on consumption.
-                    SampleOwnershipRecorder.log_dropped_groups(
-                        args=self._args, before=entry.prompt_group, after=entry.group, reason="aborted"
+                    SampleOwnershipRecorder.log_dropped_source_sample_indices(
+                        args=self._args, source_sample_indices=entry.aborted_sample_indices, reason="aborted"
                     )
                 version_stats = group_weight_version_stats(entry.group)
                 if (staleness := version_stats.oldest_lag(current_version)) is not None:

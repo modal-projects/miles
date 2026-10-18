@@ -30,7 +30,7 @@ from miles.utils.audit_utils.event_logger.logger import EventLogger, read_events
 from miles.utils.audit_utils.event_logger.models import ExplicitlyDroppedSamplesEvent
 from miles.utils.audit_utils.process_identity import SimpleProcessIdentity
 from miles.utils.function_registry import load_function
-from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
+from miles.utils.types import Sample, SampleLineage, WeightVersionSpan, WeightVersionsPerCall
 
 N_SAMPLES_PER_PROMPT = 2
 
@@ -211,6 +211,47 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(mo
     assert not [
         event for event in read_events(sample_flow_event_dir) if isinstance(event, ExplicitlyDroppedSamplesEvent)
     ]
+
+
+@pytest.mark.parametrize("has_abort", [False, True])
+async def test_partial_retention_accounts_only_actual_removals_per_policy(sample_flow_event_dir, has_abort):
+    args = make_args(
+        keep_partial_groups_on_abort=True,
+        enable_sample_ownership_checker=True,
+        megatron_config=encode_megatron_config("solver", "verifier"),
+    )
+    prompts = make_group(1, status=Sample.Status.PENDING) + make_group(2, status=Sample.Status.PENDING)
+    outputs = [
+        replace(
+            sample,
+            index=sample.index + 100,
+            lineage=SampleLineage(source_sample_index=sample.index, output_index=0, output_count=1),
+            trainer_model_id="solver" if i < 2 else "verifier",
+            status=Sample.Status.ABORTED if has_abort and i == 1 else Sample.Status.COMPLETED,
+        )
+        for i, sample in enumerate(prompts)
+    ]
+    unused = []
+    buffer = data_buffer.DefaultMultiDataBuffer(
+        data_buffer.DataBufferConstructorInput(args=args, unused_handler_fn=lambda *args: unused.append(args))
+    )
+
+    await buffer.put(data_buffer.DataBufferInput(prompt_group=prompts, group=outputs))
+    assert not read_events(sample_flow_event_dir)
+    for policy in ("solver", "verifier"):
+        [entry] = await buffer.get(trainer_model_id=policy, num_groups=1)
+        assert entry.prompt_group is prompts
+        assert entry.group == [
+            sample
+            for sample in outputs
+            if sample.trainer_model_id == policy and sample.status != Sample.Status.ABORTED
+        ]
+
+    drops = [event for event in read_events(sample_flow_event_dir) if isinstance(event, ExplicitlyDroppedSamplesEvent)]
+    assert [(event.source_sample_indices, event.reason) for event in drops] == (
+        [([11], "aborted")] if has_abort else []
+    )
+    assert not unused
 
 
 async def test_eval_without_fleet_pauses_producer(monkeypatch):
