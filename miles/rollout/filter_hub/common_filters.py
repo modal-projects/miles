@@ -87,7 +87,9 @@ def retain_non_aborted_trajectories(samples: Group) -> list[Sample]:
 
 def apply_aborted_filter(args: Namespace, samples: Group, **kwargs) -> FilterOutput:
     """Reject entire group if any sample was aborted (e.g. env timeout, Docker crash)."""
-    if not samples or any(sample.status == Sample.Status.ABORTED for sample in iter_samples(samples)):
+    if (not samples and args.keep_partial_groups_on_abort) or any(
+        sample.status == Sample.Status.ABORTED for sample in iter_samples(samples)
+    ):
         return FilterOutput(keep=False, reason="group_has_aborted")
     return FilterOutput(keep=True)
 
