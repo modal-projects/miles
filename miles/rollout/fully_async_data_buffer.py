@@ -25,6 +25,7 @@ from miles.rollout.filter_hub.common_filters import (
     apply_missing_reward_filter,
     group_staleness,
     group_weight_version_stats,
+    retain_non_aborted_trajectories,
 )
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
 from miles.utils.function_registry import load_function
@@ -188,6 +189,8 @@ class DefaultDataBuffer(DataBuffer):
             self._cond.notify_all()
 
     def _preput_filter(self, input: DataBufferInput) -> bool:
+        if self._args.keep_partial_groups_on_abort:
+            input.group = retain_non_aborted_trajectories(input.group)
         output = apply_aborted_filter(self._args, input.group)
         if not output.keep:
             self._metric_aborted_groups += 1
@@ -235,6 +238,11 @@ class DefaultDataBuffer(DataBuffer):
             del self._buffer[:num_groups]
             self._cond.notify_all()  # wake producers blocked on a full buffer
             for entry in entries:
+                if self._args.keep_partial_groups_on_abort:
+                    # A buffered group may still be retried; removals become final only on consumption.
+                    SampleOwnershipRecorder.log_dropped_groups(
+                        args=self._args, before=entry.prompt_group, after=entry.group, reason="aborted"
+                    )
                 version_stats = group_weight_version_stats(entry.group)
                 if (staleness := version_stats.oldest_lag(current_version)) is not None:
                     self._metric_consumed_staleness.append(staleness)

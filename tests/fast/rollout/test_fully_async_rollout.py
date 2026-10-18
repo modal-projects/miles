@@ -105,6 +105,7 @@ def make_args(**overrides) -> Namespace:
         async_max_concurrent_samples=None,
         async_data_buffer_capacity_factor=1000.0,
         async_unused_samples_handler="drop",
+        keep_partial_groups_on_abort=False,
         custom_async_data_buffer_path=None,
         enable_sample_ownership_checker=False,
         custom_async_data_buffer_path_per_model=None,
@@ -156,6 +157,60 @@ async def test_drain_collects_batch_sorted_with_metrics(monkeypatch):
     # The worker persists across calls; a second drain works on the same instance.
     output2 = await fn(train_input(rollout_id=1))
     assert len(output2.samples) == 3
+
+
+@pytest.mark.parametrize("handler", ["drop", "retry"])
+async def test_partial_group_is_consumed_without_retry(monkeypatch, sample_flow_event_dir, handler):
+    group = make_group(1)
+    group[1].status = Sample.Status.ABORTED
+    args = make_args(
+        rollout_batch_size=1,
+        keep_partial_groups_on_abort=True,
+        enable_sample_ownership_checker=True,
+        async_unused_samples_handler=handler,
+    )
+
+    async def generate(state, group, **kwargs):
+        return group
+
+    source = FakeDataSource(scripted=[group])
+    fn = make_fn(monkeypatch, args, source, generate=generate)
+    try:
+        output = await fn(train_input(rollout_id=0))
+        assert output.samples == [group[:1]]
+        assert not fn._retry_buffer
+        drops = [
+            event for event in read_events(sample_flow_event_dir) if isinstance(event, ExplicitlyDroppedSamplesEvent)
+        ]
+        assert [(event.source_sample_indices, event.reason) for event in drops] == [([11], "aborted")]
+    finally:
+        await fn.dispose()
+
+
+async def test_partial_group_can_retry_after_staleness_without_terminal_drops(monkeypatch, sample_flow_event_dir):
+    args = make_args(
+        rollout_batch_size=1,
+        keep_partial_groups_on_abort=True,
+        enable_sample_ownership_checker=True,
+        async_unused_samples_handler="retry",
+        max_weight_staleness=1,
+    )
+    fn = make_fn(monkeypatch, args, FakeDataSource())
+    group = make_group(1, weight_versions=["0"])
+    group[1].status = Sample.Status.ABORTED
+    await fn._output.put(data_buffer.DataBufferInput(prompt_group=group, group=group))
+    fresh = make_group(2, weight_versions=["2"])
+    await fn._output.put(data_buffer.DataBufferInput(prompt_group=fresh, group=fresh))
+
+    [entry] = await fn._output.get(num_groups=1, current_version=2)
+
+    assert entry.group == fresh
+    assert list(fn._retry_buffer) == [group]
+    assert len(group) == N_SAMPLES_PER_PROMPT
+    assert all(sample.reward is None and not sample.response for sample in group)
+    assert not [
+        event for event in read_events(sample_flow_event_dir) if isinstance(event, ExplicitlyDroppedSamplesEvent)
+    ]
 
 
 async def test_eval_without_fleet_pauses_producer(monkeypatch):

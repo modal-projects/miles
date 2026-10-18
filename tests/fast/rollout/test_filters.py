@@ -16,6 +16,7 @@ from miles.rollout.filter_hub.common_filters import (
     apply_reward_nonzero_std_filter,
     group_staleness,
     group_weight_version_stats,
+    retain_non_aborted_trajectories,
 )
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
@@ -39,6 +40,35 @@ def make_sample(
 
 def test_dynamic_filter_output_is_a_compatibility_alias():
     assert DynamicFilterOutput is FilterOutput
+
+
+@pytest.mark.parametrize("survivors", [0, 1, 7, 8])
+def test_retain_non_aborted_trajectories(survivors):
+    group = [make_sample() for _ in range(survivors)] + [
+        make_sample(status=Sample.Status.ABORTED) for _ in range(8 - survivors)
+    ]
+
+    retained = retain_non_aborted_trajectories(group)
+
+    assert retained == group[:survivors]
+    assert all(a is b for a, b in zip(retained, group, strict=False))
+    assert len(group) == 8
+
+
+@pytest.mark.parametrize("compact", [[make_sample()], [make_sample(), make_sample()], Sample(rollout_id=1)])
+def test_retention_rejects_compact_outputs(compact):
+    with pytest.raises(ValueError, match="does not support compact"):
+        retain_non_aborted_trajectories([make_sample(), compact])
+
+
+def test_retention_does_not_replace_reward_or_status_filters():
+    group = [make_sample(reward=None), make_sample(status=Sample.Status.FAILED)]
+
+    assert retain_non_aborted_trajectories(group) == group
+
+
+def test_empty_survivor_group_is_rejected_as_aborted():
+    assert apply_aborted_filter(Namespace(), []) == FilterOutput(keep=False, reason="group_has_aborted")
 
 
 @pytest.mark.parametrize(
