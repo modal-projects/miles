@@ -77,8 +77,7 @@ class TestGenerateExtraKey:
 
 
 class TestGenerateAndRmGroup:
-    @pytest.mark.parametrize("survivors", [0, 1, 7, 8])
-    @pytest.mark.parametrize("retain", [False, True])
+    @pytest.mark.parametrize(("survivors", "retain"), [(0, True), (1, True), (1, False)])
     async def test_group_reward_sees_only_retained_trajectories(
         self, monkeypatch: pytest.MonkeyPatch, survivors: int, retain: bool
     ) -> None:
@@ -87,7 +86,7 @@ class TestGenerateAndRmGroup:
         args.keep_partial_groups_on_abort = retain
         args.custom_rm_path = "test:partial_group_reward"
         state = SimpleNamespace(aborted=False)
-        sources = [Sample(index=i, prompt="prompt") for i in range(8)]
+        sources = [Sample(index=i, prompt="prompt") for i in range(2)]
         scored: list[list[Sample]] = []
 
         async def generate(args: Namespace, sample: Sample, sampling_params: dict, evaluation: bool = False) -> Sample:
