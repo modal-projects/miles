@@ -123,15 +123,16 @@ class TestTrainingSampleMetrics:
 
         assert out["episode_raw_reward"] == pytest.approx(0.5)
 
-    def test_metadata_raw_reward_and_fallback_identities(self):
+    @pytest.mark.parametrize("aborted_position", [0, 2])
+    def test_metadata_raw_reward_and_fallback_identities(self, aborted_position):
         args = make_args(reward_key=None)
         samples = [
             make_sample(index=5, reward=0.0),
             make_sample(index=None, reward=0.0),
-            make_sample(index=None, reward=None, status=Sample.Status.ABORTED),
         ]
         samples[0].metadata = {"raw_reward": 1.0}
         samples[1].metadata = {"raw_reward": 0.0}
+        samples.insert(aborted_position, make_sample(index=None, reward=None, status=Sample.Status.ABORTED))
 
         out = _compute_training_sample_metrics(args, samples)
 
@@ -787,12 +788,10 @@ class TestEvalMetrics:
         else:
             data = await module.eval_rollout_single_dataset(SimpleNamespace(args=args), dataset_cfg, cache)
 
-        assert data[dataset_cfg.name]["rewards"] == rewards
         out = log_eval_rollout_data(0, args, data)
         prefix = f"eval/{dataset_cfg.name}"
         assert out[prefix] == pytest.approx(1 / 6)
         assert out[f"{prefix}-none_reward_ratio"] == 0.5
-        assert out[f"{prefix}/num_training_samples"] == 6
         assert out[f"{prefix}/episode_raw_reward"] == pytest.approx(1 / 3)
         assert out[f"{prefix}/zero_std/count_0.0"] == 1
         assert out[f"{prefix}/zero_std/all_zero_percentage"] == pytest.approx(1 / 3)

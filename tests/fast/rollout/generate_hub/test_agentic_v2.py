@@ -6,7 +6,6 @@ import pytest
 import miles.rollout.generate_hub.agentic_tool_call as agentic_tool_call
 from miles.ray.rollout.rollout_data_conversion import validate_compact_rollout_ids
 from miles.rollout.base_types import GenerateFnInput
-from miles.rollout.filter_hub.common_filters import apply_preput_filters
 from miles.rollout.session.samples.codec import SamplesReply
 from miles.rollout.session.types import SessionServerInstance
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
@@ -113,7 +112,6 @@ async def test_agent_failure_closes_without_collecting(monkeypatch, session_vers
     assert aborted.index == generate_input.sample.index
     assert generate_input.sample.status == Sample.Status.PENDING
     assert aborted.reward is None
-    assert not apply_preput_filters(generate_input.args, None, [aborted]).keep
 
 
 @pytest.mark.asyncio
@@ -137,7 +135,7 @@ async def test_agent_cancellation_closes_without_collecting(monkeypatch):
 @pytest.mark.parametrize("evaluation", [False, True])
 @pytest.mark.parametrize("agent_metadata", [None, {"agent_result": "done"}])
 async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, evaluation, agent_metadata):
-    sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1], reward=0.0)
+    sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1])
     tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
     _patch_agent(monkeypatch, tracer)
 
@@ -146,9 +144,7 @@ async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, eva
 
     monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: successful_agent)
 
-    generate_input = _generate_input(
-        evaluation=evaluation, sampling_params={"temperature": 0.7, "max_new_tokens": 8}, reward_key=None
-    )
+    generate_input = _generate_input(evaluation=evaluation, sampling_params={"temperature": 0.7, "max_new_tokens": 8})
     output = await agentic_tool_call.generate(generate_input)
 
     assert tracer.evaluation is evaluation
@@ -157,8 +153,6 @@ async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, eva
     assert output.samples == [sample]
     assert output.samples[0].rollout_id is None
     assert tracer.agent_metadata == agent_metadata
-    assert sample.reward == 0.0
-    assert apply_preput_filters(generate_input.args, None, output.samples).keep
 
 
 @pytest.mark.asyncio

@@ -255,12 +255,11 @@ def _compute_training_sample_metrics(args: Any, samples: list[Sample]) -> dict[s
     metric weight merely because they produced more samples.
     """
     rewards_by_rollout: dict[tuple[str, int | None, int], list[float]] = {}
-    use_metadata_reward = bool(samples and samples[0].metadata and "raw_reward" in samples[0].metadata)
     for position, sample in enumerate(samples):
         rollout_key = _get_rollout_key(sample, position)
 
-        if use_metadata_reward:
-            raw_reward = sample.metadata.get("raw_reward")
+        if "raw_reward" in sample.metadata:
+            raw_reward = sample.metadata["raw_reward"]
         else:
             raw_reward = sample.get_reward_value(args) if sample.reward is not None else None
         if isinstance(raw_reward, Number):
@@ -313,7 +312,7 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
 
     def _is_zero_std(samples: list[Sample]):
         rewards = [sample.get_reward_value(args) if sample.reward is not None else None for sample in samples]
-        return bool(rewards) and rewards[0] is not None and all(rewards[0] == r for r in rewards)
+        return rewards[0] is not None and all(rewards[0] == r for r in rewards)
 
     all_sample_groups = group_by(all_samples, lambda s: s.group_index)
     interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
