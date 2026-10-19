@@ -24,7 +24,7 @@ def gdn_in_proj_split(config, local_rows: int) -> tuple[int, ...]:
 def gdn_gate_rows(module) -> slice | None:
     """Local rows of LoRA B that feed the GDN b and a gate projections, or ``None`` for other modules.
 
-    HF PEFT and Tinker do not adapt ``in_proj_b`` and ``in_proj_a``, so these rows stay frozen at zero."""
+    HF PEFT does not adapt ``in_proj_b`` and ``in_proj_a``, so these rows stay frozen at zero."""
     if not is_gdn_in_proj(module):
         return None
     local_rows = module.adapters[0].linear_out.weight.shape[-2]

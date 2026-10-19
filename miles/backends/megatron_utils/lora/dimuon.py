@@ -1,17 +1,26 @@
-"""Dimuon-lite, a per-factor Muon-type optimizer for multi-LoRA slots.
+"""Dimuon, a per-factor Muon-type optimizer for multi-LoRA slots.
 
-Each LoRA factor gets EMA momentum, a Polar Express matrix sign per matrix block,
-Frobenius normalization to ``sqrt(rank)`` per block, and a step of
-``lr * (rank / 32) ** 0.175``. This matches Tinker Dimuon's measured first update
-for each factor. Tinker's later damping-dependent correction is not reproduced.
+Each LoRA factor P with gradient G keeps one BF16 momentum matrix M and steps as
 
-B of a fused ``linear_qkv`` splits into q, k and v row blocks per query group, and B
-of a gated ``linear_fc1`` splits into gate and up row blocks, so projections never
-share a direction. A of a fused module is one shared matrix and is signed whole.
+    L, R  <- diag((mean-square rows / columns of M, max-normalized) + damping) ** -1/4
+    work  <- beta1 * M + (1 - beta1) * G                       (FP32)
+    D     <- L @ polar_express(L @ work @ R) @ R               (per matrix block)
+    D     <- D * sqrt(rank) / ||D||_F
+    P     <- P - lr * (rank / 32) ** 0.175 * D
+    M     <- BF16(work)
 
-TP-sharded factors are all-gathered, signed whole on every TP rank and sliced back.
-Padded rank rows of A and columns of B stay zero because their gradients are zero
-and the iteration preserves zero rows and columns.
+The row and column scales come from the momentum stored by the previous step, so a
+fresh factor starts with scalar scales and the optimizer stays stateful at beta1 = 0.
+Polar Express runs five steps in FP16 Horner form after FP32 normalization.
+
+B of a fused ``linear_qkv`` splits into q, k and v row blocks per query group, B of a
+gated ``linear_fc1`` into gate and up row blocks, and B of a Gated DeltaNet ``in_proj``
+into q, k, v, z, b and a blocks, so projections never share a direction or scales.
+A of a fused module is one shared matrix and is treated whole.
+
+TP-sharded factors are all-gathered, transformed whole on every TP rank and sliced back.
+Padded rank rows of A and columns of B stay zero because their gradients are zero and
+every step preserves zero rows and columns.
 
 The math is plain torch so it runs without Megatron.
 """
@@ -26,36 +35,54 @@ import torch
 
 from miles.backends.megatron_utils.lora.gdn_utils import gdn_in_proj_split, is_gdn_in_proj
 
-# Polar Express (arXiv 2505.16932) coefficients, including its 1.01 safety factor,
-# as shipped in emerging_optimizers v0.3.0 ("polar_express"). Steps past the list
-# repeat the last tuple.
-POLAR_EXPRESS_COEFFICIENTS = (
-    (8.2051, -22.9019, 16.4607),
-    (4.0664, -2.8612, 0.5184),
-    (3.9096, -2.8234, 0.5250),
-    (3.2856, -2.4153, 0.4853),
-    (2.2779, -1.6198, 0.3985),
-    (1.8726, -1.2307, 0.3585),
-    (1.8564, -1.2132, 0.3568),
-    (1.8750, -1.2500, 0.3750),
+# First five Polar Express iterations (arXiv 2505.16932), with the 1.01 safety factor
+# applied as a / 1.01, b / 1.01**3 and c / 1.01**5.
+_PAPER_COEFFICIENTS = (
+    (8.28721201814563, -23.595886519098837, 17.300387312530933),
+    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+    (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
+    (3.3184196573706015, -2.4884880243148474, 0.51004894012372),
+    (2.300652019954817, -1.6689039845747493, 0.4188073119525673),
 )
-NUM_POLAR_STEPS = 5
+POLAR_EXPRESS_COEFFICIENTS = tuple((a / 1.01, b / 1.01**3, c / 1.01**5) for a, b, c in _PAPER_COEFFICIENTS)
 REFERENCE_RANK = 32
 RANK_LR_CORRECTION_EXPONENT = 0.175
-_EPS = 1e-7
+DAMPING = 1e-4
+_TINY = 1e-30
 
 
-def polar_express(x: torch.Tensor, steps: int = NUM_POLAR_STEPS, eps: float = _EPS) -> torch.Tensor:
-    """Approximate the orthogonal polar factor of each trailing 2-D matrix of ``x`` (fp32)."""
+def polar_express(x: torch.Tensor) -> torch.Tensor:
+    """Approximate the orthogonal polar factor of each trailing 2-D matrix of ``x``.
+
+    Each matrix is normalized in FP32 by 1.01 times its Frobenius norm, then iterated in
+    FP16 Horner form on its smaller Gram matrix. Returns FP32."""
     transpose = x.size(-2) > x.size(-1)
     if transpose:
         x = x.mT
-    x = x / x.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
-    for i in range(steps):
-        a, b, c = POLAR_EXPRESS_COEFFICIENTS[min(i, len(POLAR_EXPRESS_COEFFICIENTS) - 1)]
+    x = x.float()
+    x = (x / (1.01 * x.norm(dim=(-2, -1), keepdim=True)).clamp_min(_TINY)).half()
+    for a, b, c in POLAR_EXPRESS_COEFFICIENTS:
         gram = x @ x.mT
-        x = a * x + (b * gram + c * gram @ gram) @ x
+        polynomial = c * gram
+        polynomial.diagonal(dim1=-2, dim2=-1).add_(b)
+        polynomial = polynomial @ gram
+        polynomial.diagonal(dim1=-2, dim2=-1).add_(a)
+        x = polynomial @ x
+    x = x.float()
     return x.mT if transpose else x
+
+
+def diagonal_scales(previous: torch.Tensor, damping: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Row and column scales ``(L, R)`` from mean squares of the previous momentum.
+
+    Each statistic is normalized by its maximum with a zero guard, so an all-zero momentum
+    gives scalar scales. Returns FP32 tensors shaped ``[..., rows, 1]`` and ``[..., 1, cols]``."""
+    squares = previous.float().square()
+    rows = squares.mean(dim=-1, keepdim=True)
+    cols = squares.mean(dim=-2, keepdim=True)
+    rows = rows / rows.amax(dim=(-2, -1), keepdim=True).clamp_min(_TINY)
+    cols = cols / cols.amax(dim=(-2, -1), keepdim=True).clamp_min(_TINY)
+    return (rows + damping).pow(-0.25), (cols + damping).pow(-0.25)
 
 
 @dataclass(frozen=True)
@@ -101,17 +128,30 @@ def _unblocks(blocks: list[torch.Tensor], row_split: tuple[int, ...] | None, lik
     return torch.cat(parts, dim=-2).reshape(like.shape)
 
 
-def normalized_sign(full: torch.Tensor, rank: int, row_split: tuple[int, ...] | None) -> torch.Tensor:
-    """Per-block polar factor scaled to Frobenius norm ``sqrt(rank)`` per matrix.
+def block_direction(work: torch.Tensor, previous: torch.Tensor, rank: int, damping: float) -> torch.Tensor:
+    """Dimuon direction of one matrix block, with Frobenius norm ``sqrt(rank)`` per matrix.
 
-    ``full`` is the unsharded momentum, ``[rows, cols]`` or packed ``[E, rows, cols]``.
-    An all-zero block (e.g. A before B has moved) yields a zero update."""
-    out = []
-    for block in _blocks(full.float(), row_split):
-        sign = polar_express(block)
-        norm = sign.norm(dim=(-2, -1), keepdim=True)
-        out.append(torch.where(norm > _EPS, sign * (math.sqrt(rank) / norm.clamp_min(_EPS)), torch.zeros_like(sign)))
-    return _unblocks(out, row_split, full)
+    ``work`` is the FP32 working momentum and ``previous`` the stored momentum it was built
+    from. An all-zero ``work`` yields a zero direction."""
+    left, right = diagonal_scales(previous, damping)
+    direction = left * polar_express(left * work.float() * right) * right
+    norm = direction.norm(dim=(-2, -1), keepdim=True).clamp_min(_TINY)
+    return direction * (math.sqrt(rank) / norm)
+
+
+def dimuon_direction(
+    work: torch.Tensor,
+    previous: torch.Tensor,
+    rank: int,
+    row_split: tuple[int, ...] | None,
+    damping: float = DAMPING,
+) -> torch.Tensor:
+    """Per-projection-block Dimuon direction for an unsharded factor, ``[rows, cols]`` or ``[E, rows, cols]``."""
+    blocks = [
+        block_direction(w, p, rank, damping)
+        for w, p in zip(_blocks(work, row_split), _blocks(previous, row_split), strict=True)
+    ]
+    return _unblocks(blocks, row_split, work)
 
 
 GatherFn = Callable[[torch.Tensor, int, object], torch.Tensor]
@@ -135,23 +175,32 @@ def _dist_slice(full: torch.Tensor, dim: int, group) -> torch.Tensor:
 
 
 def factor_direction(
-    momentum: torch.Tensor,
+    work: torch.Tensor,
+    previous: torch.Tensor,
     spec: FactorSpec,
+    damping: float = DAMPING,
     *,
     gather: GatherFn = _dist_gather,
     slice_: SliceFn = _dist_slice,
 ) -> torch.Tensor:
     """Dimuon direction (before ``lr * rank_scale``) for this rank's shard of one factor."""
-    dim = None
-    if spec.partition_dim is not None:
-        dim = spec.partition_dim + (1 if spec.batched else 0)
-    full = momentum if dim is None else gather(momentum, dim, spec.tp_group)
-    direction = normalized_sign(full, spec.rank, spec.row_split)
-    return direction if dim is None else slice_(direction, dim, spec.tp_group)
+    if spec.partition_dim is None:
+        return dimuon_direction(work, previous, spec.rank, spec.row_split, damping)
+    dim = spec.partition_dim + (1 if spec.batched else 0)
+    full_work = gather(work, dim, spec.tp_group)
+    full_previous = gather(previous, dim, spec.tp_group)
+    direction = dimuon_direction(full_work, full_previous, spec.rank, spec.row_split, damping)
+    return slice_(direction, dim, spec.tp_group)
+
+
+def advance_momentum(previous: torch.Tensor, gradient: torch.Tensor, beta: float) -> torch.Tensor:
+    """FP32 working momentum ``beta * previous + (1 - beta) * gradient``, multiplied then fused-added."""
+    work = previous.float().mul(beta)
+    return work.add_(gradient.float(), alpha=1 - beta)
 
 
 class Dimuon(torch.optim.Optimizer):
-    """Dimuon-lite over LoRA factor parameters, each of which needs a ``FactorSpec``.
+    """Dimuon over LoRA factor parameters, each of which needs a ``FactorSpec``.
 
     Specs are keyed by ``id(param)`` of the tensors this optimizer steps, which are the
     FP32 masters once Megatron wraps it, and are registered with ``set_specs``."""
@@ -161,13 +210,13 @@ class Dimuon(torch.optim.Optimizer):
         params: Iterable,
         lr: float = 1e-2,
         momentum: float = 0.9,
-        nesterov: bool = False,
+        damping: float = DAMPING,
         rank_lr_correction_exponent: float = RANK_LR_CORRECTION_EXPONENT,
     ) -> None:
         defaults = dict(
             lr=lr,
             momentum=momentum,
-            nesterov=nesterov,
+            damping=damping,
             rank_lr_correction_exponent=rank_lr_correction_exponent,
         )
         super().__init__(params, defaults)
@@ -176,11 +225,17 @@ class Dimuon(torch.optim.Optimizer):
     def set_specs(self, specs: dict[int, FactorSpec]) -> None:
         self.specs = dict(specs)
 
+    def load_state_dict(self, state_dict) -> None:
+        # Restore momentum as BF16 because torch casts loaded state to each parameter's dtype
+        super().load_state_dict(state_dict)
+        for state in self.state.values():
+            if "momentum_buffer" in state:
+                state["momentum_buffer"] = state["momentum_buffer"].to(torch.bfloat16)
+
     @torch.no_grad()
     def step(self, closure=None):
         assert closure is None, "Dimuon does not support closures"
         for group in self.param_groups:
-            beta = group["momentum"]
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -189,11 +244,12 @@ class Dimuon(torch.optim.Optimizer):
                     raise KeyError(f"Dimuon has no FactorSpec for a parameter of shape {tuple(p.shape)}")
                 state = self.state[p]
                 if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(p, dtype=torch.float32)
-                buf = state["momentum_buffer"]
-                buf.lerp_(p.grad.float(), 1 - beta)
-                m = p.grad.float().lerp(buf, beta) if group["nesterov"] else buf
-                direction = factor_direction(m, spec)
+                    state["momentum_buffer"] = torch.zeros_like(p, dtype=torch.bfloat16)
+                previous = state["momentum_buffer"]
+                work = advance_momentum(previous, p.grad, group["momentum"])
+                direction = factor_direction(work, previous, spec, group["damping"])
+                # Store the rounded momentum only after the scales and direction have read the old one
+                previous.copy_(work)
                 scale = group["lr"] * rank_scale(spec.rank, group["rank_lr_correction_exponent"])
                 p.add_(direction.to(p.dtype), alpha=-scale)
         return None
@@ -204,7 +260,7 @@ def dimuon_init_state_fn(opt, config=None) -> None:
     for group in opt.param_groups:
         for p in group["params"]:
             if len(opt.state[p]) == 0:
-                opt.state[p]["momentum_buffer"] = torch.zeros_like(p.data, dtype=torch.float32)
+                opt.state[p]["momentum_buffer"] = torch.zeros_like(p.data, dtype=torch.bfloat16)
 
 
 # --------------------------------------------------------------------------- Megatron wiring

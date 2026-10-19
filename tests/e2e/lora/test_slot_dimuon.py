@@ -28,7 +28,7 @@ from tests.ci.ci_register import register_cuda_ci
 from torch.utils._pytree import tree_flatten, tree_map
 
 from miles.backends.megatron_utils.lora.checkpoint import load_slot, save_slot
-from miles.backends.megatron_utils.lora.dimuon import normalized_sign, rank_scale
+from miles.backends.megatron_utils.lora.dimuon import advance_momentum, dimuon_direction, rank_scale
 from miles.backends.megatron_utils.lora.optimizer import SlotOptimizer, adapter_slot_parameters, step_slot_optimizers
 from miles.utils.distributed_utils import init_gloo_group
 
@@ -199,20 +199,20 @@ def run_worker(checkpoint_dir, tp):
     print(f"{tag} adam params rejected by a dimuon slot", flush=True)
 
     beta, scale = DIMUON["beta1"], DIMUON["learning_rate"] * rank_scale(RANK)
-    momentum = None
+    stored = None
     for step in (1, 2):
         before = full_weights(model, 0)
         grads = set_grads(model, 0, step)
-        if momentum is None:
-            momentum = [torch.zeros_like(g) for g in grads]
-        momentum = [beta * m + (1 - beta) * g for m, g in zip(momentum, grads, strict=True)]
+        if stored is None:
+            stored = [torch.zeros_like(g, dtype=torch.bfloat16) for g in grads]
+        work = [advance_momentum(m, g, beta) for m, g in zip(stored, grads, strict=True)]
         outcome = step_slot_optimizers({0: source}, {0: DIMUON})
         assert outcome[0]["grad_norm"] > 0
         after = full_weights(model, 0)
-        for index, ((_param, split), m, w0, w1) in enumerate(
-            zip(slot_factors(model, 0), momentum, before, after, strict=True)
+        for index, ((_param, split), w, m, w0, w1) in enumerate(
+            zip(slot_factors(model, 0), work, stored, before, after, strict=True)
         ):
-            expected = -scale * normalized_sign(m, rank=RANK, row_split=split)
+            expected = -scale * dimuon_direction(w, m, rank=RANK, row_split=split)
             actual = w1 - w0
             assert cos(actual, expected) > 0.999, (index, step, cos(actual, expected))
             assert actual.norm().item() == pytest.approx(expected.norm().item(), rel=1e-2)
@@ -220,6 +220,7 @@ def run_worker(checkpoint_dir, tp):
                 assert torch.count_nonzero(w1[RANK:]) == 0, "padded A rows must stay zero"
             else:
                 assert torch.count_nonzero(w1[:, RANK:]) == 0, "padded B columns must stay zero"
+        stored = [w.bfloat16() for w in work]
         print(f"{tag} step {step}: all factors match the unsharded reference", flush=True)
 
     # Each q, k and v block of the fused B is normalized on its own to lr * scale * sqrt(rank)
@@ -235,7 +236,7 @@ def run_worker(checkpoint_dir, tp):
     saved = snapshot(model, source)
     for child in source._inner.chained_optimizers:
         for state in child.optimizer.state.values():
-            assert state["momentum_buffer"].dtype == torch.float32
+            assert state["momentum_buffer"].dtype == torch.bfloat16
     save_slot(model, source, str(checkpoint_dir))
     resumed = SlotOptimizer(args, model, slot=1, optimizer="dimuon")
     load_slot(model, resumed, str(checkpoint_dir), load_optimizer=True)
