@@ -166,8 +166,19 @@ Any nonempty survivor group, including a singleton, proceeds through the remaini
 filters. Group reward evaluation (`--group-rm`) receives only survivors; custom
 group reward functions must accept variable-sized groups. Reward normalization uses
 the retained trajectories and their `group_index` (or explicit prompt boundaries).
-The generate function must currently return a `Sample`, not a list, and leave
-`rollout_id` unset. Compact-output retention is not supported.
+
+For compact outputs (`list[Sample]` from one trajectory), an aborted chunk discards
+the whole trajectory. Surviving chunks keep their shared `rollout_id` and prompt
+`group_index`. Group reward functions receive a flat list of surviving chunks;
+the default reward normalizer requires one shared reward per trajectory and counts
+each trajectory once, regardless of its chunk count.
+
+Compact dynamic batches require rollout-side DP scheduling. All retained chunks
+are scheduled in one optimizer step, with batch size and loss normalization based
+on the number of trajectories, not chunks. The chunks must still admit a valid
+DP/VPP-aligned micro-batch schedule; samples are not duplicated to pad a batch.
+In multi-policy runs, all chunks of a retained trajectory must train the same
+policy; retention across independently consumed policy buffers is not supported.
 
 The collector still requests `rollout_batch_size` accepted prompt groups, not extra
 trajectories to refill the original global batch size. Training uses the resulting

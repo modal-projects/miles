@@ -4,6 +4,7 @@ register_cpu_ci(est_time=60, suite="stage-b-cpu", labels=["rollout"])
 
 import asyncio
 from argparse import Namespace
+from dataclasses import replace
 
 import pytest
 import torch
@@ -160,7 +161,8 @@ async def test_sync_driver_defaults_to_group_granularity(monkeypatch):
 
 
 @pytest.mark.parametrize("survivors", [0, 1])
-async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(monkeypatch, survivors):
+@pytest.mark.parametrize("compact", [False, True])
+async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(monkeypatch, survivors, compact):
     harness = Harness(monkeypatch, make_args(rollout_batch_size=1, keep_partial_groups_on_abort=True))
     task = harness.run()
     await asyncio.sleep(0)
@@ -168,6 +170,8 @@ async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(mo
     for sample in original[survivors:]:
         sample.status = Sample.Status.ABORTED
         sample.reward = None
+    if compact:
+        original[:] = [[replace(sample, status=Sample.Status.COMPLETED), sample] for sample in original]
     harness.finish_group(0)
     if not survivors:
         await asyncio.sleep(0.01)

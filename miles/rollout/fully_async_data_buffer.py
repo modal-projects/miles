@@ -193,10 +193,10 @@ class DefaultDataBuffer(DataBuffer):
         if self._args.keep_partial_groups_on_abort:
             retained = retain_non_aborted_trajectories(input.group)
             if self._args.enable_sample_ownership_checker:
-                retained_ids = {id(sample) for sample in retained}
+                retained_ids = {id(sample) for sample in iter_samples(retained)}
                 input.aborted_sample_indices = [
                     sample.lineage.source_sample_index if sample.lineage is not None else sample.index
-                    for sample in input.group
+                    for sample in iter_samples(input.group)
                     if id(sample) not in retained_ids
                 ]
             input.group = retained
@@ -356,6 +356,7 @@ class DefaultMultiDataBuffer(DataBuffer):
     """
 
     def __init__(self, input: DataBufferConstructorInput):
+        self._args = input.args
         paths = _parse_data_buffer_paths(input.args.custom_async_data_buffer_path_per_model)
         model_ids = resolve_megatron_config(input.args).model_ids
         assert not (unknown := sorted(set(paths) - set(model_ids))), (
@@ -367,6 +368,10 @@ class DefaultMultiDataBuffer(DataBuffer):
         }
 
     async def put(self, input: DataBufferInput) -> None:
+        if self._args.keep_partial_groups_on_abort:
+            for trajectory in input.group:
+                if len({sample.trainer_model_id for sample in iter_samples([trajectory])}) > 1:
+                    raise ValueError("Partial-group retention requires all chunks of a trajectory to train one policy")
         # TODO: a full inner blocks the one producer for every policy; give each policy its own dispatcher
         for trainer_model_id, entry in _split_by_trainer_model_id(input).items():
             await self._inner_of(trainer_model_id).put(entry)

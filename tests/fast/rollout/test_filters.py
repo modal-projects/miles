@@ -42,10 +42,15 @@ def test_dynamic_filter_output_is_a_compatibility_alias():
     assert DynamicFilterOutput is FilterOutput
 
 
-@pytest.mark.parametrize("compact", [[make_sample()], Sample(rollout_id=1)])
-def test_retention_rejects_compact_outputs(compact):
-    with pytest.raises(ValueError, match="does not support compact"):
-        retain_non_aborted_trajectories([make_sample(), compact])
+def test_retention_discards_whole_trajectories_with_an_aborted_chunk():
+    single = make_sample()
+    compact = [make_sample(), make_sample()]
+    aborted = [make_sample(), make_sample(status=Sample.Status.ABORTED)]
+    group = [single, aborted, compact, []]
+
+    assert retain_non_aborted_trajectories(group) == [single, compact]
+    assert len(group) == 4
+    assert aborted[0].status == Sample.Status.COMPLETED
 
 
 def test_retention_does_not_replace_reward_or_status_filters():

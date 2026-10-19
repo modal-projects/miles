@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -17,17 +18,24 @@ from miles.rollout.base_types import (
     RolloutFnEvalInput,
     RolloutFnTrainInput,
 )
+from miles.rollout.filter_hub.base_types import iter_samples
 from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
 from miles.utils.function_registry import function_registry
 from miles.utils.types import Sample
 
 
-@pytest.mark.parametrize(("survivors", "retain"), [(0, True), (1, True), (2, True), (1, False)])
-async def test_group_reward_sees_only_retained_trajectories(survivors, retain):
+@pytest.mark.parametrize(
+    ("survivors", "retain", "compact"),
+    [(0, True, False), (1, True, False), (2, True, False), (1, False, False), (0, True, True), (1, True, True)],
+)
+async def test_group_reward_sees_only_retained_trajectories(survivors, retain, compact):
     async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         sample = input.sample
         sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
         sample.response = "answer" if sample.index < survivors else ""
+        if compact:
+            sample.rollout_id = sample.index
+            return GenerateFnOutput(samples=[replace(sample, status=Sample.Status.COMPLETED), sample])
         return GenerateFnOutput(samples=sample)
 
     state = make_state(generate)
@@ -43,10 +51,11 @@ async def test_group_reward_sees_only_retained_trajectories(survivors, retain):
     with function_registry.temporary(state.args.custom_rm_path, score):
         result = await inference_rollout_common.generate_and_rm_group(state, sources, {})
 
-    expected = sources[:survivors] if retain else sources
+    expected = list(iter_samples(result[:survivors] if retain else result))
     assert scored == ([expected] if expected else [])
-    assert result == sources
-    assert all(sample.reward is None for sample in result if sample not in expected)
+    assert len(result) == len(sources)
+    assert all(sample.reward is None for sample in iter_samples(result) if sample not in expected)
+    assert [sample.reward for sample in expected] == [float(sample.index) for sample in expected]
 
 
 def test_inference_rollout_fn_exposes_the_constructor_input(monkeypatch) -> None:

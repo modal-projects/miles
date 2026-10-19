@@ -159,7 +159,10 @@ async def test_drain_collects_batch_sorted_with_metrics(monkeypatch):
     assert len(output2.samples) == 3
 
 
-async def test_partial_group_can_retry_after_staleness_without_terminal_drops(monkeypatch, sample_flow_event_dir):
+@pytest.mark.parametrize("compact", [False, True])
+async def test_partial_group_can_retry_after_staleness_without_terminal_drops(
+    monkeypatch, sample_flow_event_dir, compact
+):
     args = make_args(
         rollout_batch_size=1,
         keep_partial_groups_on_abort=True,
@@ -170,7 +173,8 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(mo
     fn = make_fn(monkeypatch, args, FakeDataSource())
     group = make_group(1, weight_versions=["0"])
     group[1].status = Sample.Status.ABORTED
-    await fn._output.put(data_buffer.DataBufferInput(prompt_group=group, group=group))
+    outputs = [[replace(sample, status=Sample.Status.COMPLETED), sample] for sample in group] if compact else group
+    await fn._output.put(data_buffer.DataBufferInput(prompt_group=group, group=outputs))
     fresh = make_group(2, weight_versions=["2"])
     await fn._output.put(data_buffer.DataBufferInput(prompt_group=fresh, group=fresh))
 
@@ -186,7 +190,8 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(mo
 
 
 @pytest.mark.parametrize("has_abort", [False, True])
-async def test_partial_retention_accounts_only_actual_removals_per_policy(sample_flow_event_dir, has_abort):
+@pytest.mark.parametrize("compact", [False, True])
+async def test_partial_retention_accounts_only_actual_removals_per_policy(sample_flow_event_dir, has_abort, compact):
     args = make_args(
         keep_partial_groups_on_abort=True,
         enable_sample_ownership_checker=True,
@@ -203,6 +208,14 @@ async def test_partial_retention_accounts_only_actual_removals_per_policy(sample
         )
         for i, sample in enumerate(prompts)
     ]
+    if compact:
+        outputs = [
+            [
+                replace(sample, status=Sample.Status.COMPLETED, lineage=replace(sample.lineage, output_count=2)),
+                replace(sample, lineage=replace(sample.lineage, output_count=2, output_index=1)),
+            ]
+            for sample in outputs
+        ]
     unused = []
     buffer = data_buffer.DefaultMultiDataBuffer(
         data_buffer.DataBufferConstructorInput(args=args, unused_handler_fn=lambda *args: unused.append(args))
@@ -213,17 +226,33 @@ async def test_partial_retention_accounts_only_actual_removals_per_policy(sample
     for policy in ("solver", "verifier"):
         [entry] = await buffer.get(trainer_model_id=policy, num_groups=1)
         assert entry.prompt_group is prompts
-        assert entry.group == [
-            sample
-            for sample in outputs
-            if sample.trainer_model_id == policy and sample.status != Sample.Status.ABORTED
-        ]
+        expected = [sample for sample in outputs if (sample[-1] if compact else sample).trainer_model_id == policy]
+        if policy == "solver" and has_abort:
+            expected = expected[:1]
+        assert entry.group == expected
 
     drops = [event for event in read_events(sample_flow_event_dir) if isinstance(event, ExplicitlyDroppedSamplesEvent)]
     assert [(event.source_sample_indices, event.reason) for event in drops] == (
         [([11], "aborted")] if has_abort else []
     )
     assert not unused
+
+
+async def test_compact_retention_rejects_cross_policy_trajectories():
+    args = make_args(
+        keep_partial_groups_on_abort=True,
+        megatron_config=encode_megatron_config("solver", "verifier"),
+    )
+    trajectory = [
+        Sample(index=0, trainer_model_id="solver", status=Sample.Status.COMPLETED),
+        Sample(index=0, trainer_model_id="verifier", status=Sample.Status.ABORTED),
+    ]
+    buffer = data_buffer.DefaultMultiDataBuffer(
+        data_buffer.DataBufferConstructorInput(args=args, unused_handler_fn=lambda *args: None)
+    )
+
+    with pytest.raises(ValueError, match="all chunks of a trajectory to train one policy"):
+        await buffer.put(data_buffer.DataBufferInput(prompt_group=[], group=[trajectory]))
 
 
 async def test_eval_without_fleet_pauses_producer(monkeypatch):
