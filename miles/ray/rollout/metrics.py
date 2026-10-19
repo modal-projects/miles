@@ -259,7 +259,10 @@ def _compute_training_sample_metrics(args: Any, samples: list[Sample]) -> dict[s
     for position, sample in enumerate(samples):
         rollout_key = _get_rollout_key(sample, position)
 
-        raw_reward = sample.metadata["raw_reward"] if use_metadata_reward else sample.get_reward_value(args)
+        if use_metadata_reward:
+            raw_reward = sample.metadata.get("raw_reward")
+        else:
+            raw_reward = sample.get_reward_value(args) if sample.reward is not None else None
         if isinstance(raw_reward, Number):
             rewards_by_rollout.setdefault(rollout_key, []).append(raw_reward)
 
@@ -309,8 +312,8 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
         return {}
 
     def _is_zero_std(samples: list[Sample]):
-        rewards = [sample.get_reward_value(args) for sample in samples]
-        return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
+        rewards = [sample.get_reward_value(args) if sample.reward is not None else None for sample in samples]
+        return bool(rewards) and rewards[0] is not None and all(rewards[0] == r for r in rewards)
 
     all_sample_groups = group_by(all_samples, lambda s: s.group_index)
     interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
@@ -370,7 +373,9 @@ def _compute_reward_cat_metrics(args, all_samples: list[Sample]):
     if reward_cat_key is None:
         return {}
 
-    samples_of_reward_cat = group_by(all_samples, lambda s: s.reward[reward_cat_key])
+    samples_of_reward_cat = group_by(
+        [s for s in all_samples if s.reward is not None], lambda s: s.reward[reward_cat_key]
+    )
 
     return {f"error_cat/{reward_cat}": len(s) / len(all_samples) for reward_cat, s in samples_of_reward_cat.items()}
 

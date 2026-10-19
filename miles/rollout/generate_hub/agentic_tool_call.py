@@ -22,6 +22,8 @@ Agent function contract:
   Returning None means no extra metadata to attach.
   Returning a dict merges it into every sample's metadata, so downstream
   reward models (--custom-rm-path) can read whatever the agent left there.
+  Expected task failures should return a normal outcome for reward evaluation.
+  Unhandled exceptions abort the episode; they do not imply a zero reward.
 
   Under ``subproc`` (the default) each call runs in a child process of its own:
   its arguments and return value must be picklable, and module-level state lasts

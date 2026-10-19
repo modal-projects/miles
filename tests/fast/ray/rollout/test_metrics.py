@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples_grouped
+from tests.fast.rollout.inference_rollout.conftest import make_eval_args, make_eval_prompt_dataset_cache
 
 from miles.ray.rollout.metrics import (
     _compute_episode_response_length_metrics,
@@ -14,6 +17,8 @@ from miles.ray.rollout.metrics import (
     log_eval_rollout_data,
     log_rollout_data,
 )
+from miles.rollout import sglang_rollout
+from miles.rollout.inference_rollout import inference_rollout_eval
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
@@ -123,13 +128,14 @@ class TestTrainingSampleMetrics:
         samples = [
             make_sample(index=5, reward=0.0),
             make_sample(index=None, reward=0.0),
+            make_sample(index=None, reward=None, status=Sample.Status.ABORTED),
         ]
         samples[0].metadata = {"raw_reward": 1.0}
         samples[1].metadata = {"raw_reward": 0.0}
 
         out = _compute_training_sample_metrics(args, samples)
 
-        assert out == {"num_training_samples": 2, "episode_raw_reward": pytest.approx(0.5)}
+        assert out == {"num_training_samples": 3, "episode_raw_reward": pytest.approx(0.5)}
 
     def test_empty_samples(self):
         assert _compute_training_sample_metrics(make_args(), []) == {
@@ -741,6 +747,62 @@ class TestLogRolloutData:
 
 
 class TestEvalMetrics:
+    @pytest.mark.parametrize("legacy", [False, True])
+    @pytest.mark.parametrize("reward_key", [None, "score"])
+    async def test_unscored_attempts_count_as_eval_failures_without_changing_rewards(
+        self, monkeypatch, legacy, reward_key
+    ):
+        args = make_args(
+            **{
+                **make_eval_args(),
+                "reward_key": reward_key,
+                "eval_reward_key": reward_key,
+                "log_reward_category": "category" if reward_key else None,
+                "log_passrate": True,
+                "n_samples_per_eval_prompt": 2,
+            }
+        )
+        cache = make_eval_prompt_dataset_cache(args)
+        [dataset] = cache.values()
+        dataset.samples = [Sample(prompt="p", group_index=i) for i in range(3)]
+        rewards = [0.0, 0.0, 1.0, None, None, None]
+
+        async def generate_and_rm(_state_or_args, sample, **kwargs):
+            reward = rewards[sample.index]
+            sample.status = Sample.Status.ABORTED if reward is None else Sample.Status.COMPLETED
+            sample.reward = (
+                {"score": reward, "category": "pass" if reward else "fail"}
+                if reward_key and reward is not None
+                else reward
+            )
+            return sample
+
+        module = sglang_rollout if legacy else inference_rollout_eval
+        monkeypatch.setattr(module, "generate_and_rm", generate_and_rm)
+        monkeypatch.setattr("miles.ray.rollout.metrics.tracking.log", lambda *args, **kwargs: None)
+        [dataset_cfg] = args.eval_datasets
+        if legacy:
+            monkeypatch.setattr(sglang_rollout, "EVAL_PROMPT_DATASET", cache)
+            data = await module.eval_rollout_single_dataset(args, 0, dataset_cfg)
+        else:
+            data = await module.eval_rollout_single_dataset(SimpleNamespace(args=args), dataset_cfg, cache)
+
+        assert data[dataset_cfg.name]["rewards"] == rewards
+        out = log_eval_rollout_data(0, args, data)
+        prefix = f"eval/{dataset_cfg.name}"
+        assert out[prefix] == pytest.approx(1 / 6)
+        assert out[f"{prefix}-none_reward_ratio"] == 0.5
+        assert out[f"{prefix}/num_training_samples"] == 6
+        assert out[f"{prefix}/episode_raw_reward"] == pytest.approx(1 / 3)
+        assert out[f"{prefix}/zero_std/count_0.0"] == 1
+        assert out[f"{prefix}/zero_std/all_zero_percentage"] == pytest.approx(1 / 3)
+        assert out[f"{prefix}/zero_std/all_one_percentage"] == 0.0
+        if reward_key:
+            assert out[f"{prefix}/error_cat/fail"] == pytest.approx(2 / 6)
+            assert out[f"{prefix}/error_cat/pass"] == pytest.approx(1 / 6)
+        assert data[dataset_cfg.name]["rewards"] == rewards
+        assert all(sample.reward is None for sample in data[dataset_cfg.name]["samples"][3:])
+
     def test_eval_metrics_are_not_namespaced_by_policy(self, monkeypatch):
         """Pinning the status quo: a run training several policies is refused an eval, so eval keeps one step axis."""
         calls: list[tuple[dict, str]] = []
