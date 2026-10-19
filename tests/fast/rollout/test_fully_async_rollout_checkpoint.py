@@ -34,7 +34,10 @@ class TestCheckpointSampleOwnership:
         event_logger = EventLogger(log_dir=tmp_path / "events", source=SimpleProcessIdentity(component="main"))
         set_event_logger(event_logger)
         args = _checkpoint_args(
-            tmp_path, keep_partial_groups_on_abort=keep_partial_groups, enable_sample_ownership_checker=True
+            tmp_path,
+            keep_partial_groups_on_abort=keep_partial_groups,
+            enable_sample_ownership_checker=True,
+            async_unused_samples_handler="retry",
         )
         source = FakeDataSource(scripted=[make_group(9)])
         SampleOwnershipRecorder.install(
@@ -81,6 +84,7 @@ class TestCheckpointSampleOwnership:
             assert [[sample.index for sample in batch] for batch in output.samples] == (
                 [[90]] if keep_partial_groups else [[90, 91]]
             )
+            assert not restored._retry_buffer
             if not lose_prefetched_batch:
                 await trainer.train(rollout_id=7, rollout_data_pack=output.samples)
             for rollout_id in (8, 9):

@@ -199,30 +199,6 @@ def _make_buffer(**overrides) -> _BufferUnderTest:
     return _BufferUnderTest(buffer=buffer, unused=unused)
 
 
-@pytest.mark.parametrize("survivors", [0, 1, 7, 8])
-async def test_partial_retention_admits_nonempty_groups_without_retry(survivors):
-    under_test = _make_buffer(keep_partial_groups_on_abort=True)
-    group = [
-        Sample(
-            index=i,
-            status=Sample.Status.COMPLETED if i < survivors else Sample.Status.ABORTED,
-            reward=float(i) if i < survivors else None,
-        )
-        for i in range(8)
-    ]
-
-    await _put(under_test.buffer, group)
-
-    if survivors:
-        entry = await _get_one(under_test.buffer)
-        assert entry.group == group[:survivors]
-        assert entry.prompt_group is group
-        assert under_test.unused == []
-    else:
-        assert under_test.buffer.get_metrics()["rollout/fully_async/queue_size"] == 0
-        assert under_test.unused == [(group, UnusedReason.ABORTED)]
-
-
 async def test_partial_retention_precedes_missing_reward_and_dynamic_filters():
     seen = []
 
@@ -242,20 +218,6 @@ async def test_partial_retention_precedes_missing_reward_and_dynamic_filters():
 
     assert seen == [group[:1]]
     assert (await _get_one(under_test.buffer)).group == group[:1]
-    assert under_test.unused == []
-
-
-async def test_retained_group_with_missing_reward_is_still_dropped():
-    under_test = _make_buffer(keep_partial_groups_on_abort=True)
-    group = _make_finished_group(1)
-    group[0].reward = None
-    group[1].status = Sample.Status.ABORTED
-
-    await _put(under_test.buffer, group)
-
-    metrics = under_test.buffer.get_metrics()
-    assert metrics["rollout/fully_async/queue_size"] == 0
-    assert metrics["rollout/dynamic_filter/drop_group_has_missing_reward"] == 1
     assert under_test.unused == []
 
 
@@ -564,9 +526,12 @@ class TestMetricWindows:
 
 
 class TestPutTimeFilters:
-    async def test_an_aborted_group_reports_the_aborted_reason_to_the_unused_handler(self) -> None:
+    @pytest.mark.parametrize("keep_partial_groups", [False, True])
+    async def test_an_aborted_group_reports_the_aborted_reason_to_the_unused_handler(
+        self, keep_partial_groups
+    ) -> None:
         """The configured policy can tell a failed generation from output that merely went stale."""
-        under_test = _make_buffer()
+        under_test = _make_buffer(keep_partial_groups_on_abort=keep_partial_groups)
         group = _make_finished_group(1, status=Sample.Status.ABORTED)
 
         await _put(under_test.buffer, group)

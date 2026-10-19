@@ -1789,19 +1789,8 @@ def test_partial_group_retention_is_opt_in_and_requires_dynamic_global_batch_siz
 
 
 def test_partial_group_retention_accepts_dynamic_batching():
-    parser = argparse.ArgumentParser()
-    get_miles_extra_args_provider()(parser)
-    args = parser.parse_args(
-        REQUIRED_ARGS
-        + [
-            "--keep-partial-groups-on-abort",
-            "--use-dynamic-global-batch-size",
-            "--use-dynamic-batch-size",
-            "--max-tokens-per-gpu",
-            "8192",
-            "--num-rollout",
-            "1",
-        ]
+    args = _parse_megatron_args(
+        ["--keep-partial-groups-on-abort", "--use-dynamic-global-batch-size"] + DYNAMIC_BATCH_ARGS
     )
     miles_validate_args(args)
     assert args.keep_partial_groups_on_abort

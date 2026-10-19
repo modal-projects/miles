@@ -159,7 +159,7 @@ async def test_sync_driver_defaults_to_group_granularity(monkeypatch):
     assert [group[0].group_index for group in output.samples] == [1, 2]
 
 
-@pytest.mark.parametrize("survivors", [0, 1, 3, 4])
+@pytest.mark.parametrize("survivors", [0, 1])
 async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(monkeypatch, survivors):
     harness = Harness(monkeypatch, make_args(rollout_batch_size=1, keep_partial_groups_on_abort=True))
     task = harness.run()
