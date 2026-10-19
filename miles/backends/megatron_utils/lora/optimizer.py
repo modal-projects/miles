@@ -20,6 +20,7 @@ from megatron.core.optimizer.optimizer_config import OptimizerConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
 
 from miles.backends.megatron_utils.lora.dimuon import Dimuon, build_factor_specs, dimuon_init_state_fn
+from miles.backends.megatron_utils.lora.gdn_utils import gdn_gate_rows
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,19 @@ def adapter_slot_parameters(model, slot: int) -> list[torch.nn.Parameter]:
                     parameters.append(param)
                     seen.add(id(param))
     return parameters
+
+
+def frozen_gate_rows(model, slot: int) -> list[tuple[torch.nn.Parameter, slice]]:
+    """LoRA B params of slot ``slot`` whose GDN gate rows stay frozen, with each one's local row range."""
+    from megatron.bridge.peft.multi_lora_layers import MultiLoRALinear
+
+    frozen = []
+    model_chunks = model if isinstance(model, (list, tuple)) else [model]
+    for model_chunk in model_chunks:
+        for module in model_chunk.modules():
+            if isinstance(module, MultiLoRALinear) and (rows := gdn_gate_rows(module)) is not None:
+                frozen.append((module.adapters[slot].linear_out.weight, rows))
+    return frozen
 
 
 def _adam_init_state_fn(opt, config=None):
@@ -121,6 +135,7 @@ class SlotOptimizer:
         self.slot = slot
         self.family = optimizer
         self._model = model
+        self._frozen_rows = frozen_gate_rows(model, slot)
         slot_params = adapter_slot_parameters(model, slot)
         assert slot_params, f"adapter slot {slot} has no parameters; is this a multi-LoRA model?"
 
@@ -179,6 +194,9 @@ class SlotOptimizer:
         self.apply_params(adam_params)
 
     def prepare_grads(self) -> None:
+        # Zero the GDN gate rows of the gradient before anything reads it, so those rows of B stay at zero
+        for param, rows in self._frozen_rows:
+            param.main_grad[rows].zero_()
         for child in self._inner.chained_optimizers:
             child.prepare_grads()
 
