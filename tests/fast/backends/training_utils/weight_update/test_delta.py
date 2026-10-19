@@ -1,4 +1,5 @@
 from argparse import Namespace
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,7 +12,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from miles.backends.training_utils.weight_update.protocols.delta import UpdateWeightFromDiskDelta
-from miles.utils.disk_delta import checksum
+from miles.utils.disk_delta import checksum, get_tensor_locations
 
 _DELTA_MODULE = "miles.backends.training_utils.weight_update.protocols.delta"
 
@@ -94,8 +95,8 @@ class TestReloadEnginesFailureTransitions:
 
 
 class _DeltaReceiver:
-    def __init__(self, baseline: bytes) -> None:
-        self.weights = bytearray(baseline)
+    def __init__(self, baseline: dict[str, bytes]) -> None:
+        self.weights = {name: bytearray(value) for name, value in baseline.items()}
         self.transport_version = 0
         self.served_versions: list[str] = []
 
@@ -115,14 +116,14 @@ class _DeltaReceiver:
             compressed = safetensors.numpy.load_file(directory / filename)[name]
             delta = zstandard.ZstdDecompressor().decompress(compressed.tobytes())
             if index["metadata"]["delta_encoding"] == "xor":
-                self.weights = bytearray(a ^ b for a, b in zip(self.weights, delta, strict=True))
+                self.weights[name] = bytearray(a ^ b for a, b in zip(self.weights[name], delta, strict=True))
             else:
                 count = int(np.frombuffer(delta, dtype="<u4", count=1)[0])
                 positions = np.frombuffer(delta, dtype="<u4", count=count, offset=4)
                 for position, value in zip(positions, delta[4 + 4 * count :], strict=True):
-                    self.weights[position] = value
+                    self.weights[name][position] = value
             with safetensors.safe_open(directory / filename, framework="np") as shard:
-                assert checksum(index["metadata"]["checksum_format"], self.weights) == shard.metadata()[name]
+                assert checksum(index["metadata"]["checksum_format"], self.weights[name]) == shard.metadata()[name]
         self.transport_version = target_version
         return {"success": True}
 
@@ -140,33 +141,36 @@ class _DeltaReceiver:
         pass
 
 
+@contextmanager
+def _single_rank():
+    with (
+        patch(f"{_DELTA_MODULE}.dist") as distributed,
+        patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=None),
+        patch.object(torch, "empty", side_effect=RuntimeError("CPU test has no pinned memory")),
+        patch.object(torch.cuda, "current_device", return_value="cpu"),
+    ):
+        distributed.get_rank.return_value = 0
+        distributed.get_world_size.return_value = 1
+        distributed.all_gather_object.side_effect = lambda output, value, **kwargs: output.__setitem__(0, value)
+        yield
+
+
 class TestDeltaPublicationLifecycle:
     @pytest.mark.parametrize("encoding", ["xor", "overwrite"])
-    @pytest.mark.parametrize(
-        ("storage_dtype", "trainer_dtype", "shape"),
-        [
-            (torch.float16, torch.float32, (2, 3)),
-            (torch.bfloat16, torch.float32, (2, 3)),
-            (torch.float32, torch.float64, (2, 3)),
-            (torch.float64, torch.float32, (2, 3)),
-            (torch.uint8, torch.uint8, (2, 3)),
-            (torch.float8_e4m3fn, torch.float8_e4m3fn, (2, 3)),
-            (torch.float32, torch.float32, ()),
-        ],
-    )
-    def test_repeat_jump_and_rewind_versions_preserve_the_delta_chain(
-        self,
-        tmp_path: Path,
-        encoding: str,
-        storage_dtype: torch.dtype,
-        trainer_dtype: torch.dtype,
-        shape: tuple[int, ...],
-    ) -> None:
-        """Real finalize advances transport state while the receiver reconstructs each published model."""
-        baseline = torch.zeros(shape, dtype=storage_dtype)
+    def test_repeat_jump_and_rewind_versions_preserve_the_delta_chain(self, tmp_path: Path, encoding: str) -> None:
+        """Mixed tensor layouts reconstruct byte-for-byte while transport and model versions advance independently."""
+        baseline = {
+            "fp16": torch.zeros(2, 3, dtype=torch.float16),
+            "bf16": torch.zeros(2, 3, dtype=torch.bfloat16),
+            "fp32": torch.zeros(2, 3, dtype=torch.float32),
+            "fp64": torch.zeros(2, 3, dtype=torch.float64),
+            "packed": torch.zeros(2, 3, dtype=torch.uint8),
+            "fp8": torch.zeros(2, 3, dtype=torch.float8_e4m3fn),
+            "scalar": torch.zeros((), dtype=torch.float32),
+        }
         checkpoint = tmp_path / "hf"
         checkpoint.mkdir()
-        safetensors.torch.save_file({"weight": baseline}, checkpoint / "model.safetensors")
+        safetensors.torch.save_file(baseline, checkpoint / "model.safetensors")
         protocol = UpdateWeightFromDiskDelta(
             Namespace(
                 hf_checkpoint=str(checkpoint),
@@ -179,38 +183,63 @@ class TestDeltaPublicationLifecycle:
                 check_weight_update_equal=False,
             )
         )
-        receiver = _DeltaReceiver(bytes(baseline.reshape(-1).view(torch.uint8).tolist()))
+        receiver = _DeltaReceiver(
+            {name: tensor.reshape(-1).view(torch.uint8).numpy().tobytes() for name, tensor in baseline.items()}
+        )
         protocol.rollout_engines = [receiver]
         protocol.is_sender = True
 
-        with (
-            patch(f"{_DELTA_MODULE}.dist") as distributed,
-            patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=None),
-            patch.object(torch, "empty", side_effect=RuntimeError("CPU test has no pinned memory")),
-            patch.object(torch.cuda, "current_device", return_value="cpu"),
-        ):
-            distributed.get_rank.return_value = 0
-            distributed.get_world_size.return_value = 1
-            distributed.all_gather_object.side_effect = lambda output, value, **kwargs: output.__setitem__(0, value)
-            assert not protocol.begin_sync(
-                weight_version=0,
-                iter_buckets=lambda **kwargs: [[("weight", torch.ones(shape, dtype=trainer_dtype))]],
-            )
-            assert protocol._snapshot["weight"].tobytes() == receiver.weights
+        with _single_rank():
+            loaded = [(name, torch.ones_like(tensor)) for name, tensor in baseline.items()]
+            assert protocol.begin_sync(weight_version=0, iter_buckets=lambda **kwargs: [loaded])
+            assert {name: value.tobytes() for name, value in protocol._snapshot.items()} == receiver.weights
+            # The baseline sync also publishes the loaded trainer weights.
+            protocol.send_bucket(loaded)
+            protocol.after_base_weights()
+            protocol.finalize(weight_version=0)
+            for name, tensor in loaded:
+                assert receiver.weights[name] == tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
             for weight_version in [8, 8, 15, 2]:
-                weights = torch.full(shape, weight_version, dtype=trainer_dtype)
+                weights = {
+                    name: torch.full_like(
+                        tensor,
+                        weight_version + 0.001,
+                        dtype=torch.float32 if name in ("fp16", "bf16", "fp64") else tensor.dtype,
+                    )
+                    for name, tensor in baseline.items()
+                }
                 assert protocol.begin_sync(
                     weight_version=weight_version,
-                    iter_buckets=lambda weights=weights, **kwargs: [[("weight", weights)]],
+                    iter_buckets=lambda weights=weights, **kwargs: [list(weights.items())],
                 )
-                protocol.send_bucket([("weight", weights)])
+                protocol.send_bucket(list(weights.items()))
                 protocol.after_base_weights()
                 protocol.finalize(weight_version=weight_version)
-                expected = weights.to(dtype=storage_dtype).reshape(-1).view(torch.uint8)
-                assert receiver.weights == bytes(expected.tolist())
+                for name, tensor in weights.items():
+                    expected = tensor.to(dtype=baseline[name].dtype).reshape(-1).view(torch.uint8)
+                    assert receiver.weights[name] == expected.numpy().tobytes()
 
-        assert receiver.transport_version == 4
-        assert receiver.served_versions == ["8", "8", "15", "2"]
+        assert receiver.transport_version == 5
+        assert receiver.served_versions == ["0", "8", "8", "15", "2"]
+
+
+@pytest.mark.parametrize(
+    ("name", "tensor", "message"),
+    [
+        ("missing", torch.ones(2, 3), "absent from the canonical checkpoint"),
+        ("packed", torch.ones(2, 3, dtype=torch.bfloat16), "Packed and quantized layouts must match"),
+        ("fp8", torch.ones(2, 3), "Packed and quantized layouts must match"),
+    ],
+)
+def test_rejects_missing_names_and_implicit_quantization(tmp_path, name, tensor, message):
+    safetensors.torch.save_file(
+        {"packed": torch.zeros(2, 3, dtype=torch.uint8), "fp8": torch.zeros(2, 3, dtype=torch.float8_e4m3fn)},
+        tmp_path / "model.safetensors",
+    )
+    protocol = UpdateWeightFromDiskDelta.__new__(UpdateWeightFromDiskDelta)
+    protocol._tensor_locations = get_tensor_locations(str(tmp_path))
+    with pytest.raises(ValueError, match=message):
+        protocol._checkpoint_dtype(name, tensor)
 
 
 def _validation_worker(rank: int, directory: str) -> None:
@@ -220,57 +249,55 @@ def _validation_worker(rank: int, directory: str) -> None:
         "gloo", init_method=(root / "rendezvous").as_uri(), rank=rank, world_size=2, timeout=timedelta(seconds=20)
     )
     try:
-        for phase in ("baseline", "update"):
-            for name, tensor, message in (
-                ("unknown", torch.zeros(2, 3), "absent from the canonical checkpoint"),
-                ("weight", torch.zeros(3, 2), "shape="),
-                ("weight", torch.zeros(2, 3, dtype=torch.uint8), "Packed and quantized layouts must match"),
-                ("frozen", torch.zeros(2, 3), "absent from the baseline snapshot"),
-            ):
-                if phase == "baseline" and name == "frozen":
-                    continue
-                protocol = UpdateWeightFromDiskDelta(
-                    Namespace(
-                        hf_checkpoint=directory,
-                        update_weight_disk_dir=str(root / "deltas"),
-                        update_weight_delta_encoding="xor",
-                        update_weight_delta_checksum="adler32",
-                        custom_update_weight_post_write_path=None,
-                        check_weight_update_equal=False,
-                    )
+        for phase, name, tensor, message in (
+            ("baseline", "weight", torch.zeros(3, 2), "shape="),
+            ("update", "frozen", torch.zeros(2, 3), "absent from the baseline snapshot"),
+        ):
+            protocol = UpdateWeightFromDiskDelta(
+                Namespace(
+                    hf_checkpoint=directory,
+                    update_weight_disk_dir=str(root / "deltas"),
+                    update_weight_delta_encoding="xor",
+                    update_weight_delta_checksum="adler32",
+                    custom_update_weight_post_write_path=None,
+                    check_weight_update_equal=False,
                 )
-                protocol.is_sender = rank == 0
-                protocol.rollout_engines = []
-                visited = []
+            )
+            protocol.is_sender = rank == 0
+            protocol.rollout_engines = []
+            visited = []
 
-                def buckets(*, materialize, name=name, tensor=tensor, visited=visited):
-                    for index, item in enumerate(
-                        [("weight", torch.ones(2, 3)), (name, tensor), ("weight", torch.ones(2, 3))]
-                    ):
-                        dist.all_reduce(torch.ones(1))
-                        visited.append(index)
-                        yield [item] if materialize else []
-
-                with (
-                    patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=dist.group.WORLD),
-                    patch.object(protocol, "finalize") as finalize,
+            def buckets(*, materialize, name=name, tensor=tensor, visited=visited):
+                for index, item in enumerate(
+                    [("weight", torch.ones(2, 3)), (name, tensor), ("weight", torch.ones(2, 3))]
                 ):
-                    if phase == "update":
-                        assert not protocol.begin_sync(
-                            weight_version=0, iter_buckets=lambda **kwargs: [[("weight", torch.zeros(2, 3))]]
-                        )
-                    with pytest.raises(RuntimeError, match=f"{phase} validation failed on rank 0:.*{message}"):
-                        if protocol.begin_sync(weight_version=1, iter_buckets=buckets):
-                            for bucket in buckets(materialize=protocol.is_sender):
-                                if protocol.is_sender:
-                                    protocol.send_bucket(bucket)
-                            protocol.after_base_weights()
-                            protocol.finalize(weight_version=1)
-                    finalize.assert_not_called()
-                assert visited == [0, 1, 2]
-                assert protocol._pool is None
-                assert not list((root / "deltas").rglob("model.safetensors.index.json"))
-                dist.barrier()
+                    dist.all_reduce(torch.ones(1))
+                    visited.append(index)
+                    yield [item] if materialize else []
+
+            with (
+                patch(f"{_DELTA_MODULE}.get_gloo_group", return_value=dist.group.WORLD),
+                patch.object(protocol, "finalize") as finalize,
+            ):
+                if phase == "update":
+                    # The baseline sync also publishes; drain it before the update under test.
+                    assert protocol.begin_sync(
+                        weight_version=0, iter_buckets=lambda **kwargs: [[("weight", torch.zeros(2, 3))]]
+                    )
+                    if protocol.is_sender:
+                        protocol.send_bucket([("weight", torch.zeros(2, 3))])
+                    protocol.after_base_weights()
+                with pytest.raises(RuntimeError, match=f"{phase} validation failed on rank 0:.*{message}"):
+                    if protocol.begin_sync(weight_version=1, iter_buckets=buckets):
+                        for bucket in buckets(materialize=protocol.is_sender):
+                            if protocol.is_sender:
+                                protocol.send_bucket(bucket)
+                        protocol.after_base_weights()
+                        protocol.finalize(weight_version=1)
+                finalize.assert_not_called()
+            assert visited == [0, 1, 2]
+            assert protocol._pool is None
+            dist.barrier()
     finally:
         dist.destroy_process_group()
 
