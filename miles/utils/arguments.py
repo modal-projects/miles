@@ -892,7 +892,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Retain non-aborted trajectories from partially aborted prompt groups in synchronous and "
                     "fully async rollout. Requires --use-dynamic-global-batch-size. "
-                    "Only non-compact outputs (one Sample per trajectory) are supported."
+                    "If a trajectory returns multiple samples, retain or discard them together."
                 ),
             )
             parser.add_argument(

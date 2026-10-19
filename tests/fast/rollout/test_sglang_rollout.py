@@ -1,11 +1,13 @@
 import asyncio
 import logging
 from argparse import Namespace
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from miles.rollout import sglang_rollout
+from miles.rollout.filter_hub.base_types import iter_samples
 from miles.utils.function_registry import function_registry
 from miles.utils.lora.utils import LORA_ADAPTER_NAME
 from miles.utils.types import Sample
@@ -77,9 +79,12 @@ class TestGenerateExtraKey:
 
 
 class TestGenerateAndRmGroup:
-    @pytest.mark.parametrize(("survivors", "retain"), [(0, True), (1, True), (1, False)])
+    @pytest.mark.parametrize(
+        ("survivors", "retain", "compact"),
+        [(0, True, False), (1, True, False), (1, False, False), (0, True, True), (1, True, True)],
+    )
     async def test_group_reward_sees_only_retained_trajectories(
-        self, monkeypatch: pytest.MonkeyPatch, survivors: int, retain: bool
+        self, monkeypatch: pytest.MonkeyPatch, survivors: int, retain: bool, compact: bool
     ) -> None:
         args = _make_generate_args()
         args.group_rm = True
@@ -89,9 +94,14 @@ class TestGenerateAndRmGroup:
         sources = [Sample(index=i, prompt="prompt") for i in range(2)]
         scored: list[list[Sample]] = []
 
-        async def generate(args: Namespace, sample: Sample, sampling_params: dict, evaluation: bool = False) -> Sample:
+        async def generate(
+            args: Namespace, sample: Sample, sampling_params: dict, evaluation: bool = False
+        ) -> Sample | list[Sample]:
             sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
             sample.response = "answer" if sample.index < survivors else ""
+            if compact:
+                sample.rollout_id = sample.index
+                return [replace(sample, status=Sample.Status.COMPLETED), sample]
             return sample
 
         async def score(args: Namespace, samples: list[Sample]) -> list[float]:
@@ -103,10 +113,11 @@ class TestGenerateAndRmGroup:
         with function_registry.temporary(args.custom_rm_path, score):
             result = await sglang_rollout.generate_and_rm_group(args, sources, {})
 
-        expected = sources[:survivors] if retain else sources
+        expected = list(iter_samples(result[:survivors] if retain else result))
         assert scored == ([expected] if expected else [])
-        assert result == sources
-        assert all(sample.reward is None for sample in result if sample not in expected)
+        assert len(result) == len(sources)
+        assert all(sample.reward is None for sample in iter_samples(result) if sample not in expected)
+        assert [sample.reward for sample in expected] == [float(sample.index) for sample in expected]
 
 
 class TestAbort:

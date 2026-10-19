@@ -1,7 +1,7 @@
-import itertools
 import logging
 from typing import Any
 
+from miles.rollout.filter_hub.base_types import iter_samples
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
 from miles.utils.dp_schedule import TrainParallelConfig
 from miles.utils.types import Sample
@@ -17,8 +17,8 @@ def postprocess_rollout_data(
     validate_compact_rollout_ids(data)
 
     # flatten the data if it is a list of lists
-    while isinstance(data[0], list):
-        data = list(itertools.chain.from_iterable(data))
+    while any(isinstance(item, list) for item in data):
+        data = list(iter_samples(data))
 
     # Compact rollouts must not be trimmed by sample count; the schedule drops
     # whole trailing rollouts instead.
@@ -55,7 +55,7 @@ def validate_compact_rollout_ids(node, depth=0):
     if isinstance(node, Sample):
         return
     assert isinstance(node, list), f"unexpected rollout output node type: {type(node).__name__}"
-    if node and isinstance(node[0], Sample):
+    if node and all(isinstance(item, Sample) for item in node):
         if depth >= 2 and len(node) > 1:
             rids = [s.rollout_id for s in node]
             missing = [i for i, r in enumerate(rids) if r is None]

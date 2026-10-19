@@ -18,6 +18,7 @@ from miles.rollout.base_types import (
     RolloutFnTrainOutput,
     compute_kv_cache_namespace,
 )
+from miles.rollout.filter_hub.base_types import iter_samples
 from miles.rollout.filter_hub.common_filters import retain_non_aborted_trajectories
 from miles.rollout.generate_hub.single_turn import generate
 from miles.rollout.generate_utils.generate_endpoint_utils import policy_uses_routing_key
@@ -184,7 +185,9 @@ async def generate_and_rm_group(
         return group
 
     if args.group_rm:
-        reward_group = retain_non_aborted_trajectories(group) if args.keep_partial_groups_on_abort else group
+        reward_group = (
+            list(iter_samples(retain_non_aborted_trajectories(group))) if args.keep_partial_groups_on_abort else group
+        )
         if reward_group:
             await batched_async_rm(args, reward_group, inplace_set_reward_field=True)
 

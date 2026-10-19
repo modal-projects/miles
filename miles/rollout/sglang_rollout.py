@@ -14,7 +14,7 @@ from packaging.version import parse
 from tqdm import tqdm
 
 from miles.rollout.base_types import GenerateFnInput, RolloutFnEvalOutput, RolloutFnTrainOutput
-from miles.rollout.filter_hub.base_types import MetricGatherer
+from miles.rollout.filter_hub.base_types import MetricGatherer, iter_samples
 from miles.rollout.filter_hub.common_filters import apply_preput_filters, retain_non_aborted_trajectories
 from miles.rollout.generate_utils.rollout_topk_logprobs import (
     append_rollout_topk_logprobs,
@@ -412,7 +412,9 @@ async def generate_and_rm_group(
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
-        reward_group = retain_non_aborted_trajectories(group) if args.keep_partial_groups_on_abort else group
+        reward_group = (
+            list(iter_samples(retain_non_aborted_trajectories(group))) if args.keep_partial_groups_on_abort else group
+        )
         if reward_group:
             rewards = await batched_async_rm(args, reward_group)
             for sample, reward in zip(reward_group, rewards, strict=False):
