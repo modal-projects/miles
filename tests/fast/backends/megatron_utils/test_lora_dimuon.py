@@ -189,3 +189,22 @@ def test_qkv_split_has_query_key_and_value_blocks():
 
 def test_gated_attention_keeps_query_and_gate_in_one_block_like_hf_q_proj():
     assert fused_row_split(_qkv_module(attention_output_gate=True)) == (16, 4, 4)
+
+
+def _gdn_in_proj_module(tp):
+    config = SimpleNamespace(
+        linear_key_head_dim=4, linear_value_head_dim=4, linear_num_key_heads=2, linear_num_value_heads=4
+    )
+    # Unsharded rows are q 8, k 8, v 16, z 16, b 4 and a 4
+    local_rows = 56 // tp
+    adapter = SimpleNamespace(linear_out=SimpleNamespace(weight=torch.zeros(local_rows, 8)))
+    return SimpleNamespace(
+        base_linear_name="decoder.layers.0.self_attention.in_proj",
+        to_wrap=SimpleNamespace(config=config),
+        adapters=[adapter],
+    )
+
+
+@pytest.mark.parametrize(("tp", "expected"), [(1, (8, 8, 16, 16, 4, 4)), (2, (4, 4, 8, 8, 2, 2))])
+def test_gdn_in_proj_splits_into_q_k_v_z_b_a_blocks_per_tp_shard(tp, expected):
+    assert fused_row_split(_gdn_in_proj_module(tp)) == expected

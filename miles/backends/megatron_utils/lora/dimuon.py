@@ -209,7 +209,7 @@ def dimuon_init_state_fn(opt, config=None) -> None:
 
 
 def fused_row_split(module) -> tuple[int, ...] | None:
-    """Projection row split for B of a fused ``linear_qkv`` / gated ``linear_fc1``, else ``None``.
+    """Projection row split for B of a fused ``linear_qkv``, gated ``linear_fc1`` or GDN ``in_proj``, else ``None``.
 
     q/k/v rows are interleaved per query group (Megatron's layout), so the split is
     per group. With an attention output gate each group's rows are query then gate,
@@ -225,11 +225,27 @@ def fused_row_split(module) -> tuple[int, ...] | None:
         if getattr(config, "attention_output_gate", False):
             return (2 * q, kv, kv)
         return (q, kv, kv)
+    if name == "in_proj" and hasattr(config, "linear_num_key_heads"):
+        return _gdn_in_proj_split(config, module.adapters[0].linear_out.weight.shape[-2])
     if name == "linear_fc1" and getattr(config, "gated_linear_unit", False):
         out = module.adapters[0].linear_out.weight.shape[-2]  # local rows, twice the ffn shard
         assert out % 2 == 0, f"gated linear_fc1 adapter rows {out} are not even"
         return (out // 2, out // 2)
     return None
+
+
+def _gdn_in_proj_split(config, local_rows: int) -> tuple[int, ...]:
+    """Per-TP-shard row sizes of the q, k, v, z, b and a blocks of a Gated DeltaNet ``in_proj``.
+
+    Each shard holds its heads' rows as ``[q; k; v; z; b; a]`` (Bridge's GDN layout), so the
+    shards gather into one group per shard."""
+    qk = config.linear_key_head_dim * config.linear_num_key_heads
+    v = config.linear_value_head_dim * config.linear_num_value_heads
+    heads = config.linear_num_value_heads
+    total = 2 * qk + 2 * v + 2 * heads
+    assert total % local_rows == 0, f"GDN in_proj adapter rows {local_rows} do not divide {total}"
+    tp = total // local_rows
+    return (qk // tp, qk // tp, v // tp, v // tp, heads // tp, heads // tp)
 
 
 def build_factor_specs(model_chunks, slot: int) -> dict[int, FactorSpec]:
