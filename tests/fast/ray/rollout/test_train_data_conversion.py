@@ -10,6 +10,7 @@ from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
 from miles.ray.rollout import train_data_conversion
+from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
     _post_process_rewards,
@@ -1049,6 +1050,29 @@ class TestCanPrecomputeDpSchedule:
         data = _make_split_data(6)
         data["dynamic_global_batch_size"] = 6
         assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+
+@pytest.mark.parametrize("num_samples, precompute", [(12, False), (13, False), (13, True)])
+def test_dynamic_batch_alignment_depends_on_schedule(num_samples, precompute):
+    args = make_args(
+        global_batch_size=64,
+        use_dynamic_global_batch_size=True,
+        disable_rollout_trim_samples=True,
+        use_dynamic_batch_size=True,
+        max_tokens_per_gpu=64,
+    )
+    config = make_train_parallel_config(dp_size=4, supports_precomputed_schedule=precompute)
+    samples, metadata = postprocess_rollout_data(args, [make_sample(index=i) for i in range(num_samples)], config)
+    data = {**_make_split_data(len(samples)), **metadata}
+
+    if num_samples == 13 and not precompute:
+        with pytest.raises(ValueError, match="Training-side DP scheduling requires complete batches"):
+            split_train_data_by_dp(args, data, config)
+        return
+
+    shards = split_train_data_by_dp(args, data, config)
+    assert sum(len(shard["tokens"]) for shard in shards) == 12
+    assert all(shard["dynamic_global_batch_size"] == 12 for shard in shards)
 
 
 class TestSplitTrainDataByDpScheduled:

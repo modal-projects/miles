@@ -371,6 +371,13 @@ def split_train_data_by_dp(
     if can_precompute_dp_schedule(args, data, train_parallel_config):
         shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
     else:
+        global_batch_size = data.get("dynamic_global_batch_size")
+        if global_batch_size is not None and len(data["tokens"]) % global_batch_size != 0:
+            raise ValueError(
+                f"Training-side DP scheduling requires complete batches: got {len(data['tokens'])} samples "
+                f"with global_batch_size={global_batch_size}. Remove --disable-rollout-trim-samples "
+                "to trim incomplete batches before training."
+            )
         shards = split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config.dp_size)
     return shards
 
