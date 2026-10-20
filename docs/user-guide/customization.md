@@ -186,9 +186,9 @@ def buffer_filter(
 Per-sample, in-place. Set `s.remove_sample = True` to exclude a sample from the loss
 (advantage normalization still uses it).
 
-The framework passes `data: list[list[Sample]]` — prompt groups containing
-`n_samples_per_prompt` samples, or fewer when
-[`--use-partial-groups-on-abort`](/user-guide/cli-reference#partial-groups-on-abort) is enabled:
+The framework passes `data: list[list[Sample]]` — a list of
+`n_samples_per_prompt`-size groups — so iterate the outer list once to reach `Sample`
+objects:
 
 ```python
 def filter_function(args, data: list[list[Sample]]) -> None:

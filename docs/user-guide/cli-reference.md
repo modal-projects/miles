@@ -283,42 +283,8 @@ Sections mirror the launch-script argument groups.
 | `--rollout-submission-granularity` | enum | driver | `group` or `sample`: what frees rollout submission capacity. Unset means `sample` under `--fully-async`, `group` otherwise. |
 | `--buffer-filter-path` | str | – | Buffer dequeue filter. |
 | `--rollout-sample-filter-path` | str | – | Per-sample filter. |
-| `--use-partial-groups-on-abort` | flag | off | Keep non-aborted trajectories from partially aborted prompt groups; requires `--use-dynamic-global-batch-size`. |
-| `--partial-groups-on-abort-min-ratio` | float | `0.5` | Minimum fraction of non-aborted trajectories when keeping partial groups; must be in `(0, 1]`. |
-
-#### Partial groups on abort
-
-By default, one aborted trajectory rejects its entire prompt group. Opt in with
-`--use-partial-groups-on-abort --use-dynamic-global-batch-size` to retain the other
-trajectories. This applies to synchronous and fully asynchronous rollout. The
-existing dynamic-batching prerequisites still apply.
-
-A group is kept when its fraction of non-aborted trajectories meets
-`--partial-groups-on-abort-min-ratio`; equality passes. Groups below the threshold
-follow the existing whole-group rejection path.
-Group reward evaluation (`--group-rm`) receives only non-aborted trajectories from
-accepted groups; custom group reward functions must accept variable-sized groups.
-Reward normalization uses the retained trajectories and their `group_index`
-(or explicit prompt boundaries).
-
-For compact outputs (`list[Sample]` from one trajectory), an aborted chunk discards
-the whole trajectory. The minimum ratio counts trajectories, not chunks.
-Retained chunks keep their shared `rollout_id` and prompt
-`group_index`. Group reward functions receive a flat list of retained chunks;
-the default reward normalizer requires one shared reward per trajectory and counts
-each trajectory once, regardless of its chunk count.
-
-Compact dynamic batches require rollout-side DP scheduling. All retained chunks
-are scheduled in one optimizer step, with batch size and loss normalization based
-on the number of trajectories, not chunks. The chunks must still admit a valid
-DP/VPP-aligned micro-batch schedule; samples are not duplicated to pad a batch.
-In multi-policy runs, all chunks of a trajectory must train the same policy.
-
-The collector still requests `rollout_batch_size` accepted prompt groups, not extra
-trajectories to refill the original global batch size. Training uses the resulting
-dynamic batch size, subject to the backend's existing alignment requirements.
-Synchronous collection replaces entirely rejected groups. For fully async drop and
-retry behavior, see [retaining partially aborted groups](/user-guide/fully-async#retaining-partially-aborted-groups).
+| `--use-partial-groups-on-abort` | flag | off | Keep non-aborted trajectories in sync or fully async rollout. Requires `--use-dynamic-global-batch-size`. |
+| `--partial-groups-on-abort-min-ratio` | float | `0.5` | Minimum non-aborted fraction of a prompt group when the option above is enabled. Range `(0, 1]`; equality passes, groups below it are rejected. |
 
 ### SGLang and router
 
