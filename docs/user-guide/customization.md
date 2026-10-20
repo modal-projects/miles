@@ -169,7 +169,7 @@ Group reward evaluation (`--group-rm`) receives only survivors of retained group
 group reward functions must accept variable-sized groups. Reward normalization uses
 the retained trajectories and their `group_index` (or explicit prompt boundaries).
 The generate function must currently return a `Sample`, not a list, and leave
-`rollout_id` unset. Compact-output retention is not supported.
+`rollout_id` unset. Compact outputs are not supported.
 
 The collector still requests `rollout_batch_size` accepted prompt groups, not extra
 trajectories to refill the original global batch size. Training uses the resulting
@@ -209,7 +209,7 @@ Per-sample, in-place. Set `s.remove_sample = True` to exclude a sample from the 
 (advantage normalization still uses it).
 
 The framework passes `data: list[list[Sample]]` — prompt groups containing
-`n_samples_per_prompt` samples, or fewer when partial-group retention is enabled:
+`n_samples_per_prompt` samples, or fewer when `--use-partial-groups-on-abort` is enabled:
 
 ```python
 def filter_function(args, data: list[list[Sample]]) -> None:

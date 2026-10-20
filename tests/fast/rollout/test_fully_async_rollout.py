@@ -187,7 +187,7 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(mo
 
 
 @pytest.mark.parametrize("has_abort", [False, True])
-async def test_partial_retention_accounts_only_actual_removals_per_policy(sample_flow_event_dir, has_abort):
+async def test_partial_groups_on_abort_account_only_actual_removals_per_policy(sample_flow_event_dir, has_abort):
     args = make_args(
         use_partial_groups_on_abort=True,
         enable_sample_ownership_checker=True,

@@ -43,15 +43,15 @@ def test_dynamic_filter_output_is_a_compatibility_alias():
 
 
 @pytest.mark.parametrize("compact", [[make_sample()], Sample(rollout_id=1)])
-def test_retention_rejects_compact_outputs(compact):
+def test_partial_groups_on_abort_reject_compact_outputs(compact):
     with pytest.raises(ValueError, match="does not support compact"):
-        retain_non_aborted_trajectories([make_sample(), compact], min_retention_ratio=0.5)
+        retain_non_aborted_trajectories([make_sample(), compact], min_survivor_ratio=0.5)
 
 
-def test_retention_does_not_replace_reward_or_status_filters():
+def test_partial_groups_on_abort_preserve_reward_and_status_filters():
     group = [make_sample(reward=None), make_sample(status=Sample.Status.FAILED)]
 
-    assert retain_non_aborted_trajectories(group, min_retention_ratio=0.5) == group
+    assert retain_non_aborted_trajectories(group, min_survivor_ratio=0.5) == group
 
 
 @pytest.mark.parametrize(

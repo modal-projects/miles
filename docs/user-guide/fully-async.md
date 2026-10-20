@@ -215,8 +215,8 @@ Staleness control decides which of those groups training is allowed to see:
 retains non-aborted trajectories in both synchronous and fully asynchronous rollout.
 
 In fully async mode, retaining a partial group does not retry its missing members.
-A group below the retention threshold follows `--async-unused-samples-handler`. If a retained
-group becomes stale before consumption, that same handler applies to its original
+A group below the minimum survivor ratio follows `--async-unused-samples-handler`.
+If a retained group becomes stale before consumption, that same handler applies to its original
 input group. Missing-reward and dynamic-filter rejections remain direct drops.
 
 When those knobs are not enough, `--custom-async-data-buffer-path` replaces the buffer

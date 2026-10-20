@@ -1800,7 +1800,7 @@ def test_dynamic_global_batch_size_requires_dynamic_batch_size():
         miles_validate_args(args)
 
 
-def test_partial_group_retention_is_opt_in_and_requires_dynamic_global_batch_size():
+def test_partial_groups_on_abort_require_opt_in_and_dynamic_global_batch_size():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)
     assert not parser.parse_args(REQUIRED_ARGS).use_partial_groups_on_abort
@@ -1810,7 +1810,7 @@ def test_partial_group_retention_is_opt_in_and_requires_dynamic_global_batch_siz
         miles_validate_args(args)
 
 
-def test_partial_group_retention_accepts_dynamic_batching():
+def test_partial_groups_on_abort_accept_dynamic_batching():
     args = _parse_megatron_args(
         ["--use-partial-groups-on-abort", "--use-dynamic-global-batch-size"] + DYNAMIC_BATCH_ARGS
     )
@@ -1820,7 +1820,7 @@ def test_partial_group_retention_accepts_dynamic_batching():
 
 
 @pytest.mark.parametrize("ratio", [0, 1.1])
-def test_partial_group_retention_rejects_invalid_ratio(ratio):
+def test_partial_groups_on_abort_reject_invalid_ratio(ratio):
     args = _parse_megatron_args(
         [
             "--use-partial-groups-on-abort",
