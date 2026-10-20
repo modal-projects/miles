@@ -209,15 +209,13 @@ Staleness control decides which of those groups training is allowed to see:
 | `--max-weight-staleness` | Maximum gap between a group's oldest weight version and the current engine version. Unset by default, which disables the filter |
 | `--async-unused-samples-handler` | What happens to a group training does not use, either aborted or too stale. The default `drop` discards it; `retry` recycles its prompts into the data source for regeneration. Dynamic-filter rejects are always dropped |
 
-### Retaining partially aborted groups
-
-[`--use-partial-groups-on-abort`](/user-guide/cli-reference#partial-groups-on-abort)
-retains non-aborted trajectories in both synchronous and fully asynchronous rollout.
-
-In fully async mode, retaining a partial group does not retry its missing members.
-A group below the configured minimum ratio follows `--async-unused-samples-handler`.
-If a retained group becomes stale before consumption, that same handler applies to its original
-input group. Missing-reward and dynamic-filter rejections remain direct drops.
+With `--use-partial-groups-on-abort --use-dynamic-global-batch-size`, a group is kept
+if at least half its trajectories are non-aborted (adjust with
+`--partial-groups-on-abort-min-ratio`; see [CLI reference](/user-guide/cli-reference#reward-and-filters)).
+Aborted trajectories are removed before group reward evaluation and normalization;
+custom group reward functions must accept variable-sized groups. Missing trajectories
+are not refilled. Below-threshold or stale groups follow `--async-unused-samples-handler`
+for the original prompts.
 
 When those knobs are not enough, `--custom-async-data-buffer-path` replaces the buffer
 itself. This is a larger step than setting any flag above: your `DataBuffer` subclass
