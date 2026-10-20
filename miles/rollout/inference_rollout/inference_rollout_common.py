@@ -185,8 +185,8 @@ async def generate_and_rm_group(
 
     if args.group_rm:
         reward_group = (
-            retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)
-            if args.keep_partial_groups_on_abort
+            retain_non_aborted_trajectories(group, args.partial_groups_on_abort_min_ratio)
+            if args.use_partial_groups_on_abort
             else group
         )
         if reward_group:

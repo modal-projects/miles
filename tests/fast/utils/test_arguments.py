@@ -1803,8 +1803,8 @@ def test_dynamic_global_batch_size_requires_dynamic_batch_size():
 def test_partial_group_retention_is_opt_in_and_requires_dynamic_global_batch_size():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)
-    assert not parser.parse_args(REQUIRED_ARGS).keep_partial_groups_on_abort
-    args = parser.parse_args(["--keep-partial-groups-on-abort", "--num-rollout", "1"] + REQUIRED_ARGS)
+    assert not parser.parse_args(REQUIRED_ARGS).use_partial_groups_on_abort
+    args = parser.parse_args(["--use-partial-groups-on-abort", "--num-rollout", "1"] + REQUIRED_ARGS)
 
     with pytest.raises(AssertionError, match="requires --use-dynamic-global-batch-size"):
         miles_validate_args(args)
@@ -1812,25 +1812,25 @@ def test_partial_group_retention_is_opt_in_and_requires_dynamic_global_batch_siz
 
 def test_partial_group_retention_accepts_dynamic_batching():
     args = _parse_megatron_args(
-        ["--keep-partial-groups-on-abort", "--use-dynamic-global-batch-size"] + DYNAMIC_BATCH_ARGS
+        ["--use-partial-groups-on-abort", "--use-dynamic-global-batch-size"] + DYNAMIC_BATCH_ARGS
     )
     miles_validate_args(args)
-    assert args.keep_partial_groups_on_abort
-    assert args.partial_group_min_retention_ratio == 0.5
+    assert args.use_partial_groups_on_abort
+    assert args.partial_groups_on_abort_min_ratio == 0.5
 
 
 @pytest.mark.parametrize("ratio", [0, 1.1])
 def test_partial_group_retention_rejects_invalid_ratio(ratio):
     args = _parse_megatron_args(
         [
-            "--keep-partial-groups-on-abort",
+            "--use-partial-groups-on-abort",
             "--use-dynamic-global-batch-size",
-            "--partial-group-min-retention-ratio",
+            "--partial-groups-on-abort-min-ratio",
             str(ratio),
         ]
         + DYNAMIC_BATCH_ARGS
     )
-    with pytest.raises(AssertionError, match="--partial-group-min-retention-ratio must be in"):
+    with pytest.raises(AssertionError, match="--partial-groups-on-abort-min-ratio must be in"):
         miles_validate_args(args)
 
 

@@ -35,7 +35,7 @@ class TestCheckpointSampleOwnership:
         set_event_logger(event_logger)
         args = _checkpoint_args(
             tmp_path,
-            keep_partial_groups_on_abort=keep_partial_groups,
+            use_partial_groups_on_abort=keep_partial_groups,
             enable_sample_ownership_checker=True,
             async_unused_samples_handler="retry",
         )

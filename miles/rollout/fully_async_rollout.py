@@ -222,7 +222,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         do_print = True
 
         for entry in entries:
-            if args.keep_partial_groups_on_abort:
+            if args.use_partial_groups_on_abort:
                 assert 0 < len(entry.group) <= args.n_samples_per_prompt
             else:
                 assert len(entry.group) == args.n_samples_per_prompt

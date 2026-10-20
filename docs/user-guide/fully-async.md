@@ -211,7 +211,7 @@ Staleness control decides which of those groups training is allowed to see:
 
 ### Retaining partially aborted groups
 
-[`--keep-partial-groups-on-abort`](/user-guide/customization#retaining-partially-aborted-groups)
+[`--use-partial-groups-on-abort`](/user-guide/customization#retaining-partially-aborted-groups)
 retains non-aborted trajectories in both synchronous and fully asynchronous rollout.
 
 In fully async mode, retaining a partial group does not retry its missing members.

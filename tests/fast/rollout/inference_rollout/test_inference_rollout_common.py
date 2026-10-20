@@ -34,7 +34,7 @@ async def test_group_reward_sees_only_retained_trajectories(survivors, retain, e
         return GenerateFnOutput(samples=sample)
 
     state = make_state(generate)
-    state.args.keep_partial_groups_on_abort = retain
+    state.args.use_partial_groups_on_abort = retain
     state.args.custom_rm_path = "test:partial_group_reward"
     sources = [Sample(index=i, prompt="prompt") for i in range(4)]
     scored = []

@@ -91,7 +91,7 @@ def _make_args() -> Namespace:
         async_data_buffer_capacity_factor=1.0,
         custom_async_data_buffer_path_per_model=None,
         dynamic_sampling_filter_path=None,
-        keep_partial_groups_on_abort=False,
+        use_partial_groups_on_abort=False,
         max_weight_staleness=None,
         megatron_config=encode_megatron_config("solver", "verifier"),
         reward_key=None,
@@ -147,9 +147,9 @@ def _make_single_policy_args(**overrides) -> Namespace:
     defaults = dict(
         async_data_buffer_capacity_factor=1000.0,
         dynamic_sampling_filter_path=None,
-        keep_partial_groups_on_abort=False,
+        use_partial_groups_on_abort=False,
         enable_sample_ownership_checker=False,
-        partial_group_min_retention_ratio=0.5,
+        partial_groups_on_abort_min_ratio=0.5,
         max_weight_staleness=None,
         reward_key=None,
         rollout_batch_size=1,
@@ -210,8 +210,8 @@ async def test_partial_retention_precedes_missing_reward_and_dynamic_filters(min
 
     with function_registry.temporary("test:retain_survivors", keep):
         under_test = _make_buffer(
-            keep_partial_groups_on_abort=True,
-            partial_group_min_retention_ratio=min_retention_ratio,
+            use_partial_groups_on_abort=True,
+            partial_groups_on_abort_min_ratio=min_retention_ratio,
             dynamic_sampling_filter_path="test:retain_survivors",
         )
     group = _make_finished_group(1)
@@ -540,7 +540,7 @@ class TestPutTimeFilters:
         self, keep_partial_groups
     ) -> None:
         """The configured policy can tell a failed generation from output that merely went stale."""
-        under_test = _make_buffer(keep_partial_groups_on_abort=keep_partial_groups)
+        under_test = _make_buffer(use_partial_groups_on_abort=keep_partial_groups)
         group = _make_finished_group(1, status=Sample.Status.ABORTED)
 
         await _put(under_test.buffer, group)

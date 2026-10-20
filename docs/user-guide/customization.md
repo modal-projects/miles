@@ -158,12 +158,12 @@ Hook to normalize rewards differently from the default GRPO normalization.
 ### Retaining partially aborted groups
 
 By default, one aborted trajectory rejects its entire prompt group. Opt in with
-`--keep-partial-groups-on-abort --use-dynamic-global-batch-size` to retain the other
+`--use-partial-groups-on-abort --use-dynamic-global-batch-size` to retain the other
 trajectories. This applies to synchronous and fully asynchronous rollout. The
 existing dynamic-batching prerequisites still apply.
 
 At least half of the original trajectories must survive by default. Set
-`--partial-group-min-retention-ratio` to adjust the threshold: equality passes,
+`--partial-groups-on-abort-min-ratio` to adjust the threshold: equality passes,
 and groups below it follow the existing whole-group rejection path.
 Group reward evaluation (`--group-rm`) receives only survivors of retained groups; custom
 group reward functions must accept variable-sized groups. Reward normalization uses

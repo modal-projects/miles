@@ -887,7 +887,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--keep-partial-groups-on-abort",
+                "--use-partial-groups-on-abort",
                 action="store_true",
                 help=(
                     "Retain non-aborted trajectories from partially aborted prompt groups in synchronous and "
@@ -896,12 +896,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--partial-group-min-retention-ratio",
+                "--partial-groups-on-abort-min-ratio",
                 type=float,
                 default=0.5,
                 help=(
                     "Minimum fraction of a prompt group's trajectories that must survive abort filtering when "
-                    "--keep-partial-groups-on-abort is enabled. Groups below this threshold are rejected. "
+                    "--use-partial-groups-on-abort is enabled. Groups below this threshold are rejected. "
                     "Must be in (0, 1]."
                 ),
             )
@@ -3749,11 +3749,11 @@ def miles_validate_args(args):
     if args.use_dynamic_batch_size:
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
 
-    if args.keep_partial_groups_on_abort:
-        assert 0 < args.partial_group_min_retention_ratio <= 1, "--partial-group-min-retention-ratio must be in (0, 1]"
+    if args.use_partial_groups_on_abort:
+        assert 0 < args.partial_groups_on_abort_min_ratio <= 1, "--partial-groups-on-abort-min-ratio must be in (0, 1]"
         assert (
             args.use_dynamic_global_batch_size
-        ), "--keep-partial-groups-on-abort requires --use-dynamic-global-batch-size"
+        ), "--use-partial-groups-on-abort requires --use-dynamic-global-batch-size"
 
     # --use-dynamic-global-batch-size has two motivations:
     # 1. compaction/subagent rollouts: static micro-batching cannot guarantee alignment

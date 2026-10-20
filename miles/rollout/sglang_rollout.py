@@ -413,8 +413,8 @@ async def generate_and_rm_group(
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
         reward_group = (
-            retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)
-            if args.keep_partial_groups_on_abort
+            retain_non_aborted_trajectories(group, args.partial_groups_on_abort_min_ratio)
+            if args.use_partial_groups_on_abort
             else group
         )
         if reward_group:
@@ -536,8 +536,8 @@ async def generate_rollout_async(
             assert len(group) == args.n_samples_per_prompt
             all_data.append(group)
             original_group = group
-            if args.keep_partial_groups_on_abort:
-                group = retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)
+            if args.use_partial_groups_on_abort:
+                group = retain_non_aborted_trajectories(group, args.partial_groups_on_abort_min_ratio)
             metric_gatherer.on_group_before_dynamic_filter(args, group)
             filter_output = apply_preput_filters(args, dynamic_filter, group)
             if not filter_output.keep:
@@ -551,7 +551,7 @@ async def generate_rollout_async(
             # add the samples to the data
             # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
-                if args.keep_partial_groups_on_abort:
+                if args.use_partial_groups_on_abort:
                     SampleOwnershipRecorder.log_dropped_groups(
                         args=args, before=original_group, after=group, reason="aborted"
                     )
