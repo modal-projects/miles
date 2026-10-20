@@ -19,6 +19,7 @@ from miles.backends.megatron_utils.update_weight.hf_weight_iterator import (
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.utils.distributed_utils import get_gloo_group
+from miles.utils.lora.utils import is_raw_multi_lora_enabled
 from miles.utils.types import ParamInfo
 
 
@@ -125,7 +126,11 @@ class HfWeightIteratorDirect(MegatronHfWeightIteratorBase):
         return units
 
     def _export_pp_local_lora(self, adapter):
-        assert adapter is None, "multi-LoRA export requires --megatron-to-hf-mode bridge"
+        if adapter is not None:
+            assert is_raw_multi_lora_enabled(self.args), "multi-LoRA export requires --megatron-to-hf-mode bridge"
+            from miles_plugins.models.deepseek_v4_1.lora_export import export_deepseek_v41_multi_lora
+
+            return export_deepseek_v41_multi_lora(self.model, adapter)
         # TODO: will rewrite in native lora refactor
         if "kimi_k3" in self.model_name.lower():
             from miles_plugins.models.kimi_k3.lora import export_kimi_k3_lora_hf_chunks
