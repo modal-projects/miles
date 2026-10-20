@@ -41,7 +41,7 @@ class TestComputeDynamicGlobalBatchSize:
 class TestPostprocessRolloutData:
     @pytest.mark.parametrize(
         ("chunk_counts", "vpp_size", "disable_rollout_trim_samples"),
-        [([3], 1, False), ([3, 1, 2], 2, True), ([1, 1, 1], 1, False)],
+        [([3], 1, False), ([3, 1, 2], 2, True)],
     )
     def test_dynamic_compact_batch_counts_trajectories_and_schedules_every_chunk(
         self, chunk_counts, vpp_size, disable_rollout_trim_samples

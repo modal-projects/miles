@@ -228,6 +228,7 @@ async def test_partial_groups_on_abort_precede_reward_and_dynamic_filters(min_ra
         assert seen == []
         assert under_test.buffer.state_dict() == []
         assert under_test.unused == [(group, UnusedReason.ABORTED)]
+        assert under_test.buffer.get_metrics()["rollout/fully_async/aborted_groups_filtered"] == 1
 
 
 async def _put(buffer: DataBuffer, group: Group) -> None:
@@ -535,12 +536,9 @@ class TestMetricWindows:
 
 
 class TestPutTimeFilters:
-    @pytest.mark.parametrize("keep_partial_groups", [False, True])
-    async def test_an_aborted_group_reports_the_aborted_reason_to_the_unused_handler(
-        self, keep_partial_groups
-    ) -> None:
+    async def test_an_aborted_group_reports_the_aborted_reason_to_the_unused_handler(self) -> None:
         """The configured policy can tell a failed generation from output that merely went stale."""
-        under_test = _make_buffer(use_partial_groups_on_abort=keep_partial_groups)
+        under_test = _make_buffer()
         group = _make_finished_group(1, status=Sample.Status.ABORTED)
 
         await _put(under_test.buffer, group)

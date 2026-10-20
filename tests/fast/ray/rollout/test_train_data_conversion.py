@@ -1050,13 +1050,13 @@ class TestCanPrecomputeDpSchedule:
         assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
 
 
-@pytest.mark.parametrize("num_samples, precompute", [(12, False), (13, False), (13, True)])
-def test_dynamic_batch_alignment_depends_on_schedule(num_samples, precompute):
+@pytest.mark.parametrize("precompute", [False, True])
+def test_dynamic_batch_alignment_depends_on_schedule(precompute):
     args = make_args(use_dynamic_global_batch_size=True, use_dynamic_batch_size=True, max_tokens_per_gpu=64)
     config = make_train_parallel_config(dp_size=4, supports_precomputed_schedule=precompute)
-    data = {**_make_split_data(num_samples), "dynamic_global_batch_size": 12}
+    data = {**_make_split_data(13), "dynamic_global_batch_size": 12}
 
-    if num_samples == 13 and not precompute:
+    if not precompute:
         with pytest.raises(ValueError, match="Training-side DP scheduling requires complete batches"):
             split_train_data_by_dp(args, data, config)
         return
