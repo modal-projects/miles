@@ -108,6 +108,7 @@ class TestGenerateAndRmGroup:
         assert scored == ([expected] if expected else [])
         assert result == sources
         assert all(sample.reward is None for sample in result if sample not in expected)
+        assert [sample.reward for sample in expected] == [float(sample.index) for sample in expected]
 
 
 class TestAbort:

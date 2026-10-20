@@ -50,6 +50,7 @@ async def test_group_reward_sees_only_retained_trajectories(num_non_aborted, ret
     assert scored == ([expected] if expected else [])
     assert result == sources
     assert all(sample.reward is None for sample in result if sample not in expected)
+    assert [sample.reward for sample in expected] == [float(sample.index) for sample in expected]
 
 
 def test_inference_rollout_fn_exposes_the_constructor_input(monkeypatch) -> None:
