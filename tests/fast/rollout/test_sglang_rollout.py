@@ -89,6 +89,7 @@ class TestGenerateAndRmGroup:
         args = _make_generate_args()
         args.group_rm = True
         args.keep_partial_groups_on_abort = retain
+        args.partial_group_min_retention_ratio = 0.5
         args.custom_rm_path = "test:partial_group_reward"
         state = SimpleNamespace(aborted=False)
         sources = [Sample(index=i, prompt="prompt") for i in range(2)]

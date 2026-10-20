@@ -79,12 +79,13 @@ def apply_preput_filters(args: Namespace, dynamic_filter, samples: Group, **kwar
     return call_dynamic_filter(dynamic_filter, args, samples, **kwargs)
 
 
-def retain_non_aborted_trajectories(samples: Group) -> Group:
-    return [
+def retain_non_aborted_trajectories(samples: Group, min_retention_ratio: float) -> Group:
+    retained = [
         trajectory
         for trajectory in samples
         if trajectory and all(sample.status != Sample.Status.ABORTED for sample in iter_samples([trajectory]))
     ]
+    return retained if len(retained) >= min_retention_ratio * len(samples) else []
 
 
 def apply_aborted_filter(args: Namespace, samples: Group, **kwargs) -> FilterOutput:

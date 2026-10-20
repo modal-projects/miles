@@ -149,6 +149,7 @@ def _make_single_policy_args(**overrides) -> Namespace:
         dynamic_sampling_filter_path=None,
         keep_partial_groups_on_abort=False,
         enable_sample_ownership_checker=False,
+        partial_group_min_retention_ratio=0.5,
         max_weight_staleness=None,
         reward_key=None,
         rollout_batch_size=1,
@@ -199,7 +200,8 @@ def _make_buffer(**overrides) -> _BufferUnderTest:
     return _BufferUnderTest(buffer=buffer, unused=unused)
 
 
-async def test_partial_retention_precedes_missing_reward_and_dynamic_filters():
+@pytest.mark.parametrize("min_retention_ratio", [0.5, 0.75])
+async def test_partial_retention_precedes_missing_reward_and_dynamic_filters(min_retention_ratio):
     seen = []
 
     def keep(args, group, **kwargs):
@@ -208,7 +210,9 @@ async def test_partial_retention_precedes_missing_reward_and_dynamic_filters():
 
     with function_registry.temporary("test:retain_survivors", keep):
         under_test = _make_buffer(
-            keep_partial_groups_on_abort=True, dynamic_sampling_filter_path="test:retain_survivors"
+            keep_partial_groups_on_abort=True,
+            partial_group_min_retention_ratio=min_retention_ratio,
+            dynamic_sampling_filter_path="test:retain_survivors",
         )
     group = _make_finished_group(1)
     group[-1].status = Sample.Status.ABORTED
@@ -216,9 +220,14 @@ async def test_partial_retention_precedes_missing_reward_and_dynamic_filters():
 
     await _put(under_test.buffer, group)
 
-    assert seen == [group[:1]]
-    assert (await _get_one(under_test.buffer)).group == group[:1]
-    assert under_test.unused == []
+    if min_retention_ratio == 0.5:
+        assert seen == [group[:1]]
+        assert (await _get_one(under_test.buffer)).group == group[:1]
+        assert under_test.unused == []
+    else:
+        assert seen == []
+        assert under_test.buffer.state_dict() == []
+        assert under_test.unused == [(group, UnusedReason.ABORTED)]
 
 
 async def _put(buffer: DataBuffer, group: Group) -> None:

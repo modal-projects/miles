@@ -157,7 +157,7 @@ async def generate_rollout_async(
             all_data.append(group)
             original_group = group
             if args.keep_partial_groups_on_abort:
-                group = retain_non_aborted_trajectories(group)
+                group = retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)
             metric_gatherer.on_group_before_dynamic_filter(args, group)
             filter_output = apply_preput_filters(args, dynamic_filter, group)
             if not filter_output.keep:

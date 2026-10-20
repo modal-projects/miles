@@ -191,7 +191,7 @@ class DefaultDataBuffer(DataBuffer):
 
     def _preput_filter(self, input: DataBufferInput) -> bool:
         if self._args.keep_partial_groups_on_abort:
-            retained = retain_non_aborted_trajectories(input.group)
+            retained = retain_non_aborted_trajectories(input.group, self._args.partial_group_min_retention_ratio)
             if self._args.enable_sample_ownership_checker:
                 retained_ids = {id(sample) for sample in iter_samples(retained)}
                 input.aborted_sample_indices = [

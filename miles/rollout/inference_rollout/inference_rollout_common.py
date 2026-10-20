@@ -186,7 +186,9 @@ async def generate_and_rm_group(
 
     if args.group_rm:
         reward_group = (
-            list(iter_samples(retain_non_aborted_trajectories(group))) if args.keep_partial_groups_on_abort else group
+            list(iter_samples(retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)))
+            if args.keep_partial_groups_on_abort
+            else group
         )
         if reward_group:
             await batched_async_rm(args, reward_group, inplace_set_reward_field=True)

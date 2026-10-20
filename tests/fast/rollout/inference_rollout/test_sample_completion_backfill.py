@@ -160,7 +160,7 @@ async def test_sync_driver_defaults_to_group_granularity(monkeypatch):
     assert [group[0].group_index for group in output.samples] == [1, 2]
 
 
-@pytest.mark.parametrize("survivors", [0, 1])
+@pytest.mark.parametrize("survivors", [1, 2])
 @pytest.mark.parametrize("compact", [False, True])
 async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(monkeypatch, survivors, compact):
     harness = Harness(monkeypatch, make_args(rollout_batch_size=1, keep_partial_groups_on_abort=True))
@@ -173,15 +173,15 @@ async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(mo
     if compact:
         original[:] = [[replace(sample, status=Sample.Status.COMPLETED), sample] for sample in original]
     harness.finish_group(0)
-    if not survivors:
+    if survivors < 2:
         await asyncio.sleep(0.01)
         assert harness.submitted_group_indices == [1, 2]
         harness.finish_group(1)
 
     output, _ = await task
 
-    assert output.samples == ([original[:survivors]] if survivors else [harness.submitted_groups[1]])
-    if survivors:
+    assert output.samples == ([original[:survivors]] if survivors >= 2 else [harness.submitted_groups[1]])
+    if survivors >= 2:
         assert harness.submitted_group_indices == [1]
     assert len(original) == GROUP_SIZE
 

@@ -162,13 +162,16 @@ By default, one aborted trajectory rejects its entire prompt group. Opt in with
 trajectories. This applies to synchronous and fully asynchronous rollout. The
 existing dynamic-batching prerequisites still apply.
 
-Any nonempty survivor group, including a singleton, proceeds through the remaining
-filters. Group reward evaluation (`--group-rm`) receives only survivors; custom
+At least half of the original trajectories must survive by default. Set
+`--partial-group-min-retention-ratio` to adjust the threshold: equality passes,
+and groups below it follow the existing whole-group rejection path.
+Group reward evaluation (`--group-rm`) receives only survivors of retained groups; custom
 group reward functions must accept variable-sized groups. Reward normalization uses
 the retained trajectories and their `group_index` (or explicit prompt boundaries).
 
 For compact outputs (`list[Sample]` from one trajectory), an aborted chunk discards
-the whole trajectory. Surviving chunks keep their shared `rollout_id` and prompt
+the whole trajectory. The retention ratio counts trajectories, not chunks.
+Surviving chunks keep their shared `rollout_id` and prompt
 `group_index`. Group reward functions receive a flat list of surviving chunks;
 the default reward normalizer requires one shared reward per trajectory and counts
 each trajectory once, regardless of its chunk count.

@@ -42,13 +42,15 @@ def test_dynamic_filter_output_is_a_compatibility_alias():
     assert DynamicFilterOutput is FilterOutput
 
 
-def test_retention_discards_whole_trajectories_with_an_aborted_chunk():
+@pytest.mark.parametrize("min_retention_ratio", [0.5, 0.75])
+def test_retention_counts_trajectories_not_chunks(min_retention_ratio):
     single = make_sample()
-    compact = [make_sample(), make_sample()]
+    compact = [make_sample() for _ in range(5)]
     aborted = [make_sample(), make_sample(status=Sample.Status.ABORTED)]
     group = [single, aborted, compact, []]
 
-    assert retain_non_aborted_trajectories(group) == [single, compact]
+    expected = [single, compact] if min_retention_ratio == 0.5 else []
+    assert retain_non_aborted_trajectories(group, min_retention_ratio) == expected
     assert len(group) == 4
     assert aborted[0].status == Sample.Status.COMPLETED
 
@@ -56,7 +58,7 @@ def test_retention_discards_whole_trajectories_with_an_aborted_chunk():
 def test_retention_does_not_replace_reward_or_status_filters():
     group = [make_sample(reward=None), make_sample(status=Sample.Status.FAILED)]
 
-    assert retain_non_aborted_trajectories(group) == group
+    assert retain_non_aborted_trajectories(group, min_retention_ratio=0.5) == group
 
 
 @pytest.mark.parametrize(

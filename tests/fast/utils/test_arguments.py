@@ -1816,6 +1816,22 @@ def test_partial_group_retention_accepts_dynamic_batching():
     )
     miles_validate_args(args)
     assert args.keep_partial_groups_on_abort
+    assert args.partial_group_min_retention_ratio == 0.5
+
+
+@pytest.mark.parametrize("ratio", [0, 1.1])
+def test_partial_group_retention_rejects_invalid_ratio(ratio):
+    args = _parse_megatron_args(
+        [
+            "--keep-partial-groups-on-abort",
+            "--use-dynamic-global-batch-size",
+            "--partial-group-min-retention-ratio",
+            str(ratio),
+        ]
+        + DYNAMIC_BATCH_ARGS
+    )
+    with pytest.raises(AssertionError, match="--partial-group-min-retention-ratio must be in"):
+        miles_validate_args(args)
 
 
 def test_shared_actor_critic_ppo_rejects_indep_dp():
