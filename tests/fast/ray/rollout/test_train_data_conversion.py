@@ -591,7 +591,7 @@ class TestPostProcessRewards:
         assert processed == pytest.approx([-1.0, -2.0, 1.0, 2.0])
 
     @pytest.mark.parametrize("grpo_std_normalization", [False, True])
-    def test_partial_groups_normalize_survivors_and_keep_singletons(self, grpo_std_normalization):
+    def test_partial_groups_normalize_retained_trajectories_and_keep_singletons(self, grpo_std_normalization):
         args = make_args(use_partial_groups_on_abort=True, grpo_std_normalization=grpo_std_normalization)
         samples = [
             make_sample(group_index=0, index=0, reward=0.0),

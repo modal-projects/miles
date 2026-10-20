@@ -200,19 +200,19 @@ def _make_buffer(**overrides) -> _BufferUnderTest:
     return _BufferUnderTest(buffer=buffer, unused=unused)
 
 
-@pytest.mark.parametrize("min_survivor_ratio", [0.5, 0.75])
-async def test_partial_groups_on_abort_precede_reward_and_dynamic_filters(min_survivor_ratio):
+@pytest.mark.parametrize("min_ratio", [0.5, 0.75])
+async def test_partial_groups_on_abort_precede_reward_and_dynamic_filters(min_ratio):
     seen = []
 
     def keep(args, group, **kwargs):
         seen.append(list(group))
         return DynamicFilterOutput(keep=True)
 
-    with function_registry.temporary("test:retain_survivors", keep):
+    with function_registry.temporary("test:keep_group", keep):
         under_test = _make_buffer(
             use_partial_groups_on_abort=True,
-            partial_groups_on_abort_min_ratio=min_survivor_ratio,
-            dynamic_sampling_filter_path="test:retain_survivors",
+            partial_groups_on_abort_min_ratio=min_ratio,
+            dynamic_sampling_filter_path="test:keep_group",
         )
     group = _make_finished_group(1)
     group[-1].status = Sample.Status.ABORTED
@@ -220,7 +220,7 @@ async def test_partial_groups_on_abort_precede_reward_and_dynamic_filters(min_su
 
     await _put(under_test.buffer, group)
 
-    if min_survivor_ratio == 0.5:
+    if min_ratio == 0.5:
         assert seen == [group[:1]]
         assert (await _get_one(under_test.buffer)).group == group[:1]
         assert under_test.unused == []

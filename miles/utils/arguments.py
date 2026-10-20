@@ -900,7 +900,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=float,
                 default=0.5,
                 help=(
-                    "Minimum fraction of a prompt group's trajectories that must survive abort filtering when "
+                    "Minimum fraction of non-aborted trajectories in a prompt group when "
                     "--use-partial-groups-on-abort is enabled. Groups below this threshold are rejected. "
                     "Must be in (0, 1]."
                 ),

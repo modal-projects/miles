@@ -42,15 +42,15 @@ def test_dynamic_filter_output_is_a_compatibility_alias():
     assert DynamicFilterOutput is FilterOutput
 
 
-@pytest.mark.parametrize("min_survivor_ratio", [0.5, 0.75])
-def test_partial_groups_on_abort_count_trajectories_not_chunks(min_survivor_ratio):
+@pytest.mark.parametrize("min_ratio", [0.5, 0.75])
+def test_partial_groups_on_abort_count_trajectories_not_chunks(min_ratio):
     single = make_sample()
     compact = [make_sample() for _ in range(5)]
     aborted = [make_sample(), make_sample(status=Sample.Status.ABORTED)]
     group = [single, aborted, compact, []]
 
-    expected = [single, compact] if min_survivor_ratio == 0.5 else []
-    assert retain_non_aborted_trajectories(group, min_survivor_ratio) == expected
+    expected = [single, compact] if min_ratio == 0.5 else []
+    assert retain_non_aborted_trajectories(group, min_ratio) == expected
     assert len(group) == 4
     assert aborted[0].status == Sample.Status.COMPLETED
 
@@ -58,7 +58,7 @@ def test_partial_groups_on_abort_count_trajectories_not_chunks(min_survivor_rati
 def test_partial_groups_on_abort_preserve_reward_and_status_filters():
     group = [make_sample(reward=None), make_sample(status=Sample.Status.FAILED)]
 
-    assert retain_non_aborted_trajectories(group, min_survivor_ratio=0.5) == group
+    assert retain_non_aborted_trajectories(group, min_ratio=0.5) == group
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,7 @@ from miles.utils.types import Sample
 
 
 @pytest.mark.parametrize(
-    ("survivors", "retain", "expected_count", "compact"),
+    ("num_non_aborted", "retain", "expected_count", "compact"),
     [
         (0, True, 0, False),
         (1, True, 0, False),
@@ -36,11 +36,11 @@ from miles.utils.types import Sample
         (2, True, 2, True),
     ],
 )
-async def test_group_reward_sees_only_retained_trajectories(survivors, retain, expected_count, compact):
+async def test_group_reward_sees_only_retained_trajectories(num_non_aborted, retain, expected_count, compact):
     async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         sample = input.sample
-        sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
-        sample.response = "answer" if sample.index < survivors else ""
+        sample.status = Sample.Status.COMPLETED if sample.index < num_non_aborted else Sample.Status.ABORTED
+        sample.response = "answer" if sample.index < num_non_aborted else ""
         if compact:
             sample.rollout_id = sample.index
             return GenerateFnOutput(samples=[replace(sample, status=Sample.Status.COMPLETED), sample])
