@@ -371,7 +371,9 @@ class DefaultMultiDataBuffer(DataBuffer):
         if self._args.use_partial_groups_on_abort:
             for trajectory in input.group:
                 if len({sample.trainer_model_id for sample in iter_samples([trajectory])}) > 1:
-                    raise ValueError("Partial-group retention requires all chunks of a trajectory to train one policy")
+                    raise ValueError(
+                        "--use-partial-groups-on-abort requires all chunks of a trajectory to train one policy"
+                    )
         # TODO: a full inner blocks the one producer for every policy; give each policy its own dispatcher
         for trainer_model_id, entry in _split_by_trainer_model_id(input).items():
             await self._inner_of(trainer_model_id).put(entry)

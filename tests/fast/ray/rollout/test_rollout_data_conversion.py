@@ -67,7 +67,7 @@ class TestPostprocessRolloutData:
             make_sample(index=99, group_index=0, rollout_id=99, reward=100.0),
             make_sample(index=99, group_index=0, rollout_id=99, reward=None, status=Sample.Status.ABORTED),
         ]
-        retained = retain_non_aborted_trajectories([*trajectories, aborted], min_retention_ratio=0.5)
+        retained = retain_non_aborted_trajectories([*trajectories, aborted], min_survivor_ratio=0.5)
         samples, metadata = postprocess_rollout_data(args, [retained], parallel)
         data = convert_samples_to_train_data(
             args,

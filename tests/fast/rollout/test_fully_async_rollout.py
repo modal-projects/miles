@@ -192,7 +192,9 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(
 
 @pytest.mark.parametrize("has_abort", [False, True])
 @pytest.mark.parametrize("compact", [False, True])
-async def test_partial_retention_accounts_only_actual_removals_per_policy(sample_flow_event_dir, has_abort, compact):
+async def test_partial_groups_on_abort_account_only_actual_removals_per_policy(
+    sample_flow_event_dir, has_abort, compact
+):
     args = make_args(
         use_partial_groups_on_abort=True,
         enable_sample_ownership_checker=True,
@@ -239,7 +241,7 @@ async def test_partial_retention_accounts_only_actual_removals_per_policy(sample
     assert not unused
 
 
-async def test_compact_retention_rejects_cross_policy_trajectories():
+async def test_compact_partial_groups_reject_cross_policy_trajectories():
     args = make_args(
         use_partial_groups_on_abort=True,
         megatron_config=encode_megatron_config("solver", "verifier"),

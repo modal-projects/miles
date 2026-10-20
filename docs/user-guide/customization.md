@@ -170,7 +170,7 @@ group reward functions must accept variable-sized groups. Reward normalization u
 the retained trajectories and their `group_index` (or explicit prompt boundaries).
 
 For compact outputs (`list[Sample]` from one trajectory), an aborted chunk discards
-the whole trajectory. The retention ratio counts trajectories, not chunks.
+the whole trajectory. The survivor ratio counts trajectories, not chunks.
 Surviving chunks keep their shared `rollout_id` and prompt
 `group_index`. Group reward functions receive a flat list of surviving chunks;
 the default reward normalizer requires one shared reward per trajectory and counts
@@ -180,8 +180,7 @@ Compact dynamic batches require rollout-side DP scheduling. All retained chunks
 are scheduled in one optimizer step, with batch size and loss normalization based
 on the number of trajectories, not chunks. The chunks must still admit a valid
 DP/VPP-aligned micro-batch schedule; samples are not duplicated to pad a batch.
-In multi-policy runs, all chunks of a retained trajectory must train the same
-policy; retention across independently consumed policy buffers is not supported.
+In multi-policy runs, all chunks of a trajectory must train the same policy.
 
 The collector still requests `rollout_batch_size` accepted prompt groups, not extra
 trajectories to refill the original global batch size. Training uses the resulting
@@ -221,7 +220,7 @@ Per-sample, in-place. Set `s.remove_sample = True` to exclude a sample from the 
 (advantage normalization still uses it).
 
 The framework passes `data: list[list[Sample]]` — prompt groups containing
-`n_samples_per_prompt` samples, or fewer when partial-group retention is enabled:
+`n_samples_per_prompt` samples, or fewer when `--use-partial-groups-on-abort` is enabled:
 
 ```python
 def filter_function(args, data: list[list[Sample]]) -> None:
