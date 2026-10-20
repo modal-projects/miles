@@ -79,11 +79,11 @@ def apply_preput_filters(args: Namespace, dynamic_filter, samples: Group, **kwar
     return call_dynamic_filter(dynamic_filter, args, samples, **kwargs)
 
 
-def retain_non_aborted_trajectories(samples: Group, min_survivor_ratio: float) -> list[Sample]:
+def retain_non_aborted_trajectories(samples: Group, min_ratio: float) -> list[Sample]:
     if any(isinstance(sample, list) or sample.rollout_id is not None for sample in samples):
         raise ValueError("--use-partial-groups-on-abort does not support compact or rollout_id-annotated outputs")
     retained = [sample for sample in samples if sample.status != Sample.Status.ABORTED]
-    return retained if len(retained) >= min_survivor_ratio * len(samples) else []
+    return retained if len(retained) >= min_ratio * len(samples) else []
 
 
 def apply_aborted_filter(args: Namespace, samples: Group, **kwargs) -> FilterOutput:

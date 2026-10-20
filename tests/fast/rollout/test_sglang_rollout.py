@@ -77,9 +77,9 @@ class TestGenerateExtraKey:
 
 
 class TestGenerateAndRmGroup:
-    @pytest.mark.parametrize(("survivors", "retain"), [(0, True), (1, True), (1, False)])
+    @pytest.mark.parametrize(("num_non_aborted", "retain"), [(0, True), (1, True), (1, False)])
     async def test_group_reward_sees_only_retained_trajectories(
-        self, monkeypatch: pytest.MonkeyPatch, survivors: int, retain: bool
+        self, monkeypatch: pytest.MonkeyPatch, num_non_aborted: int, retain: bool
     ) -> None:
         args = _make_generate_args()
         args.group_rm = True
@@ -91,8 +91,8 @@ class TestGenerateAndRmGroup:
         scored: list[list[Sample]] = []
 
         async def generate(args: Namespace, sample: Sample, sampling_params: dict, evaluation: bool = False) -> Sample:
-            sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
-            sample.response = "answer" if sample.index < survivors else ""
+            sample.status = Sample.Status.COMPLETED if sample.index < num_non_aborted else Sample.Status.ABORTED
+            sample.response = "answer" if sample.index < num_non_aborted else ""
             return sample
 
         async def score(args: Namespace, samples: list[Sample]) -> list[float]:
@@ -104,7 +104,7 @@ class TestGenerateAndRmGroup:
         with function_registry.temporary(args.custom_rm_path, score):
             result = await sglang_rollout.generate_and_rm_group(args, sources, {})
 
-        expected = sources[:survivors] if retain else sources
+        expected = sources[:num_non_aborted] if retain else sources
         assert scored == ([expected] if expected else [])
         assert result == sources
         assert all(sample.reward is None for sample in result if sample not in expected)
