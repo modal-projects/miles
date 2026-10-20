@@ -40,9 +40,17 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
 
     @with_logs
     def load_slot(
-        self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None, load_optimizer: bool = True
+        self,
+        slot: int,
+        rank: int,
+        alpha: float,
+        ckpt_path: str | None = None,
+        load_optimizer: bool = True,
+        optimizer: str = "adam",
     ) -> None:
-        self.slot_optimizers[slot] = lora_model.load_slot(self.args, self.model, slot, rank, alpha)
+        self.slot_optimizers[slot] = lora_model.load_slot(
+            self.args, self.model, slot, rank, alpha, optimizer=optimizer
+        )
         if ckpt_path is not None:
             lora_checkpoint.load_slot(self.model, self.slot_optimizers[slot], ckpt_path, load_optimizer)
 
