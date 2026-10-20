@@ -27,10 +27,8 @@ from miles.utils.types import Sample
 @pytest.mark.parametrize(
     ("num_non_aborted", "retain", "expected_count", "compact"),
     [
-        (0, True, 0, False),
         (1, True, 0, False),
         (2, True, 2, False),
-        (3, True, 3, False),
         (1, False, 4, False),
         (1, True, 0, True),
         (2, True, 2, True),

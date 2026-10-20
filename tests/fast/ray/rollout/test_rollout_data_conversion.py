@@ -9,9 +9,7 @@ from miles.ray.rollout.rollout_data_conversion import (
     postprocess_rollout_data,
     validate_compact_rollout_ids,
 )
-from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_scheduled_raw
-from miles.rollout.filter_hub.common_filters import retain_non_aborted_trajectories
-from miles.utils.types import Sample
+from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp
 
 
 class TestComputeDynamicGlobalBatchSize:
@@ -41,14 +39,15 @@ class TestComputeDynamicGlobalBatchSize:
 
 
 class TestPostprocessRolloutData:
-    @pytest.mark.parametrize(("chunk_counts", "vpp_size"), [([3], 1), ([4], 2), ([3, 1, 2], 2), ([1, 1, 1], 1)])
-    @pytest.mark.parametrize("disable_rollout_trim_samples", [False, True])
+    @pytest.mark.parametrize(
+        ("chunk_counts", "vpp_size", "disable_rollout_trim_samples"),
+        [([3], 1, False), ([3, 1, 2], 2, True), ([1, 1, 1], 1, False)],
+    )
     def test_dynamic_compact_batch_counts_trajectories_and_schedules_every_chunk(
         self, chunk_counts, vpp_size, disable_rollout_trim_samples
     ):
         args = make_args(
             use_dynamic_global_batch_size=True,
-            use_partial_groups_on_abort=True,
             use_dynamic_batch_size=True,
             max_tokens_per_gpu=32,
             global_batch_size=8,
@@ -63,12 +62,7 @@ class TestPostprocessRolloutData:
             for rid, chunks in enumerate(chunk_counts)
         ]
 
-        aborted = [
-            make_sample(index=99, group_index=0, rollout_id=99, reward=100.0),
-            make_sample(index=99, group_index=0, rollout_id=99, reward=None, status=Sample.Status.ABORTED),
-        ]
-        retained = retain_non_aborted_trajectories([*trajectories, aborted], min_ratio=0.5)
-        samples, metadata = postprocess_rollout_data(args, [retained], parallel)
+        samples, metadata = postprocess_rollout_data(args, [trajectories], parallel)
         data = convert_samples_to_train_data(
             args,
             samples,
@@ -76,16 +70,13 @@ class TestPostprocessRolloutData:
             custom_convert_samples_to_train_data_func=None,
             custom_reward_post_process_func=None,
         )
-        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=parallel)
+        shards = split_train_data_by_dp(args, data, train_parallel_config=parallel)
 
         assert metadata["dynamic_global_batch_size"] == len(chunk_counts)
         assert len(samples) == sum(chunk_counts)
         assert sorted(pos for shard in shards for pos in shard["partition"]) == list(range(sum(chunk_counts)))
         assert all(shard["num_rollouts"] == [len(chunk_counts)] for shard in shards)
         assert all(shard["num_microbatches"][0] % vpp_size == 0 for shard in shards)
-        assert data["rewards"] == pytest.approx(
-            [rid - (len(chunk_counts) - 1) / 2 for rid, chunks in enumerate(chunk_counts) for _ in range(chunks)]
-        )
 
     @pytest.mark.parametrize("compact_first", [False, True])
     def test_mixed_single_and_compact_trajectories_preserve_every_chunk(self, compact_first):

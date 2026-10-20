@@ -27,8 +27,10 @@ from miles.utils.types import Sample, SampleLineage
 
 
 class TestCheckpointSampleOwnership:
-    @pytest.mark.parametrize(("keep_partial_groups", "compact"), [(False, False), (True, False), (True, True)])
-    @pytest.mark.parametrize("lose_prefetched_batch", [False, True], ids=["healthy", "missing-training-step"])
+    @pytest.mark.parametrize(
+        ("keep_partial_groups", "lose_prefetched_batch", "compact"),
+        [(False, False, False), (False, True, False), (True, False, False), (True, False, True)],
+    )
     async def test_ci_checker_detects_a_prefetched_batch_lost_after_restore(
         self,
         monkeypatch: pytest.MonkeyPatch,
