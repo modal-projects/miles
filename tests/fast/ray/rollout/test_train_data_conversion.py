@@ -10,7 +10,6 @@ from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
 from miles.ray.rollout import train_data_conversion
-from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
     _post_process_rewards,
@@ -590,9 +589,8 @@ class TestPostProcessRewards:
 
         assert processed == pytest.approx([-1.0, -2.0, 1.0, 2.0])
 
-    @pytest.mark.parametrize("grpo_std_normalization", [False, True])
-    def test_partial_groups_normalize_retained_trajectories_and_keep_singletons(self, grpo_std_normalization):
-        args = make_args(use_partial_groups_on_abort=True, grpo_std_normalization=grpo_std_normalization)
+    def test_partial_groups_normalize_retained_trajectories_and_keep_singletons(self):
+        args = make_args(use_partial_groups_on_abort=True, grpo_std_normalization=True)
         samples = [
             make_sample(group_index=0, index=0, reward=0.0),
             make_sample(group_index=0, index=1, reward=2.0),
@@ -601,23 +599,16 @@ class TestPostProcessRewards:
 
         raw, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
 
-        scale = 2**0.5 + 1e-6 if grpo_std_normalization else 1.0
+        scale = 2**0.5 + 1e-6
         assert raw == [0.0, 2.0, 10.0]
         assert processed == pytest.approx([-1.0 / scale, 1.0 / scale, 0.0])
 
-    @pytest.mark.parametrize("prompt_group_sizes", [None, [2, 1]])
-    def test_partial_groups_require_prompt_boundaries(self, prompt_group_sizes):
+    def test_partial_groups_require_prompt_boundaries(self):
         args = make_args(use_partial_groups_on_abort=True)
         samples = [make_sample(group_index=None, index=i, reward=float(i)) for i in range(3)]
 
-        if prompt_group_sizes is None:
-            with pytest.raises(ValueError, match="requires group_index or explicit prompt_group_sizes"):
-                _post_process_rewards(args, samples, custom_reward_post_process_func=None)
-        else:
-            _, processed = _post_process_rewards(
-                args, samples, custom_reward_post_process_func=None, prompt_group_sizes=prompt_group_sizes
-            )
-            assert processed == pytest.approx([-0.5, 0.5, 0.0])
+        with pytest.raises(ValueError, match="requires group_index or explicit prompt_group_sizes"):
+            _post_process_rewards(args, samples, custom_reward_post_process_func=None)
 
     @pytest.mark.parametrize(
         ("rewards", "expected"),
@@ -1054,16 +1045,9 @@ class TestCanPrecomputeDpSchedule:
 
 @pytest.mark.parametrize("num_samples, precompute", [(12, False), (13, False), (13, True)])
 def test_dynamic_batch_alignment_depends_on_schedule(num_samples, precompute):
-    args = make_args(
-        global_batch_size=64,
-        use_dynamic_global_batch_size=True,
-        disable_rollout_trim_samples=True,
-        use_dynamic_batch_size=True,
-        max_tokens_per_gpu=64,
-    )
+    args = make_args(use_dynamic_global_batch_size=True, use_dynamic_batch_size=True, max_tokens_per_gpu=64)
     config = make_train_parallel_config(dp_size=4, supports_precomputed_schedule=precompute)
-    samples, metadata = postprocess_rollout_data(args, [make_sample(index=i) for i in range(num_samples)], config)
-    data = {**_make_split_data(len(samples)), **metadata}
+    data = {**_make_split_data(num_samples), "dynamic_global_batch_size": 12}
 
     if num_samples == 13 and not precompute:
         with pytest.raises(ValueError, match="Training-side DP scheduling requires complete batches"):

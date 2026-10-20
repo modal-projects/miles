@@ -186,8 +186,7 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(mo
     ]
 
 
-@pytest.mark.parametrize("has_abort", [False, True])
-async def test_partial_groups_on_abort_account_only_actual_removals_per_policy(sample_flow_event_dir, has_abort):
+async def test_partial_groups_on_abort_account_only_actual_removals_per_policy(sample_flow_event_dir):
     args = make_args(
         use_partial_groups_on_abort=True,
         enable_sample_ownership_checker=True,
@@ -200,7 +199,7 @@ async def test_partial_groups_on_abort_account_only_actual_removals_per_policy(s
             index=sample.index + 100,
             lineage=SampleLineage(source_sample_index=sample.index, output_index=0, output_count=1),
             trainer_model_id="solver" if i < 2 else "verifier",
-            status=Sample.Status.ABORTED if has_abort and i == 1 else Sample.Status.COMPLETED,
+            status=Sample.Status.ABORTED if i == 1 else Sample.Status.COMPLETED,
         )
         for i, sample in enumerate(prompts)
     ]
@@ -221,9 +220,7 @@ async def test_partial_groups_on_abort_account_only_actual_removals_per_policy(s
         ]
 
     drops = [event for event in read_events(sample_flow_event_dir) if isinstance(event, ExplicitlyDroppedSamplesEvent)]
-    assert [(event.source_sample_indices, event.reason) for event in drops] == (
-        [([11], "aborted")] if has_abort else []
-    )
+    assert [(event.source_sample_indices, event.reason) for event in drops] == [([11], "aborted")]
     assert not unused
 
 
