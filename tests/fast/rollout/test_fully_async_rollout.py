@@ -105,8 +105,8 @@ def make_args(**overrides) -> Namespace:
         async_max_concurrent_samples=None,
         async_data_buffer_capacity_factor=1000.0,
         async_unused_samples_handler="drop",
-        keep_partial_groups_on_abort=False,
-        partial_group_min_retention_ratio=0.5,
+        use_partial_groups_on_abort=False,
+        partial_groups_on_abort_min_ratio=0.5,
         custom_async_data_buffer_path=None,
         enable_sample_ownership_checker=False,
         custom_async_data_buffer_path_per_model=None,
@@ -166,7 +166,7 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(
 ):
     args = make_args(
         rollout_batch_size=1,
-        keep_partial_groups_on_abort=True,
+        use_partial_groups_on_abort=True,
         enable_sample_ownership_checker=True,
         async_unused_samples_handler="retry",
         max_weight_staleness=1,
@@ -194,7 +194,7 @@ async def test_partial_group_can_retry_after_staleness_without_terminal_drops(
 @pytest.mark.parametrize("compact", [False, True])
 async def test_partial_retention_accounts_only_actual_removals_per_policy(sample_flow_event_dir, has_abort, compact):
     args = make_args(
-        keep_partial_groups_on_abort=True,
+        use_partial_groups_on_abort=True,
         enable_sample_ownership_checker=True,
         megatron_config=encode_megatron_config("solver", "verifier"),
     )
@@ -241,7 +241,7 @@ async def test_partial_retention_accounts_only_actual_removals_per_policy(sample
 
 async def test_compact_retention_rejects_cross_policy_trajectories():
     args = make_args(
-        keep_partial_groups_on_abort=True,
+        use_partial_groups_on_abort=True,
         megatron_config=encode_megatron_config("solver", "verifier"),
     )
     trajectory = [

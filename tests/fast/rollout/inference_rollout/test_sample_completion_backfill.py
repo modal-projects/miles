@@ -163,7 +163,7 @@ async def test_sync_driver_defaults_to_group_granularity(monkeypatch):
 @pytest.mark.parametrize("survivors", [1, 2])
 @pytest.mark.parametrize("compact", [False, True])
 async def test_sync_retention_counts_prompt_groups_not_requested_trajectories(monkeypatch, survivors, compact):
-    harness = Harness(monkeypatch, make_args(rollout_batch_size=1, keep_partial_groups_on_abort=True))
+    harness = Harness(monkeypatch, make_args(rollout_batch_size=1, use_partial_groups_on_abort=True))
     task = harness.run()
     await asyncio.sleep(0)
     original = harness.submitted_groups[0]

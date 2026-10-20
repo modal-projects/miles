@@ -592,7 +592,7 @@ class TestPostProcessRewards:
 
     @pytest.mark.parametrize("grpo_std_normalization", [False, True])
     def test_partial_groups_normalize_survivors_and_keep_singletons(self, grpo_std_normalization):
-        args = make_args(keep_partial_groups_on_abort=True, grpo_std_normalization=grpo_std_normalization)
+        args = make_args(use_partial_groups_on_abort=True, grpo_std_normalization=grpo_std_normalization)
         samples = [
             make_sample(group_index=0, index=0, reward=0.0),
             make_sample(group_index=0, index=1, reward=2.0),
@@ -607,7 +607,7 @@ class TestPostProcessRewards:
 
     @pytest.mark.parametrize("prompt_group_sizes", [None, [2, 1]])
     def test_partial_groups_require_prompt_boundaries(self, prompt_group_sizes):
-        args = make_args(keep_partial_groups_on_abort=True)
+        args = make_args(use_partial_groups_on_abort=True)
         samples = [make_sample(group_index=None, index=i, reward=float(i)) for i in range(3)]
 
         if prompt_group_sizes is None:

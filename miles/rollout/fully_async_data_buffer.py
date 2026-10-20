@@ -190,8 +190,8 @@ class DefaultDataBuffer(DataBuffer):
             self._cond.notify_all()
 
     def _preput_filter(self, input: DataBufferInput) -> bool:
-        if self._args.keep_partial_groups_on_abort:
-            retained = retain_non_aborted_trajectories(input.group, self._args.partial_group_min_retention_ratio)
+        if self._args.use_partial_groups_on_abort:
+            retained = retain_non_aborted_trajectories(input.group, self._args.partial_groups_on_abort_min_ratio)
             if self._args.enable_sample_ownership_checker:
                 retained_ids = {id(sample) for sample in iter_samples(retained)}
                 input.aborted_sample_indices = [
@@ -368,7 +368,7 @@ class DefaultMultiDataBuffer(DataBuffer):
         }
 
     async def put(self, input: DataBufferInput) -> None:
-        if self._args.keep_partial_groups_on_abort:
+        if self._args.use_partial_groups_on_abort:
             for trajectory in input.group:
                 if len({sample.trainer_model_id for sample in iter_samples([trajectory])}) > 1:
                     raise ValueError("Partial-group retention requires all chunks of a trajectory to train one policy")

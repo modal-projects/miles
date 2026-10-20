@@ -279,7 +279,7 @@ def _reward_group_segments(args: Any, samples: list[Sample], prompt_group_sizes:
             segments_by_group_index.setdefault(int(group_index), []).append(segment_index)
         return list(segments_by_group_index.values())
 
-    if args.keep_partial_groups_on_abort:
+    if args.use_partial_groups_on_abort:
         raise ValueError("Partial-group reward normalization requires group_index or explicit prompt_group_sizes")
 
     # Legacy fixed-fanout batches store each prompt's segments contiguously.

@@ -48,7 +48,7 @@ class TestPostprocessRolloutData:
     ):
         args = make_args(
             use_dynamic_global_batch_size=True,
-            keep_partial_groups_on_abort=True,
+            use_partial_groups_on_abort=True,
             use_dynamic_batch_size=True,
             max_tokens_per_gpu=32,
             global_batch_size=8,
