@@ -412,7 +412,11 @@ async def generate_and_rm_group(
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
-        reward_group = retain_non_aborted_trajectories(group) if args.keep_partial_groups_on_abort else group
+        reward_group = (
+            retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)
+            if args.keep_partial_groups_on_abort
+            else group
+        )
         if reward_group:
             rewards = await batched_async_rm(args, reward_group)
             for sample, reward in zip(reward_group, rewards, strict=False):
@@ -533,7 +537,7 @@ async def generate_rollout_async(
             all_data.append(group)
             original_group = group
             if args.keep_partial_groups_on_abort:
-                group = retain_non_aborted_trajectories(group)
+                group = retain_non_aborted_trajectories(group, args.partial_group_min_retention_ratio)
             metric_gatherer.on_group_before_dynamic_filter(args, group)
             filter_output = apply_preput_filters(args, dynamic_filter, group)
             if not filter_output.keep:

@@ -896,6 +896,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--partial-group-min-retention-ratio",
+                type=float,
+                default=0.5,
+                help=(
+                    "Minimum fraction of a prompt group's trajectories that must survive abort filtering when "
+                    "--keep-partial-groups-on-abort is enabled. Groups below this threshold are rejected. "
+                    "Must be in (0, 1]."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-submission-granularity",
                 type=str,
                 choices=["group", "sample"],
@@ -3740,6 +3750,7 @@ def miles_validate_args(args):
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
 
     if args.keep_partial_groups_on_abort:
+        assert 0 < args.partial_group_min_retention_ratio <= 1, "--partial-group-min-retention-ratio must be in (0, 1]"
         assert (
             args.use_dynamic_global_batch_size
         ), "--keep-partial-groups-on-abort requires --use-dynamic-global-batch-size"

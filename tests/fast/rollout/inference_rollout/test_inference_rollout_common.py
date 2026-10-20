@@ -22,8 +22,11 @@ from miles.utils.function_registry import function_registry
 from miles.utils.types import Sample
 
 
-@pytest.mark.parametrize(("survivors", "retain"), [(0, True), (1, True), (2, True), (1, False)])
-async def test_group_reward_sees_only_retained_trajectories(survivors, retain):
+@pytest.mark.parametrize(
+    ("survivors", "retain", "expected_count"),
+    [(0, True, 0), (1, True, 0), (2, True, 2), (3, True, 3), (1, False, 4)],
+)
+async def test_group_reward_sees_only_retained_trajectories(survivors, retain, expected_count):
     async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         sample = input.sample
         sample.status = Sample.Status.COMPLETED if sample.index < survivors else Sample.Status.ABORTED
@@ -33,7 +36,7 @@ async def test_group_reward_sees_only_retained_trajectories(survivors, retain):
     state = make_state(generate)
     state.args.keep_partial_groups_on_abort = retain
     state.args.custom_rm_path = "test:partial_group_reward"
-    sources = [Sample(index=i, prompt="prompt") for i in range(3)]
+    sources = [Sample(index=i, prompt="prompt") for i in range(4)]
     scored = []
 
     async def score(args, samples):
@@ -43,7 +46,7 @@ async def test_group_reward_sees_only_retained_trajectories(survivors, retain):
     with function_registry.temporary(state.args.custom_rm_path, score):
         result = await inference_rollout_common.generate_and_rm_group(state, sources, {})
 
-    expected = sources[:survivors] if retain else sources
+    expected = sources[:expected_count]
     assert scored == ([expected] if expected else [])
     assert result == sources
     assert all(sample.reward is None for sample in result if sample not in expected)
