@@ -105,7 +105,9 @@ def _validate_multi_lora_moe_support(args: Namespace, provider) -> None:
     served = {target.rsplit(".", 1)[-1] for target in args.hf_lora_targets}
     if "gate_up_proj" in served:
         served.update(("gate_proj", "up_proj"))
-    expert_pair = {"gate_proj", "up_proj", "down_proj"}
+    expert_pair = {"up_proj", "down_proj"}
+    if provider.gated_linear_unit:
+        expert_pair.add("gate_proj")
     if served & expert_pair:
         assert expert_pair <= served, (
             f"Multi-LoRA on MoE experts requires all of {sorted(expert_pair)} in "
@@ -151,6 +153,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.sequence_parallel = args.sequence_parallel
     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     provider.context_parallel_size = args.context_parallel_size
+    provider.cp_comm_type = args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type
     provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
     provider.recompute_granularity = args.recompute_granularity
     provider.recompute_method = args.recompute_method
