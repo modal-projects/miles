@@ -143,6 +143,10 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
                 dtype = self._checkpoint_dtype(name, tensor)
                 if name not in self._snapshot:
                     raise ValueError(f"Trainer emitted {name!r}, but it is absent from the baseline snapshot")
+                if name in self._emitted:
+                    # A second copy would diff against the first, not against the engine's bytes.
+                    raise ValueError(f"Trainer emitted {name!r} twice in one update")
+                self._emitted.add(name)
             except ValueError as error:
                 # Every rank must finish the iterator's collectives before validation can fail.
                 self._encode_error = error
@@ -167,6 +171,11 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
             self._collect(self._inflight.popleft())
         self._pool.shutdown()
         self._pool = None
+        if self._encode_error is None and (omitted := self._snapshot.keys() - self._emitted):
+            # An omitted tensor gets no delta, so the engines would silently keep its previous value.
+            self._encode_error = ValueError(
+                f"Trainer omitted {len(omitted)} baseline tensors from this update: {sorted(omitted)[:8]}"
+            )
         _raise_if_validation_failed(self._encode_error, phase="update")
 
     def finalize(self, weight_version: int) -> None:
@@ -277,6 +286,7 @@ class UpdateWeightFromDiskDelta(WeightTransferProtocol):
         self._checksums: dict[str, str] = {}  # changed tensor name -> new-state checksum
         self.changed_bytes = self.total_bytes = 0
         self._encode_error: ValueError | None = None
+        self._emitted: set[str] = set()  # names this update has submitted
 
         # Pinned host-buffer pool: a pinned non_blocking GPU->CPU copy is far faster than .cpu().
         self._max_bytes = max((int(v.nbytes) for v in self._snapshot.values()), default=0)

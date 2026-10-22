@@ -224,6 +224,39 @@ class TestDeltaPublicationLifecycle:
 
 
 @pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ([("a", torch.ones(2, 3))], r"omitted 1 baseline tensors from this update: \['b'\]"),
+        ([("a", torch.ones(2, 3)), ("b", torch.ones(2, 3)), ("a", torch.ones(2, 3))], "'a' twice in one update"),
+    ],
+)
+def test_update_must_emit_each_baseline_tensor_exactly_once(tmp_path: Path, update, message) -> None:
+    safetensors.torch.save_file({"a": torch.zeros(2, 3), "b": torch.zeros(2, 3)}, tmp_path / "model.safetensors")
+    protocol = UpdateWeightFromDiskDelta(
+        Namespace(
+            hf_checkpoint=str(tmp_path),
+            update_weight_disk_dir=str(tmp_path / "deltas"),
+            update_weight_delta_encoding="xor",
+            update_weight_delta_checksum="adler32",
+            custom_update_weight_post_write_path=None,
+            check_weight_update_equal=False,
+        )
+    )
+    protocol.rollout_engines = []
+    protocol.is_sender = True
+
+    with _single_rank(), patch.object(protocol, "finalize") as finalize:
+        assert protocol.begin_sync(
+            weight_version=0, iter_buckets=lambda **kwargs: [[("a", torch.zeros(2, 3)), ("b", torch.zeros(2, 3))]]
+        )
+        protocol.send_bucket(update)
+        with pytest.raises(RuntimeError, match=f"update validation failed on rank 0:.*{message}"):
+            protocol.after_base_weights()
+    finalize.assert_not_called()
+    assert protocol._pool is None
+
+
+@pytest.mark.parametrize(
     ("name", "tensor", "message"),
     [
         ("missing", torch.ones(2, 3), "absent from the canonical checkpoint"),
