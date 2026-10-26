@@ -4,15 +4,17 @@ The sample-assembly and TITO multi-turn merge tests live in
 tests/fast/rollout/session/test_samples.py (assembly) and
 test_samples_codec.py (wire codec), next to the functions.
 The collect_samples tests here lock the client's HTTP behavior deltas vs the
-old collect_records path: single POST with no retries, non-2xx raises with the
-body text, timeout raises (instead of silently ABORTing), and the session
-DELETE is attempted on every path.
+old collect_records path: non-2xx raises with the body text after one POST,
+a timeout or transport error repeats the POST up to three times and then raises
+(instead of silently ABORTing), and the session DELETE is attempted on every
+path, after the last POST.
 """
 
 import asyncio
 import threading
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import miles.utils.http_utils as http_utils
@@ -287,16 +289,19 @@ class _CollectCalls:
     """Patches the two HTTP primitives collect_samples uses and records order."""
 
     def __init__(self, monkeypatch, *, post_outcome, delete_outcome=None):
+        """``post_outcome``: the outcome of every POST, or a list with one outcome per POST."""
         self.calls: list[str] = []
         self.post_timeout: float | None = None
+        outcomes = list(post_outcome) if isinstance(post_outcome, list) else None
 
         async def fake_post_bytes(url, payload, *, timeout):
             self.calls.append(f"POST {url}")
             self.post_timeout = timeout
             assert payload == {"max_seq_len": 7}
-            if isinstance(post_outcome, Exception):
-                raise post_outcome
-            return post_outcome
+            outcome = outcomes.pop(0) if outcomes is not None else post_outcome
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
 
         async def fake_post(url, payload, action="post"):
             assert action == "delete"
@@ -362,17 +367,47 @@ async def test_collect_samples_non_2xx_raises_with_body_and_still_deletes(monkey
     calls = _CollectCalls(monkeypatch, post_outcome=RuntimeError("422: trim_count 2 exceeds allowed=1"))
     with pytest.raises(RuntimeError, match="trim_count 2 exceeds allowed=1"):
         await _tracer().collect_samples(Sample(), max_seq_len=7)
-    assert calls.calls[-1] == "DELETE http://127.0.0.1:12345/sessions/sid-1"
+    assert calls.calls == [
+        "POST http://127.0.0.1:12345/sessions/sid-1/samples",
+        "DELETE http://127.0.0.1:12345/sessions/sid-1",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_collect_samples_timeout_raises_and_still_deletes(monkeypatch):
+async def test_collect_samples_timeout_retries_then_raises_and_still_deletes(monkeypatch):
     # The old collect_records swallowed the timeout and returned empty records
-    # (silently ABORTing the sample); the samples path must raise it.
+    # (silently ABORTing the sample); the samples path must raise it, after its retries.
     calls = _CollectCalls(monkeypatch, post_outcome=asyncio.TimeoutError())
     with pytest.raises(asyncio.TimeoutError):
         await _tracer().collect_samples(Sample(), max_seq_len=7)
-    assert calls.calls[-1] == "DELETE http://127.0.0.1:12345/sessions/sid-1"
+    assert calls.calls == ["POST http://127.0.0.1:12345/sessions/sid-1/samples"] * 3 + [
+        "DELETE http://127.0.0.1:12345/sessions/sid-1"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_samples_retries_transient_errors_before_delete(monkeypatch):
+    calls = _CollectCalls(
+        monkeypatch, post_outcome=[httpx.ReadError(""), asyncio.TimeoutError(), _computed_reply_payload()]
+    )
+    result = await _tracer().collect_samples(Sample(), max_seq_len=7)
+    assert len(result.samples) == 1
+    assert calls.calls == ["POST http://127.0.0.1:12345/sessions/sid-1/samples"] * 3 + [
+        "DELETE http://127.0.0.1:12345/sessions/sid-1"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_samples_failed_repeat_raises_the_first_error(monkeypatch):
+    # A non-2xx reply fails the run; a repeat must not turn a lost sample into that.
+    read_error = httpx.ReadError("")
+    calls = _CollectCalls(monkeypatch, post_outcome=[read_error, RuntimeError("404: session not found")])
+    with pytest.raises(httpx.ReadError) as raised:
+        await _tracer().collect_samples(Sample(), max_seq_len=7)
+    assert raised.value is read_error
+    assert calls.calls == ["POST http://127.0.0.1:12345/sessions/sid-1/samples"] * 2 + [
+        "DELETE http://127.0.0.1:12345/sessions/sid-1"
+    ]
 
 
 @pytest.mark.asyncio

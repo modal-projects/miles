@@ -7,6 +7,8 @@ import logging
 import random
 from argparse import Namespace
 
+import httpx
+
 from miles.rollout.generate_utils.sampling_mask import should_return_sampling_mask
 from miles.rollout.session.samples.codec import (
     COMPUTED_FIELDS,
@@ -22,6 +24,11 @@ from miles.utils.types import Sample
 logger = logging.getLogger(__name__)
 
 _SESSION_DELETE_TIMEOUT = 120
+# Assembly only reads the session's records, so a repeat before the DELETE returns the same
+# samples. A trainer host busy with an optimizer step or a save can stall one request past
+# its timeout, and a pooled connection can drop.
+_SAMPLES_ATTEMPTS = 3
+_SAMPLES_TRANSIENT_ERRORS = (TimeoutError, asyncio.TimeoutError, httpx.TransportError)
 
 
 class OpenAIEndpointTracer:
@@ -90,12 +97,8 @@ class OpenAIEndpointTracer:
         if agent_metadata is not None:
             body["metadata"] = agent_metadata
         try:
-            # Timeouts and transport errors propagate after cleanup, for `generate` to handle.
-            payload = await post_bytes_no_retry(
-                f"{self.base_url}/samples",
-                body,
-                timeout=self.samples_timeout,
-            )
+            # Timeouts and transport errors left after the retries propagate after cleanup, for `generate`.
+            payload = await self._post_samples(body)
         finally:
             try:
                 await asyncio.wait_for(
@@ -111,3 +114,27 @@ class OpenAIEndpointTracer:
             input_sample,
             fields=self.samples_wire_fields,
         )
+
+    async def _post_samples(self, body: dict) -> bytes:
+        """POST the samples op, repeating it after a timeout or a transport error.
+
+        A repeat can only save the sample: if a repeat fails any other way (for example the
+        session is gone), the first error is raised, as after a single POST, so it costs the
+        sample and not the run. A first-try non-2xx reply still raises at once.
+        """
+        first_error = None
+        for attempt in range(1, _SAMPLES_ATTEMPTS + 1):
+            try:
+                return await post_bytes_no_retry(f"{self.base_url}/samples", body, timeout=self.samples_timeout)
+            except _SAMPLES_TRANSIENT_ERRORS as e:
+                first_error = first_error or e
+                if attempt == _SAMPLES_ATTEMPTS:
+                    raise
+                logger.warning(
+                    f"Collecting samples of session {self.session_id} failed ({e!r}); "
+                    f"attempt {attempt + 1}/{_SAMPLES_ATTEMPTS}"
+                )
+            except Exception as e:
+                if first_error is None:
+                    raise
+                raise first_error from e
