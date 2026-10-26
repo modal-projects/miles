@@ -84,6 +84,15 @@ def test_packed_fp4_experts_match_bit_level_decode(tmp_path):
     np.testing.assert_array_equal(_bits(weight), _reference(values, _e8m0(scale), (1, 32)))
 
 
+def test_mismatched_scale_shape_raises(tmp_path):
+    raw = torch.zeros(64, 96, dtype=torch.uint8).view(torch.float8_e4m3fn)
+    scale = torch.full((3, 3), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    io = _write_checkpoint(tmp_path, {"attn.wq_a.weight": raw, "attn.wq_a.scale": scale})
+
+    with pytest.raises(ValueError, match="does not fit"):
+        io.load_some_hf_weight(["attn.wq_a.weight"])
+
+
 def test_bf16_checkpoint_passes_through(tmp_path):
     weight = torch.randn(64, 64, generator=torch.Generator().manual_seed(0)).bfloat16()
     io = _write_checkpoint(tmp_path, {"attn.wq_a.weight": weight, "attn.attn_sink": weight[0].float()})

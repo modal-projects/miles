@@ -24,7 +24,8 @@ def dequantize_block_scaled(weight: torch.Tensor, scale: torch.Tensor) -> torch.
     for dim, size in enumerate(values.shape):
         # Blocks are powers of two; a ragged last block (DeepSeek-V3 scales) is cropped.
         block = 1 << (math.ceil(size / scale.shape[dim]) - 1).bit_length()
-        assert (scale.shape[dim] - 1) * block < size <= scale.shape[dim] * block, (values.shape, scale.shape)
+        if not (scale.shape[dim] - 1) * block < size <= scale.shape[dim] * block:
+            raise ValueError(f"scale shape {tuple(scale.shape)} does not fit weight shape {tuple(values.shape)}")
         scale = scale.repeat_interleave(block, dim).narrow(dim, 0, size)
     return (values * scale).to(torch.bfloat16)
 
@@ -38,7 +39,8 @@ class BlockScaledSafeTensorIO(SafeTensorIO):
 
     def __init__(self, hf_dir: str, device: torch.device | int | str):
         super().__init__(hf_dir)
-        assert self.index, f"{hf_dir} has no model.safetensors.index.json"
+        if not self.index:
+            raise ValueError(f"{hf_dir} has no model.safetensors.index.json")
         self.device = device
 
     def _scale_name(self, name: str) -> str | None:
