@@ -154,8 +154,14 @@ class SnapshotPublisher:
         weights: Mapping[str, torch.Tensor],
         hf_checkpoint: str,
         source_tensor_prefixes: Sequence[str] = (),
+        canonical_layout: bool = False,
     ) -> None:
-        """Collectively write HF model shards into the caller's checkpoint directory."""
+        """Collectively write HF model shards into the caller's checkpoint directory.
+
+        With ``canonical_layout``, each tensor is stored in ``hf_checkpoint``'s layout, as disk deltas
+        are, so a resumed trainer that diffs against this export emits deltas that replicas booted from
+        ``hf_checkpoint`` can apply (and replicas booted from the export apply the next ones).
+        """
         path = Path(path)
         is_writer = dist.get_rank() == 0
 
@@ -179,6 +185,8 @@ class SnapshotPublisher:
             shard_name = f"model-{shard_index:05d}.safetensors"
             shard_tensors = {}
             for name, tensor in hf_named_tensors:
+                if canonical_layout:
+                    tensor = match_checkpoint_layout(hf_checkpoint, name, tensor)
                 shard_tensors[name] = tensor.detach().to("cpu").contiguous()
                 weight_map[name] = shard_name
                 total_size += shard_tensors[name].numel() * shard_tensors[name].element_size()

@@ -155,3 +155,44 @@ def test_snapshot_publisher_writes_each_view_in_its_canonical_layout(tmp_path: P
         exported = safetensors.torch.load_file(output / view / index["weight_map"]["A_log"])["A_log"]
         assert exported.dtype == torch.bfloat16
         assert torch.equal(exported, torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32).to(torch.bfloat16))
+
+
+class _PlainIterator:
+    """No weight views: the plain export path, with A_log emitted in float32."""
+
+    placement = SimpleNamespace(is_full_gather=True)
+    weight_views = ()
+
+    @staticmethod
+    def iter_hf_weights(_weights):
+        yield [
+            ("A_log", torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)),
+            ("weight", torch.ones(2, dtype=torch.bfloat16)),
+        ]
+
+
+@pytest.mark.parametrize("canonical_layout", [True, False])
+def test_snapshot_publisher_plain_export_layout(tmp_path: Path, canonical_layout: bool) -> None:
+    """A disk-delta export keeps the canonical dtype: a trainer resumed from it emits deltas the
+    replicas booted from the canonical checkpoint can apply. Other exports keep the emitted dtype."""
+    base = tmp_path / "base"
+    base.mkdir()
+    safetensors.torch.save_file(
+        {"A_log": torch.zeros(3, dtype=torch.bfloat16), "weight": torch.zeros(2, dtype=torch.bfloat16)},
+        base / "model.safetensors",
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    with patch(
+        "miles.backends.training_utils.weight_update.snapshot_publisher.dist.get_rank",
+        return_value=0,
+    ):
+        SnapshotPublisher(_PlainIterator()).write_model(
+            output, weights={}, hf_checkpoint=str(base), canonical_layout=canonical_layout
+        )
+
+    exported = safetensors.torch.load_file(output / "model-00001.safetensors")
+    expected = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
+    assert exported["A_log"].dtype == (torch.bfloat16 if canonical_layout else torch.float32)
+    assert torch.equal(exported["A_log"], expected.to(exported["A_log"].dtype))
+    assert exported["weight"].dtype == torch.bfloat16
