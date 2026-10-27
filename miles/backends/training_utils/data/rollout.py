@@ -305,6 +305,10 @@ def get_batch(
         assert all(
             adapter_slots[i] <= adapter_slots[i + 1] for i in range(len(adapter_slots) - 1)
         ), f"adapter_slots not sorted in micro-batch: {adapter_slots}"
+        assert qkv_format != "bshd" or len(set(adapter_slots)) == 1, (
+            "a bshd micro-batch with several samples must hold one adapter: [s, b, d] modules flatten "
+            f"rows sequence-major, so per-adapter token spans cannot separate slots (got {adapter_slots})"
+        )
         n_adapters = data_iterator.rollout_data["n_adapters"]
         total_tokens = tokens.numel()
         counts = torch.zeros(n_adapters, dtype=torch.int32, device=torch.cuda.current_device())

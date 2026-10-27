@@ -241,13 +241,12 @@ def validate_multi_lora_args(args: Any) -> None:
         "Multi-LoRA requires --pipeline-model-parallel-size 1: a pipelined schedule would "
         "recompute activations against a later micro-batch's adapter routing."
     )
-    # Per-slot token spans assume sequence-major contiguous sample packing: thd, or bshd with one sample.
+    # Per-slot token spans assume sequence-major contiguous sample packing: thd, or fixed-size bshd
+    # micro-batches (get_batch requires each multi-sample bshd micro-batch to hold one adapter).
     qkv_format = getattr(args, "qkv_format", "thd")
-    single_sample_bshd = (
-        qkv_format == "bshd" and args.micro_batch_size == 1 and not getattr(args, "use_dynamic_batch_size", False)
-    )
-    assert qkv_format == "thd" or single_sample_bshd, (
-        "Multi-LoRA requires --qkv-format thd, or bshd with --micro-batch-size 1 and no dynamic batch size: "
+    static_bshd = qkv_format == "bshd" and not getattr(args, "use_dynamic_batch_size", False)
+    assert qkv_format == "thd" or static_bshd, (
+        "Multi-LoRA requires --qkv-format thd, or bshd without dynamic batch size: "
         f"per-adapter token spans assume the micro-batch packs samples contiguously (got {qkv_format!r})."
     )
     assert not getattr(args, "experts_shared_outer_loras", False), (

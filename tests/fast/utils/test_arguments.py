@@ -2269,22 +2269,22 @@ class TestMultiLoRAValidation:
         with pytest.raises(AssertionError, match="pipeline-model-parallel-size 1"):
             miles_validate_args(args)
 
-    @pytest.mark.parametrize("micro_batch_size,dynamic", [(2, False), (1, True)])
-    def test_rejects_multi_sample_bshd(self, micro_batch_size, dynamic):
-        # bshd interleaves samples in the sequence-major flattening the spans assume.
-        args = self._parse([])
-        args.qkv_format = "bshd"
-        args.micro_batch_size = micro_batch_size
-        args.use_dynamic_batch_size = dynamic
-        if dynamic:
-            args.max_tokens_per_gpu = 1024
-        with pytest.raises(AssertionError, match="qkv-format thd, or bshd with --micro-batch-size 1"):
-            miles_validate_args(args)
-
-    def test_accepts_single_sample_bshd(self):
+    def test_rejects_dynamic_bshd(self):
+        # Dynamic bshd micro-batches have no fixed shape for the per-slot spans.
         args = self._parse([])
         args.qkv_format = "bshd"
         args.micro_batch_size = 1
+        args.use_dynamic_batch_size = True
+        args.max_tokens_per_gpu = 1024
+        with pytest.raises(AssertionError, match="qkv-format thd, or bshd without dynamic batch size"):
+            miles_validate_args(args)
+
+    @pytest.mark.parametrize("micro_batch_size", [1, 8])
+    def test_accepts_static_bshd(self, micro_batch_size):
+        # Several samples per bshd micro-batch are allowed; get_batch keeps each one on a single adapter.
+        args = self._parse([])
+        args.qkv_format = "bshd"
+        args.micro_batch_size = micro_batch_size
         args.use_dynamic_batch_size = False
 
         miles_validate_args(args)

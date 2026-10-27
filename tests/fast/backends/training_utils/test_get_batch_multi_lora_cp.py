@@ -132,3 +132,24 @@ def test_bshd_cp2_tokens_are_single_sliced(monkeypatch):
         ]
     )
     assert torch.equal(out["tokens"], expected)
+
+
+def test_bshd_multi_sample_micro_batch_counts_one_adapter(monkeypatch):
+    # B > 1 in bshd: every row is padded to max_seqlen, so the single adapter owns B * max_seqlen tokens.
+    max_seqlen = 16
+    _patch_state(monkeypatch, _parallel_state(cp_rank=0, cp_size=1))
+    batch = _make_batch(max_seqlen=max_seqlen)
+    batch["adapter_slots"] = [2] * len(LENGTHS)
+
+    out = get_batch(_FakeIterator(batch, N_ADAPTERS), KEYS + ["max_seq_lens"], pad_multiplier=8, qkv_format="bshd")
+
+    assert out["tokens"].shape == (len(LENGTHS), max_seqlen)
+    assert out["adapter_token_counts"].tolist() == [0, 0, len(LENGTHS) * max_seqlen, 0]
+
+
+def test_bshd_multi_sample_micro_batch_rejects_mixed_adapters(monkeypatch):
+    _patch_state(monkeypatch, _parallel_state(cp_rank=0, cp_size=1))
+    batch = _make_batch(max_seqlen=16)
+
+    with pytest.raises(AssertionError, match="must hold one adapter"):
+        get_batch(_FakeIterator(batch, N_ADAPTERS), KEYS + ["max_seq_lens"], pad_multiplier=8, qkv_format="bshd")
