@@ -79,12 +79,13 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
     encoder = DeltaEncoder(codec, device, MAX_PENDING_NBYTES, with_changed_bits=True)
     encoded = encoder.encode(pairs)
     payloads, zstds = encoder.finish()
+    torch.cuda.synchronize()
 
     assert len(payloads) == sum(result is not None for result in encoded)
     compressed = iter(zip(payloads, zstds, strict=True))
     for name, (previous, current), snapshot, result in zip(CASES, pairs, snapshots, encoded, strict=True):
-        assert torch.equal(previous, snapshot), f"{name}: the previous bytes were modified"
-        xor = previous ^ current.cpu()
+        assert torch.equal(previous, current.cpu()), f"{name}: previous does not hold the current bytes"
+        xor = snapshot ^ current.cpu()
         changed_frames = [i for i, frame in enumerate(xor.split(FRAME_NBYTES)) if frame.any()]
         if not changed_frames:
             assert result is None, name
@@ -109,11 +110,15 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
 
 @pytest.mark.parametrize("codec", ["gap-zstd", "snappy-zstd"])
 def test_the_payloads_are_the_same_whether_zstd_runs_once_or_after_every_batch(device: torch.device, codec: str):
-    pairs = [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
+    # Each encoder gets its own pairs: encoding overwrites previous.
+    pairs_once, pairs_every_batch = (
+        [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
+        for _ in range(2)
+    )
     once, every_batch = DeltaEncoder(codec, device, MAX_PENDING_NBYTES), DeltaEncoder(codec, device, 1)
 
-    encoded_once = once.encode(pairs)
-    encoded_every_batch = [result for pair in pairs for result in every_batch.encode([pair])]
+    encoded_once = once.encode(pairs_once)
+    encoded_every_batch = [result for pair in pairs_every_batch for result in every_batch.encode([pair])]
 
     assert [result and result.frames for result in encoded_once] == [
         result and result.frames for result in encoded_every_batch
