@@ -62,6 +62,7 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._previous: dict[str, torch.Tensor] = {}
         self._next: dict[str, torch.Tensor] = {}
         self._encoder: DeltaEncoder | None = None
+        self._download_stream: torch.cuda.Stream | None = None
         self._replay: list[int] = []
         # Only for --weight-delta-change-metrics; the sync never reads it.
         self._ever_changed: dict[str, torch.Tensor] | None = {} if args.weight_delta_change_metrics else None
@@ -125,6 +126,7 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             self.args.update_weight_buffer_size,
             with_changed_bits=self._ever_changed is not None,
         )
+        self._download_stream = torch.cuda.Stream()
         self._directory = version_dir(self._delta_dir, weight_version)
         self._writer = OwnerWriter(self._directory, dist.get_rank())
         return True
@@ -144,6 +146,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             self._error = error
 
     def _copy_to_previous(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
+        # TODO: holding previous on the GPU would skip its host round trip each sync, but keeps one owner
+        # share of GPU memory through training.
         for name, tensor in bucket:
             current = _as_bytes(tensor)
             self._previous[name] = torch.empty(current.numel(), dtype=torch.uint8, pin_memory=True)
@@ -171,16 +175,22 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             else:
                 pairs.append((self._previous[name], current))
                 xor_tensors.append((name, dtype, shape, current))
+        compute_stream = torch.cuda.current_stream()
+        self._download_stream.wait_stream(compute_stream)
+        with torch.cuda.stream(self._download_stream):
+            for name, _, _, current in xor_tensors:
+                self._next[name].copy_(current, non_blocking=True)
         started = time.monotonic()
         encoded = self._encoder.encode(pairs)
         self._stats["encode_s"] += time.monotonic() - started
-        for (name, dtype, shape, current), result in zip(xor_tensors, encoded, strict=True):
+        for (name, dtype, shape, _), result in zip(xor_tensors, encoded, strict=True):
             if result is not None:
                 self._writes.append((name, dtype, shape, None, result.frames))
                 self._stats["changed_nbytes"] += result.changed_nbytes
                 if result.changed_bits is not None:
                     self._track_changes(name, result.changed_bits)
-            self._next[name].copy_(current, non_blocking=True)
+        # The exporter may reuse the bucket's memory once this returns.
+        compute_stream.wait_stream(self._download_stream)
 
     def _write_owner_file(self) -> None:
         started = time.monotonic()

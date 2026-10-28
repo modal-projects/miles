@@ -29,9 +29,9 @@ class EncodedTensor:
 
 
 class DeltaEncoder:
-    """Works on the device's current stream: ``encode`` returns once it no longer reads the pairs, and
-    keeps each changed tensor's inner on the GPU until max_pending_nbytes of them wait for the outer
-    Zstd; ``finish`` returns once every payload is on the host."""
+    """Works on the device's current stream and uploads previous on its own: ``encode`` returns once it
+    no longer reads the pairs, and keeps each changed tensor's inner on the GPU until max_pending_nbytes
+    of them wait for the outer Zstd; ``finish`` returns once every payload is on the host."""
 
     def __init__(self, codec: str, device: torch.device, max_pending_nbytes: int, with_changed_bits: bool = False):
         if codec not in CODECS:
@@ -42,6 +42,7 @@ class DeltaEncoder:
         self._snappy = NvcompCompressor("snappy", self.device) if codec == "snappy-zstd" else None
         self._zstd = NvcompCompressor("zstd", self.device)
         self._padding = torch.zeros(ALIGNMENT - 1, dtype=torch.uint8, device=self.device)
+        self._upload_stream = torch.cuda.Stream(device=self.device)
         self._pending: list[torch.Tensor] = []
         self._pending_nbytes = 0
         self._payloads: list[memoryview] = []
@@ -72,7 +73,12 @@ class DeltaEncoder:
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream()
             try:
-                xors = [previous.to(self.device, non_blocking=True) for previous, _ in pairs]
+                xors = [torch.empty(previous.numel(), dtype=torch.uint8, device=self.device) for previous, _ in pairs]
+                self._upload_stream.wait_stream(stream)
+                with torch.cuda.stream(self._upload_stream):
+                    for xor, (previous, _) in zip(xors, pairs, strict=True):
+                        xor.copy_(previous, non_blocking=True)
+                stream.wait_stream(self._upload_stream)
                 changes = xor_frames_(xors, [current for _, current in pairs], FRAME_NBYTES)
                 frame_counts = _split(
                     changes.counts.tolist(), [(xor.numel() + FRAME_NBYTES - 1) // FRAME_NBYTES for xor in xors]
@@ -92,6 +98,7 @@ class DeltaEncoder:
                     self._compress_pending(stream)
             except BaseException:
                 # Queued work may still read the caller's tensors; let it finish before they are released.
+                self._upload_stream.synchronize()
                 stream.synchronize()
                 raise
         for index, layout, tensor_bits in zip(changed_tensors, layouts, bits, strict=True):
