@@ -7,6 +7,8 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import Weigh
 def get_data_replica_rank_and_size(parallel_state: ParallelState, placement: WeightUpdatePlacement) -> tuple[int, int]:
     """(replica_rank, replica_size): this rank's index among the ranks that hold
     identical data after gathering per ``placement``, and their count. Collective."""
+    if placement.per_owner:
+        return 0, 1
     assert (
         placement.gather_tp and placement.gather_ep
     ), f"ranks hold identical data only once TP and EP are gathered: {placement}"

@@ -90,3 +90,23 @@ class TestHfWeightIteratorFactory:
         with patch.object(HfWeightIteratorDirect, "__init__", _capture_init):
             self._create("raw", required_placement=keep_pp)
         assert captured["placement"] == keep_pp
+
+    def test_a_per_owner_requirement_selects_the_per_owner_iterator_in_raw_mode_only(self):
+        """Bridge cannot export per owner, so its placement drops it; weight-delta validation refuses bridge."""
+        from miles.backends.megatron_utils.update_weight.hf_weight_iterator_bridge import HfWeightIteratorBridge
+        from miles.backends.megatron_utils.update_weight.hf_weight_iterator_per_owner import HfWeightIteratorPerOwner
+
+        per_owner = WeightUpdatePlacement(gather_pp=False, per_owner=True)
+        captured = {}
+
+        def _capture_init(self, args, model, *, placement, model_name, quantization_config):
+            captured["placement"] = placement
+
+        with patch.object(HfWeightIteratorPerOwner, "__init__", _capture_init):
+            iterator = self._create("raw", required_placement=per_owner)
+        assert isinstance(iterator, HfWeightIteratorPerOwner)
+        assert captured["placement"] == per_owner
+
+        with patch.object(HfWeightIteratorBridge, "__init__", _capture_init):
+            self._create("bridge", required_placement=per_owner)
+        assert captured["placement"] == WeightUpdatePlacement(gather_pp=True)
