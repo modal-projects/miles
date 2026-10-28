@@ -15,15 +15,12 @@ import pytest
 import torch
 import zstandard
 
-from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import (
-    CHUNK_NBYTES,
-    DeltaEncoder,
-    EncodedTensor,
-)
+from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import CHUNK_NBYTES, DeltaEncoder
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import ALIGNMENT, FRAME_NBYTES
 from miles.kernels.weight_delta.frames import GAP_NBYTES
 
 MIB = 1 << 20
+MAX_PENDING_NBYTES = 512 * MIB
 # name -> (bytes, changed positions)
 CASES = {
     "frames 0 and 2 of 3, the last short": (2 * MIB + 12345, [5, 70000, 2 * MIB + 7, 2 * MIB + 12344]),
@@ -47,10 +44,10 @@ def _pair(nbytes: int, changed: list[int], seed: int, device: torch.device) -> t
     return (previous.pin_memory() if nbytes else previous), current.to(device)
 
 
-def _undo_zstd(encoded: EncodedTensor) -> bytes:
+def _undo_zstd(payload: memoryview, zstd: dict) -> bytes:
     """The tensor's inner, from its chunks in the order and at the places the records give."""
-    payload, pieces, offset, inner_offset = bytes(encoded.payload), [], 0, 0
-    for chunk in encoded.zstd["chunks"]:
+    payload, pieces, offset, inner_offset = bytes(payload), [], 0, 0
+    for chunk in zstd["chunks"]:
         assert (chunk["offset"], chunk["inner_offset"]) == (offset, inner_offset)
         assert 0 < chunk["inner_nbytes"] <= CHUNK_NBYTES
         data = zstandard.ZstdDecompressor().decompress(
@@ -60,7 +57,7 @@ def _undo_zstd(encoded: EncodedTensor) -> bytes:
         pieces.append(data)
         offset += chunk["nbytes"]
         inner_offset += chunk["inner_nbytes"]
-    assert (offset, inner_offset) == (len(payload), encoded.zstd["inner_nbytes"])
+    assert (offset, inner_offset) == (len(payload), zstd["inner_nbytes"])
     return b"".join(pieces)
 
 
@@ -79,8 +76,12 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
     pairs = [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
     snapshots = [previous.clone() for previous, _ in pairs]
 
-    encoded = DeltaEncoder(codec, device, with_changed_bits=True).encode(pairs)
+    encoder = DeltaEncoder(codec, device, MAX_PENDING_NBYTES, with_changed_bits=True)
+    encoded = encoder.encode(pairs)
+    payloads, zstds = encoder.finish()
 
+    assert len(payloads) == sum(result is not None for result in encoded)
+    compressed = iter(zip(payloads, zstds, strict=True))
     for name, (previous, current), snapshot, result in zip(CASES, pairs, snapshots, encoded, strict=True):
         assert torch.equal(previous, snapshot), f"{name}: the previous bytes were modified"
         xor = previous ^ current.cpu()
@@ -91,7 +92,8 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
         assert [record["offset"] for record in result.frames] == [i * FRAME_NBYTES for i in changed_frames], name
         assert result.changed_nbytes == int(xor.count_nonzero()), name
         assert torch.equal(result.changed_bits.cpu(), torch.from_numpy(np.packbits(xor.numpy() != 0))), name
-        inner = _undo_zstd(result)
+        payload, zstd = next(compressed)
+        inner = _undo_zstd(payload, zstd)
         for record in result.frames:
             frame = xor[record["offset"] : record["offset"] + FRAME_NBYTES]
             assert record["nbytes"] == frame.numel() and record["inner_offset"] % ALIGNMENT == 0, name
@@ -102,7 +104,23 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
             else:
                 decoded = pyarrow.Codec("snappy").decompress(frame_inner, decompressed_size=frame.numel())
                 assert decoded.to_pybytes() == frame.numpy().tobytes(), name
-    assert len(encoded[2].zstd["chunks"]) > 1
+    assert len(zstds[1]["chunks"]) > 1
+
+
+@pytest.mark.parametrize("codec", ["gap-zstd", "snappy-zstd"])
+def test_the_payloads_are_the_same_whether_zstd_runs_once_or_after_every_batch(device: torch.device, codec: str):
+    pairs = [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
+    once, every_batch = DeltaEncoder(codec, device, MAX_PENDING_NBYTES), DeltaEncoder(codec, device, 1)
+
+    encoded_once = once.encode(pairs)
+    encoded_every_batch = [result for pair in pairs for result in every_batch.encode([pair])]
+
+    assert [result and result.frames for result in encoded_once] == [
+        result and result.frames for result in encoded_every_batch
+    ]
+    (payloads_once, zstds_once), (payloads_every_batch, zstds_every_batch) = once.finish(), every_batch.finish()
+    assert [bytes(payload) for payload in payloads_once] == [bytes(payload) for payload in payloads_every_batch]
+    assert zstds_once == zstds_every_batch
 
 
 @pytest.mark.parametrize(
@@ -122,19 +140,24 @@ def test_a_pair_the_encoder_cannot_take_is_refused_by_its_index(device: torch.de
     }[case]()
 
     with pytest.raises(ValueError, match="^pair 1: "):
-        DeltaEncoder("gap-zstd", device).encode([good, bad])
+        DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES).encode([good, bad])
     assert bad[0].eq(bad[0].flatten()[0]).all(), "a refused previous must be left as it was"
 
 
 def test_a_payload_stays_intact_while_other_pinned_memory_is_reused(device: torch.device):
-    (result,) = DeltaEncoder("gap-zstd", device).encode([_pair(MIB, list(range(0, MIB, 7)), 0, device)])
-    expected = bytes(result.payload)
+    encoder = DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES)
+    encoder.encode([_pair(MIB, list(range(0, MIB, 7)), 0, device)])
+    (payload,), _ = encoder.finish()
+    expected = bytes(payload)
 
     for _ in range(4):
         torch.empty(len(expected), dtype=torch.uint8, pin_memory=True).fill_(0xAB)
 
-    assert bytes(result.payload) == expected
+    assert bytes(payload) == expected
 
 
 def test_an_empty_batch_encodes_to_nothing(device: torch.device):
-    assert DeltaEncoder("gap-zstd", device).encode([]) == []
+    encoder = DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES)
+
+    assert encoder.encode([]) == []
+    assert encoder.finish() == ([], [])

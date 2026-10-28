@@ -73,6 +73,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._exported: dict[str, tuple[str, list[int]]] = {}
         self._directory: Path | None = None
         self._writer: OwnerWriter | None = None
+        # (name, dtype, shape, raw bytes or None, XOR frame records or None), in the order they are written.
+        self._writes: list[tuple[str, str, list[int], memoryview | None, list[dict] | None]] = []
         self._record: dict | None = None
         self._rechanged: list[torch.Tensor] = []
         self._stats = {
@@ -117,12 +119,12 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             return False
         if weight_version < self._version:
             raise RuntimeError(f"weight version {weight_version} is behind the published {self._version}")
-        if self._encoder is None:
-            self._encoder = DeltaEncoder(
-                self.args.weight_delta_codec,
-                torch.device("cuda", torch.cuda.current_device()),
-                with_changed_bits=self._ever_changed is not None,
-            )
+        self._encoder = DeltaEncoder(
+            self.args.weight_delta_codec,
+            torch.device("cuda", torch.cuda.current_device()),
+            self.args.update_weight_buffer_size,
+            with_changed_bits=self._ever_changed is not None,
+        )
         self._directory = version_dir(self._delta_dir, weight_version)
         self._writer = OwnerWriter(self._directory, dist.get_rank())
         return True
@@ -161,7 +163,7 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                 self._next[name].copy_(current)
                 changed_nbytes = int(torch.count_nonzero(self._next[name] != self._previous[name]))
                 if changed_nbytes:
-                    self._writer.add_raw(name, dtype, shape, memoryview(self._next[name].numpy()))
+                    self._writes.append((name, dtype, shape, memoryview(self._next[name].numpy()), None))
                     self._stats["changed_nbytes"] += changed_nbytes
                     if self._ever_changed is not None:
                         bits = changed_bits(self._next[name] ^ self._previous[name])
@@ -174,11 +176,21 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._stats["encode_s"] += time.monotonic() - started
         for (name, dtype, shape, current), result in zip(xor_tensors, encoded, strict=True):
             if result is not None:
-                self._writer.add_xor(name, dtype, shape, result.frames, result.payload, result.zstd)
+                self._writes.append((name, dtype, shape, None, result.frames))
                 self._stats["changed_nbytes"] += result.changed_nbytes
                 if result.changed_bits is not None:
                     self._track_changes(name, result.changed_bits)
             self._next[name].copy_(current, non_blocking=True)
+
+    def _write_owner_file(self) -> None:
+        started = time.monotonic()
+        compressed = iter(zip(*self._encoder.finish(), strict=True))
+        self._stats["encode_s"] += time.monotonic() - started
+        for name, dtype, shape, raw, frames in self._writes:
+            if frames is None:
+                self._writer.add_raw(name, dtype, shape, raw)
+            else:
+                self._writer.add_xor(name, dtype, shape, frames, *next(compressed))
 
     def _track_changes(self, name: str, bits: torch.Tensor) -> None:
         if name not in self._ever_changed:
@@ -199,6 +211,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             )
         if self._writer is not None:
             try:
+                if self._error is None:
+                    self._write_owner_file()
                 self._record = self._writer.finish()
                 if self._error is None:
                     self._run_post_write_hook(self._directory)

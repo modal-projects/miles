@@ -1,5 +1,5 @@
-"""A batch of XOR tensors encoded on the GPU into weight-delta/v1 records: each tensor's changed
-frames, their inner encodings, and the tensor's outer Zstd chunks."""
+"""XOR tensors encoded on the GPU into weight-delta/v1 records: each batch's changed frames and their
+inner encodings, then every changed tensor's outer Zstd chunks."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -20,27 +20,32 @@ BITS_SLICE_NBYTES = 1 << 26
 
 @dataclass(frozen=True)
 class EncodedTensor:
-    """What OwnerWriter.add_xor takes: the changed frames, their compressed bytes, and its chunks; and
-    how many of the tensor's bytes changed, and which when the encoder was asked (changed_bits)."""
+    """A changed tensor's frame records, how many of its bytes changed, and which when the encoder was
+    asked (changed_bits). Its payload and Zstd record come from finish."""
 
     frames: list[dict]
-    payload: memoryview
-    zstd: dict
     changed_nbytes: int
     changed_bits: torch.Tensor | None
 
 
 class DeltaEncoder:
-    """``encode`` runs on the device's current stream and returns once its work there is done."""
+    """Works on the device's current stream: ``encode`` returns once it no longer reads the pairs, and
+    keeps each changed tensor's inner on the GPU until max_pending_nbytes of them wait for the outer
+    Zstd; ``finish`` returns once every payload is on the host."""
 
-    def __init__(self, codec: str, device: torch.device, with_changed_bits: bool = False):
+    def __init__(self, codec: str, device: torch.device, max_pending_nbytes: int, with_changed_bits: bool = False):
         if codec not in CODECS:
             raise ValueError(f"weight-delta codec must be one of {CODECS}, got {codec!r}")
         self.device = torch.device(device)
+        self._max_pending_nbytes = max_pending_nbytes
         self._with_changed_bits = with_changed_bits
         self._snappy = NvcompCompressor("snappy", self.device) if codec == "snappy-zstd" else None
         self._zstd = NvcompCompressor("zstd", self.device)
         self._padding = torch.zeros(ALIGNMENT - 1, dtype=torch.uint8, device=self.device)
+        self._pending: list[torch.Tensor] = []
+        self._pending_nbytes = 0
+        self._payloads: list[memoryview] = []
+        self._zstds: list[dict] = []
 
     def encode(self, pairs: Sequence[tuple[torch.Tensor, torch.Tensor]]) -> list[EncodedTensor | None]:
         """Each pair is a tensor's previous bytes (pinned host) and current bytes (on this device,
@@ -81,14 +86,15 @@ class DeltaEncoder:
                     inners, layouts = self._encode_gap(changes, frame_counts)
                 else:
                     inners, layouts = self._encode_snappy(xors, changed_frames, changed_tensors, stream)
-                payloads, zstds = self._compress(inners, stream)
+                self._pending += inners
+                self._pending_nbytes += sum(inner.numel() for inner in inners)
+                if self._pending_nbytes >= self._max_pending_nbytes:
+                    self._compress_pending(stream)
             except BaseException:
                 # Queued work may still read the caller's tensors; let it finish before they are released.
                 stream.synchronize()
                 raise
-        for index, layout, payload, zstd, tensor_bits in zip(
-            changed_tensors, layouts, payloads, zstds, bits, strict=True
-        ):
+        for index, layout, tensor_bits in zip(changed_tensors, layouts, bits, strict=True):
             nbytes = pairs[index][1].numel()
             frame_records = [
                 {
@@ -99,27 +105,28 @@ class DeltaEncoder:
                 }
                 for i, (inner_offset, inner_nbytes) in zip(changed_frames[index], layout, strict=True)
             ]
-            encoded[index] = EncodedTensor(frame_records, payload, zstd, sum(frame_counts[index]), tensor_bits)
+            encoded[index] = EncodedTensor(frame_records, sum(frame_counts[index]), tensor_bits)
         return encoded
+
+    def finish(self) -> tuple[list[memoryview], list[dict]]:
+        """The payload and Zstd record of each changed tensor, in the order encode returned them."""
+        with torch.cuda.device(self.device):
+            stream = torch.cuda.current_stream()
+            try:
+                self._compress_pending(stream)
+            except BaseException:
+                stream.synchronize()
+                raise
+        return self._payloads, self._zstds
 
     def _encode_gap(
         self, changes: FrameChanges, frame_counts: list[list[int]]
     ) -> tuple[list[torch.Tensor], list[list[tuple[int, int]]]]:
         """Each changed tensor's inner, all in one buffer the kernel writes, and its frames'
         (inner_offset, inner_nbytes)."""
-        offsets, spans, layouts, end = [], [], [], 0
-        for counts in frame_counts:
-            end += -end % ALIGNMENT
-            start, layout = end, []
-            for count in counts:
-                if count:
-                    end += -end % ALIGNMENT
-                    layout.append((end - start, (GAP_NBYTES + 1) * count))
-                offsets.append(end)
-                end += (GAP_NBYTES + 1) * count
-            if layout:
-                spans.append((start, end))
-                layouts.append(layout)
+        offsets, spans, layouts, end = _layout(
+            [[(GAP_NBYTES + 1) * count for count in counts] for counts in frame_counts]
+        )
         output = torch.zeros(end, dtype=torch.uint8, device=self.device)
         encode_gap_frames(changes, output, offsets)
         return [output[start:end] for start, end in spans], layouts
@@ -131,30 +138,32 @@ class DeltaEncoder:
         changed_tensors: list[int],
         stream: torch.cuda.Stream,
     ) -> tuple[list[torch.Tensor], list[list[tuple[int, int]]]]:
-        """Each changed tensor's inner, packed from one nvCOMP call, and its frames' (inner_offset,
-        inner_nbytes)."""
+        """Each changed tensor's inner, all in one buffer copied from one nvCOMP call's outputs, and its
+        frames' (inner_offset, inner_nbytes)."""
         frames = [
             [xors[index][i * FRAME_NBYTES : (i + 1) * FRAME_NBYTES] for i in changed_frames[index]]
             for index in changed_tensors
         ]
         batch = self._snappy.compress([frame for tensor_frames in frames for frame in tensor_frames], stream)
         compressed = [slot[:size] for slot, size in zip(batch.slots, _compressed_nbytes(batch, "snappy"), strict=True)]
-        by_tensor = _split(compressed, [len(tensor_frames) for tensor_frames in frames])
-        packed = [self._pack(frame_inners) for frame_inners in by_tensor]
-        return [inner for inner, _ in packed], [layout for _, layout in packed]
-
-    def _pack(self, frame_inners: list[torch.Tensor]) -> tuple[torch.Tensor, list[tuple[int, int]]]:
-        """One tensor's frame inners back to back, each at a multiple of ALIGNMENT, and their
-        (inner_offset, inner_nbytes)."""
-        pieces, layout, total = [], [], 0
-        for inner in frame_inners:
-            if pad := -total % ALIGNMENT:
-                pieces.append(self._padding[:pad])
-                total += pad
-            layout.append((total, inner.numel()))
+        offsets, spans, layouts, _ = _layout(
+            _split([inner.numel() for inner in compressed], [len(tensor_frames) for tensor_frames in frames])
+        )
+        pieces, position = [], 0
+        for offset, inner in zip(offsets, compressed, strict=True):
+            if offset > position:
+                pieces.append(self._padding[: offset - position])
             pieces.append(inner)
-            total += inner.numel()
-        return torch.cat(pieces), layout
+            position = offset + inner.numel()
+        output = torch.cat(pieces)
+        return [output[start:end] for start, end in spans], layouts
+
+    def _compress_pending(self, stream: torch.cuda.Stream) -> None:
+        if self._pending:
+            payloads, zstds = self._compress(self._pending, stream)
+            self._payloads += payloads
+            self._zstds += zstds
+            self._pending, self._pending_nbytes = [], 0
 
     def _compress(
         self, inners: Sequence[torch.Tensor], stream: torch.cuda.Stream
@@ -198,6 +207,28 @@ def _pack_bits(mask: torch.Tensor) -> torch.Tensor:
     packed >>= 56
     packed &= 0xFF
     return packed.to(torch.uint8)
+
+
+def _layout(
+    frame_inner_nbytes: list[list[int]],
+) -> tuple[list[int], list[tuple[int, int]], list[list[tuple[int, int]]], int]:
+    """Where each frame's inner goes in one buffer of every changed tensor's inner, each tensor and each
+    of its frames at a multiple of ALIGNMENT; 0 bytes is an unchanged frame. Returns each frame's offset,
+    each changed tensor's (start, end) and its frames' (inner_offset, inner_nbytes), and the end."""
+    offsets, spans, layouts, end = [], [], [], 0
+    for nbytes in frame_inner_nbytes:
+        end += -end % ALIGNMENT
+        start, layout = end, []
+        for size in nbytes:
+            if size:
+                end += -end % ALIGNMENT
+                layout.append((end - start, size))
+            offsets.append(end)
+            end += size
+        if layout:
+            spans.append((start, end))
+            layouts.append(layout)
+    return offsets, spans, layouts, end
 
 
 def _compressed_nbytes(batch: CompressedBatch, algorithm: str) -> list[int]:
