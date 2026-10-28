@@ -15,7 +15,12 @@ FORMAT = "weight-delta/v1"
 CODECS = ("gap-zstd", "snappy-zstd")
 FRAME_NBYTES = 1 << 20
 ALIGNMENT = 16
-_SAFETENSORS_DTYPES = {np.dtype(np.int64): "I64", np.dtype(np.uint8): "U8", np.dtype(np.bool_): "BOOL"}
+_SAFETENSORS_DTYPES = {
+    np.dtype(np.int64): "I64",
+    np.dtype(np.uint64): "U64",
+    np.dtype(np.uint8): "U8",
+    np.dtype(np.bool_): "BOOL",
+}
 
 
 def is_raw(dtype: str, shape: Sequence[int]) -> bool:
@@ -26,6 +31,25 @@ def version_dir(delta_dir: Path, version: int) -> Path:
     return delta_dir / f"weight_v{version:06d}"
 
 
+def checksum(values, changed=None) -> int:
+    """What the engine checks after applying a tensor: over each 4-byte word w of its bytes (the last
+    one zero-padded), the sum mod 2^64 of (murmur3's 32-bit finalizer of w mod 2^32, made odd) x the
+    word with the bytes outside ``changed`` zeroed. Without ``changed`` every byte counts."""
+    values = np.frombuffer(values, dtype=np.uint8)
+    if changed is not None:
+        values = np.where(changed, values, np.uint8(0))
+    words = np.zeros(-(-values.size // 4), dtype="<u4")
+    words.view(np.uint8)[: values.size] = values
+    h = (np.arange(words.size) % (1 << 32)).astype(np.uint32)
+    h ^= h >> np.uint32(16)
+    h *= np.uint32(0x85EBCA6B)
+    h ^= h >> np.uint32(13)
+    h *= np.uint32(0xC2B2AE35)
+    h ^= h >> np.uint32(16)
+    h |= np.uint32(1)
+    return int((h.astype(np.uint64) * words.astype(np.uint64)).sum(dtype=np.uint64))
+
+
 class _Tensor(NamedTuple):
     name: str
     dtype: str
@@ -34,6 +58,7 @@ class _Tensor(NamedTuple):
     offset: int  # in the payload
     nbytes: int
     inner_nbytes: int
+    checksum: int
 
 
 class OwnerWriter:
@@ -51,11 +76,19 @@ class OwnerWriter:
         self._payload_nbytes = 0
 
     def add_raw(self, name: str, dtype: str, shape: Sequence[int], data) -> None:
-        self._add(name, dtype, shape, data, raw=True, inner_nbytes=0, chunks=(), frames=())
+        self._add(name, dtype, shape, data, raw=True, inner_nbytes=0, chunks=(), frames=(), checksum=checksum(data))
 
     def add_xor(
-        self, name: str, dtype: str, shape: Sequence[int], frames: Sequence[Mapping], payload, zstd: Mapping
+        self,
+        name: str,
+        dtype: str,
+        shape: Sequence[int],
+        frames: Sequence[Mapping],
+        payload,
+        zstd: Mapping,
+        checksum: int,
     ) -> None:
+        """checksum: of the tensor's new bytes where they changed."""
         self._add(
             name,
             dtype,
@@ -65,6 +98,7 @@ class OwnerWriter:
             inner_nbytes=zstd["inner_nbytes"],
             chunks=zstd["chunks"],
             frames=frames,
+            checksum=checksum,
         )
 
     def finish(self) -> dict | None:
@@ -83,6 +117,7 @@ class OwnerWriter:
             "tensors.inner_nbytes": np.array([tensor.inner_nbytes for tensor in tensors], dtype=np.int64),
             "tensors.chunk_end": np.array(self._chunk_ends, dtype=np.int64),
             "tensors.frame_end": np.array(self._frame_ends, dtype=np.int64),
+            "tensors.checksum": np.array([tensor.checksum for tensor in tensors], dtype=np.uint64),
             **_regions("chunks", self._chunks),
             **_regions("frames", self._frames),
             "tensors.name": np.frombuffer(b"".join(names), dtype=np.uint8),
@@ -95,12 +130,12 @@ class OwnerWriter:
         )
         return {"name": self._path.name, "nbytes": nbytes}
 
-    def _add(self, name, dtype, shape, data, *, raw, inner_nbytes, chunks, frames) -> None:
+    def _add(self, name, dtype, shape, data, *, raw, inner_nbytes, chunks, frames, checksum) -> None:
         offset = -(-self._payload_nbytes // ALIGNMENT) * ALIGNMENT
         nbytes = memoryview(data).nbytes
         self._payload += [bytes(offset - self._payload_nbytes), data]
         self._payload_nbytes = offset + nbytes
-        self._tensors.append(_Tensor(name, dtype, list(shape), raw, offset, nbytes, inner_nbytes))
+        self._tensors.append(_Tensor(name, dtype, list(shape), raw, offset, nbytes, inner_nbytes, checksum))
         self._chunks += chunks
         self._frames += frames
         self._chunk_ends.append(len(self._chunks))

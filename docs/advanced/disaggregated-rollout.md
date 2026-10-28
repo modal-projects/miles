@@ -107,6 +107,7 @@ miles-managed path:
 | `broadcast_packed` | Pack each weight bucket into one byte buffer and issue one NCCL broadcast | Non-colocated Megatron with SGLang mixed-dtype flattened-bucket support; trades contiguous bucket storage for fewer collectives |
 | `p2p` | Convert and re-shard weights, then write them directly to rollout-rank memory over RDMA | miles-managed, in-cluster jobs with direct rank-to-rank connectivity; see [P2P Weight Transfer](/advanced/p2p-weight-transfer) |
 | `disk-delta` | Publish changed canonical checkpoint bytes to shared storage, let rollout hosts materialize them locally, then reload | Trainer and rollout cannot share an NCCL fabric, or model-sized full-weight transfer dominates the update |
+| `weight-delta` | Each trainer rank XORs the tensors it exports with the previous version, compresses the changed bytes on its GPU and writes them to `--update-weight-disk-dir` under a manifest; engines prepare each version while serving and apply it in a pause | Trainer and rollout cannot share an NCCL fabric, and each update changes a small share of the weight bytes |
 
 These are weight synchronization choices, not different rollout APIs. In the
 broadcast and P2P modes, miles transfers tensors into known engine ranks directly.

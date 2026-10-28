@@ -15,17 +15,19 @@ from miles.utils.nvcomp import CompressedBatch, NvcompCompressor
 
 GAP_NBYTES = 3
 CHUNK_NBYTES = 1 << 20
+_CHECKSUM_SLICE_NBYTES = 1 << 26
 
 
 @dataclass(frozen=True)
 class EncodedTensor:
-    """What OwnerWriter.add_xor takes: the changed frames, their compressed bytes, and its chunks; and
-    how many of the tensor's bytes changed."""
+    """What OwnerWriter.add_xor takes: the changed frames, their compressed bytes, and its chunks; how
+    many of the tensor's bytes changed; and the checksum of its new bytes where they changed."""
 
     frames: list[dict]
     payload: memoryview
     zstd: dict
     changed_nbytes: int
+    checksum: int
 
 
 class DeltaEncoder:
@@ -72,6 +74,7 @@ class DeltaEncoder:
                 changed_tensors = [index for index, indices in enumerate(changed_frames) if indices]
                 if not changed_tensors:
                     return encoded
+                checksums = [_changed_checksum(xors[index], pairs[index][1]) for index in changed_tensors]
                 frames = [
                     [xors[index][i * FRAME_NBYTES : (i + 1) * FRAME_NBYTES] for i in changed_frames[index]]
                     for index in changed_tensors
@@ -85,8 +88,8 @@ class DeltaEncoder:
                 # Queued work may still read the caller's tensors; let it finish before they are released.
                 stream.synchronize()
                 raise
-        for index, tensor_frames, tensor_inners, offsets, payload, zstd in zip(
-            changed_tensors, frames, frame_inners, inner_offsets, payloads, zstds, strict=True
+        for index, tensor_frames, tensor_inners, offsets, payload, zstd, checksum in zip(
+            changed_tensors, frames, frame_inners, inner_offsets, payloads, zstds, checksums, strict=True
         ):
             frame_records = [
                 {
@@ -99,7 +102,7 @@ class DeltaEncoder:
                     changed_frames[index], tensor_frames, tensor_inners, offsets, strict=True
                 )
             ]
-            encoded[index] = EncodedTensor(frame_records, payload, zstd, sum(frame_counts[index]))
+            encoded[index] = EncodedTensor(frame_records, payload, zstd, sum(frame_counts[index]), checksum)
         return encoded
 
     def _encode_frames(self, frames: list[list[torch.Tensor]], stream: torch.cuda.Stream) -> list[list[torch.Tensor]]:
@@ -161,6 +164,28 @@ def _frame_counts(xors: list[torch.Tensor]) -> list[list[int]]:
         per_tensor.append(torch.cat(counts))
     flat = torch.cat(per_tensor).tolist() if per_tensor else []
     return _split(flat, [counts.numel() for counts in per_tensor])
+
+
+def _changed_checksum(xor: torch.Tensor, current: torch.Tensor) -> int:
+    """publication.checksum of current's bytes where xor is not zero, a slice at a time to keep the
+    scratch small."""
+    total = 0
+    for start in range(0, xor.numel(), _CHECKSUM_SLICE_NBYTES):
+        end = start + _CHECKSUM_SLICE_NBYTES
+        values = torch.where(xor[start:end] != 0, current[start:end], 0)
+        words = torch.nn.functional.pad(values, (0, -values.numel() % 4)).view(torch.int32).to(torch.int64)
+        words &= 0xFFFFFFFF
+        h = torch.arange(start // 4, start // 4 + words.numel(), dtype=torch.int64, device=xor.device)
+        h &= 0xFFFFFFFF
+        h ^= h >> 16
+        h = (h * 0x85EBCA6B) & 0xFFFFFFFF
+        h ^= h >> 13
+        h = (h * 0xC2B2AE35) & 0xFFFFFFFF
+        h ^= h >> 16
+        h |= 1
+        # Products and their sum wrap in int64, which keeps them mod 2^64.
+        total += int((h * words).sum())
+    return total % (1 << 64)
 
 
 def encode_gap_frame(frame: torch.Tensor) -> torch.Tensor:
