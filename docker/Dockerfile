@@ -152,6 +152,10 @@ RUN FLASH_MLA_DIR=$(python3 -c 'import importlib.util; print(importlib.util.find
     fi && \
     pip install /tmp/wheels/flash_mla-*.whl
 
+# nvCOMP's C library: weight-delta weight sync compresses with it
+# (miles/utils/nvcomp.py) and the engines decode with it.
+RUN pip install --no-deps nvidia-libnvcomp-cu13==5.3.0.16
+
 # Mamba kernels for nemotron_h hybrid (mamba+attention) models.
 RUN if ls /tmp/wheels/causal_conv1d-*.whl 2>/dev/null | grep -q . && \
        ls /tmp/wheels/mamba_ssm-*.whl 2>/dev/null | grep -q .; then \
