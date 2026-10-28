@@ -9,6 +9,7 @@ register_cuda_ci(
 )
 
 
+import numpy as np
 import pyarrow
 import pytest
 import torch
@@ -72,7 +73,7 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
     pairs = [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
     snapshots = [previous.clone() for previous, _ in pairs]
 
-    encoded = DeltaEncoder(codec, device).encode(pairs)
+    encoded = DeltaEncoder(codec, device, with_changed_bits=True).encode(pairs)
 
     for name, (previous, current), snapshot, result in zip(CASES, pairs, snapshots, encoded, strict=True):
         assert torch.equal(previous, snapshot), f"{name}: the previous bytes were modified"
@@ -84,6 +85,7 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
         assert [record["offset"] for record in result.frames] == [i * FRAME_NBYTES for i in changed_frames], name
         assert result.changed_nbytes == int(xor.count_nonzero()), name
         assert result.checksum == checksum(current.cpu().numpy(), changed=(xor != 0).numpy()), name
+        assert torch.equal(result.changed_bits.cpu(), torch.from_numpy(np.packbits(xor.numpy() != 0))), name
         inner = _undo_zstd(result)
         for record in result.frames:
             frame = xor[record["offset"] : record["offset"] + FRAME_NBYTES]

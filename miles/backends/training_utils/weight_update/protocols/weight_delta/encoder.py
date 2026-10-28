@@ -16,27 +16,31 @@ from miles.utils.nvcomp import CompressedBatch, NvcompCompressor
 GAP_NBYTES = 3
 CHUNK_NBYTES = 1 << 20
 _CHECKSUM_SLICE_NBYTES = 1 << 26
+BITS_SLICE_NBYTES = 1 << 26
 
 
 @dataclass(frozen=True)
 class EncodedTensor:
     """What OwnerWriter.add_xor takes: the changed frames, their compressed bytes, and its chunks; how
-    many of the tensor's bytes changed; and the checksum of its new bytes where they changed."""
+    many of the tensor's bytes changed, and which when the encoder was asked (changed_bits); and the
+    checksum of its new bytes where they changed."""
 
     frames: list[dict]
     payload: memoryview
     zstd: dict
     changed_nbytes: int
+    changed_bits: torch.Tensor | None
     checksum: int
 
 
 class DeltaEncoder:
     """``encode`` runs on the device's current stream and returns once its work there is done."""
 
-    def __init__(self, codec: str, device: torch.device):
+    def __init__(self, codec: str, device: torch.device, with_changed_bits: bool = False):
         if codec not in CODECS:
             raise ValueError(f"weight-delta codec must be one of {CODECS}, got {codec!r}")
         self.device = torch.device(device)
+        self._with_changed_bits = with_changed_bits
         self._snappy = NvcompCompressor("snappy", self.device) if codec == "snappy-zstd" else None
         self._zstd = NvcompCompressor("zstd", self.device)
         self._padding = torch.zeros(ALIGNMENT - 1, dtype=torch.uint8, device=self.device)
@@ -74,6 +78,7 @@ class DeltaEncoder:
                 changed_tensors = [index for index, indices in enumerate(changed_frames) if indices]
                 if not changed_tensors:
                     return encoded
+                bits = [changed_bits(xors[index]) if self._with_changed_bits else None for index in changed_tensors]
                 checksums = [_changed_checksum(xors[index], pairs[index][1]) for index in changed_tensors]
                 frames = [
                     [xors[index][i * FRAME_NBYTES : (i + 1) * FRAME_NBYTES] for i in changed_frames[index]]
@@ -88,8 +93,8 @@ class DeltaEncoder:
                 # Queued work may still read the caller's tensors; let it finish before they are released.
                 stream.synchronize()
                 raise
-        for index, tensor_frames, tensor_inners, offsets, payload, zstd, checksum in zip(
-            changed_tensors, frames, frame_inners, inner_offsets, payloads, zstds, checksums, strict=True
+        for index, tensor_frames, tensor_inners, offsets, payload, zstd, tensor_bits, checksum in zip(
+            changed_tensors, frames, frame_inners, inner_offsets, payloads, zstds, bits, checksums, strict=True
         ):
             frame_records = [
                 {
@@ -102,7 +107,9 @@ class DeltaEncoder:
                     changed_frames[index], tensor_frames, tensor_inners, offsets, strict=True
                 )
             ]
-            encoded[index] = EncodedTensor(frame_records, payload, zstd, sum(frame_counts[index]), checksum)
+            encoded[index] = EncodedTensor(
+                frame_records, payload, zstd, sum(frame_counts[index]), tensor_bits, checksum
+            )
         return encoded
 
     def _encode_frames(self, frames: list[list[torch.Tensor]], stream: torch.cuda.Stream) -> list[list[torch.Tensor]]:
@@ -198,6 +205,21 @@ def encode_gap_frame(frame: torch.Tensor) -> torch.Tensor:
     gaps = torch.diff(positions, prepend=positions.new_zeros(1))
     planes = torch.stack([(gaps >> 8 * plane) & 0xFF for plane in range(GAP_NBYTES)]).to(torch.uint8)
     return torch.cat([planes.reshape(-1), frame[positions]])
+
+
+def changed_bits(xor: torch.Tensor) -> torch.Tensor:
+    """One bit per byte of a 1-D uint8 XOR, set where it changed, in numpy.packbits' order; a slice at a
+    time to keep the scratch small."""
+    return torch.cat([_pack_bits(piece != 0) for piece in xor.split(BITS_SLICE_NBYTES)])
+
+
+def _pack_bits(mask: torch.Tensor) -> torch.Tensor:
+    # Eight 0/1 bytes read as one little-endian int64; this multiplier gathers byte i into bit 63 - i.
+    words = torch.nn.functional.pad(mask.view(torch.uint8), (0, -mask.numel() % 8)).view(torch.int64)
+    packed = words * -0x7FBFDFEFF7FBFDFF
+    packed >>= 56
+    packed &= 0xFF
+    return packed.to(torch.uint8)
 
 
 def _compressed_nbytes(batch: CompressedBatch, algorithm: str) -> list[int]:
