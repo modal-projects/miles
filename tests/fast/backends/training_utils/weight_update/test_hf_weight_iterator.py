@@ -43,6 +43,17 @@ class TestWeightUpdatePlacement:
         assert resolve_placement(keep_pp, full) == full
         assert resolve_placement(full, keep_pp) == full
 
+    def test_resolve_is_per_owner_only_when_both_sides_allow_it(self):
+        keep_pp = WeightUpdatePlacement(gather_pp=False)
+        per_owner = WeightUpdatePlacement(gather_pp=False, per_owner=True)
+        assert resolve_placement(per_owner, per_owner) == per_owner
+        assert resolve_placement(per_owner, keep_pp) == keep_pp
+        assert resolve_placement(keep_pp, per_owner) == keep_pp
+
+    def test_a_per_owner_placement_is_never_a_full_gather(self):
+        assert WeightUpdatePlacement(gather_pp=True).is_full_gather
+        assert not WeightUpdatePlacement(gather_pp=True, per_owner=True).is_full_gather
+
 
 class _StubIterator(HfWeightIteratorBase):
     """Concrete subclass with canned base and adapter unit streams."""
