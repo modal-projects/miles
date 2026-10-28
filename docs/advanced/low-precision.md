@@ -106,7 +106,9 @@ non-default for your GPU.
 For models that already ship 128×128 block-wise FP8 weights (DeepSeek-V3.2,
 `Qwen/Qwen3-30B-A3B-FP8`), point `--hf-checkpoint` at the
 block-wise FP8 directory and let SGLang autodetect. Otherwise convert with
-`tools/convert_hf_to_fp8.py`.
+`tools/convert_hf_to_fp8.py`. It quantizes like the trainer's FP8 export, with the
+same `NVTE_FP8_BLOCK_SCALING_FP32_SCALES` default, so run it on the trainer's GPU
+type (or set the variable as the trainer has it).
 
 For MoE workloads, also consider `--use-rollout-routing-replay` (R3). The
 canonical recipe leaves it commented out by default but the flag is available.

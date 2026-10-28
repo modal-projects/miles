@@ -26,3 +26,10 @@ def default_fp8_block_scaling_fp32_scales() -> str:
         return "1"
     major, _minor = torch.cuda.get_device_capability()
     return "0" if major >= 10 else "1"
+
+
+def fp8_block_scaling_fp32_scales() -> str:
+    """NVTE_FP8_BLOCK_SCALING_FP32_SCALES as trainers run with it: the environment's value, else the hardware default."""
+    if (value := os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")) is not None:
+        return value
+    return default_fp8_block_scaling_fp32_scales()
