@@ -224,6 +224,27 @@ class TestUnawaitedCoroutineCrashesProcess:
         assert "should not reach here" not in result.stdout
         assert "coroutine" in result.stderr
 
+    def test_unawaited_litellm_coroutine_does_not_crash(self, tmp_path):
+        """LiteLLM's own dropped coroutines must not kill the rollout worker that Harbor agents run in."""
+        (tmp_path / "litellm").mkdir()
+        (tmp_path / "litellm" / "__init__.py").write_text("async def acompletion(): pass\n")
+        result = _run_snippet(
+            f"""
+            import gc, sys
+            sys.path.insert(0, {str(tmp_path)!r})
+            import litellm
+            from miles.utils.logging_utils import configure_strict_async_warnings
+            configure_strict_async_warnings()
+
+            litellm.acompletion()
+            gc.collect()
+            print("still running")
+        """
+        )
+        assert result.returncode == 0
+        assert "still running" in result.stdout
+        assert "Fatal async misuse" not in result.stderr
+
     def test_awaited_coroutine_no_crash(self):
         result = _run_snippet(
             """

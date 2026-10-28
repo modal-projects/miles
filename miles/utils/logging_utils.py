@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import warnings
+from pathlib import PurePath
 from miles.utils.audit_utils.event_logger.logger import EventLogger, is_event_logger_initialized, set_event_logger
 from miles.utils.audit_utils.process_identity import ProcessIdentity
 from miles.utils.env_report.reporter import EnvReporter, start_env_reporting
@@ -65,6 +66,9 @@ def configure_strict_async_warnings() -> None:
         if isinstance(unraisable.exc_value, RuntimeWarning) and re.search(
             _FATAL_ASYNC_PATTERN, str(unraisable.exc_value)
         ):
+            if _is_litellm_coroutine(unraisable.object):
+                logger.warning(f"Async misuse inside LiteLLM, not fatal: {unraisable.exc_value}")
+                return
             msg = f"Fatal async misuse, aborting: {unraisable.exc_value}"
             logger.error(msg)
             print(msg, file=sys.stderr, flush=True)
@@ -72,3 +76,10 @@ def configure_strict_async_warnings() -> None:
         _original_hook(unraisable)
 
     sys.unraisablehook = _crash_on_async_misuse
+
+
+def _is_litellm_coroutine(obj) -> bool:
+    # LiteLLM, which Harbor agents call the model through, can drop a coroutine it created. That is
+    # LiteLLM's bug, not a Miles one, and it must not kill the rollout worker.
+    code = getattr(obj, "cr_code", None)
+    return code is not None and "litellm" in PurePath(code.co_filename).parts
