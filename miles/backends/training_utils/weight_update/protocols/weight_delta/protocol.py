@@ -20,7 +20,7 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import Weigh
 from miles.backends.training_utils.weight_update.protocol import WeightTransferProtocol
 from miles.backends.training_utils.weight_update.protocols.delta import _safetensors_dtype
 from miles.backends.training_utils.weight_update.protocols.utils.data_replica import get_data_replica_rank_and_size
-from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import DeltaEncoder
+from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import DeltaEncoder, changed_bits
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import (
     OwnerWriter,
     is_raw,
@@ -63,6 +63,9 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._next: dict[str, torch.Tensor] = {}
         self._encoder: DeltaEncoder | None = None
         self._replay: list[int] = []
+        # Only for --weight-delta-change-metrics; the sync never reads it.
+        self._ever_changed: dict[str, torch.Tensor] | None = {} if args.weight_delta_change_metrics else None
+        self._ever_changed_nbytes = 0
         self._reset_sync()
 
     def _reset_sync(self) -> None:
@@ -71,7 +74,14 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._directory: Path | None = None
         self._writer: OwnerWriter | None = None
         self._record: dict | None = None
-        self._stats = {"exported_nbytes": 0, "changed_nbytes": 0, "encode_s": 0.0}
+        self._rechanged: list[torch.Tensor] = []
+        self._stats = {
+            "exported_nbytes": 0,
+            "changed_nbytes": 0,
+            "rechanged_nbytes": 0,
+            "ever_changed_nbytes": 0,
+            "encode_s": 0.0,
+        }
 
     def connect(
         self,
@@ -109,7 +119,9 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             raise RuntimeError(f"weight version {weight_version} is behind the published {self._version}")
         if self._encoder is None:
             self._encoder = DeltaEncoder(
-                self.args.weight_delta_codec, torch.device("cuda", torch.cuda.current_device())
+                self.args.weight_delta_codec,
+                torch.device("cuda", torch.cuda.current_device()),
+                with_changed_bits=self._ever_changed is not None,
             )
         self._directory = version_dir(self._delta_dir, weight_version)
         self._writer = OwnerWriter(self._directory, dist.get_rank())
@@ -151,6 +163,9 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                 if changed_nbytes:
                     self._writer.add_raw(name, dtype, shape, memoryview(self._next[name].numpy()))
                     self._stats["changed_nbytes"] += changed_nbytes
+                    if self._ever_changed is not None:
+                        bits = changed_bits(self._next[name] ^ self._previous[name])
+                        self._track_changes(name, bits.to(current.device))
             else:
                 pairs.append((self._previous[name], current))
                 xor_tensors.append((name, dtype, shape, current))
@@ -161,10 +176,22 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             if result is not None:
                 self._writer.add_xor(name, dtype, shape, result.frames, result.payload, result.zstd)
                 self._stats["changed_nbytes"] += result.changed_nbytes
+                if result.changed_bits is not None:
+                    self._track_changes(name, result.changed_bits)
             self._next[name].copy_(current, non_blocking=True)
+
+    def _track_changes(self, name: str, bits: torch.Tensor) -> None:
+        if name not in self._ever_changed:
+            self._ever_changed[name] = torch.zeros(bits.numel(), dtype=torch.uint8, pin_memory=True)
+        ever = self._ever_changed[name].to(bits.device, non_blocking=True)
+        self._rechanged.append(_popcount(ever & bits))
+        self._ever_changed[name].copy_(ever | bits, non_blocking=True)
 
     def after_base_weights(self) -> None:
         torch.cuda.current_stream().synchronize()
+        self._stats["rechanged_nbytes"] = int(torch.stack(self._rechanged).sum()) if self._rechanged else 0
+        self._ever_changed_nbytes += self._stats["changed_nbytes"] - self._stats["rechanged_nbytes"]
+        self._stats["ever_changed_nbytes"] = self._ever_changed_nbytes
         if self._error is None and self._writer is not None and set(self._exported) != set(self._previous):
             self._error = ValueError(
                 f"the exported tensors changed since the launch: {len(set(self._previous) - set(self._exported))} "
@@ -305,9 +332,17 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
     def _record_metrics(self, records: list[tuple[dict, dict]]) -> None:
         stats = [item for _, item in records]
         exported = sum(item["exported_nbytes"] for item in stats)
+        changed = sum(item["changed_nbytes"] for item in stats)
+        if self._ever_changed is not None:
+            self.update_weight_metrics["perf/update_weights_ever_changed"] = sum(
+                item["ever_changed_nbytes"] for item in stats
+            ) / max(exported, 1)
+            self.update_weight_metrics["perf/update_weights_rechanged"] = sum(
+                item["rechanged_nbytes"] for item in stats
+            ) / max(changed, 1)
         self.update_weight_metrics.update(
             {
-                "perf/update_weights_density": sum(item["changed_nbytes"] for item in stats) / max(exported, 1),
+                "perf/update_weights_density": changed / max(exported, 1),
                 "perf/update_weights_wire_bytes": sum(record["nbytes"] for record, _ in records if record is not None),
                 "perf/update_weights_encode_s": max(item["encode_s"] for item in stats),
             }
@@ -346,6 +381,12 @@ def _check_exported_values(previous: dict[str, torch.Tensor], hf_checkpoint: str
             f"{len(differing)} exported tensors differ from --hf-checkpoint's values, e.g. {differing[:5]}; the "
             "engines start from its bytes, so it must be the trainer's own export (same quantizer and settings)"
         )
+
+
+def _popcount(bits: torch.Tensor) -> torch.Tensor:
+    count = bits - ((bits >> 1) & 0x55)
+    count = (count & 0x33) + ((count >> 2) & 0x33)
+    return ((count + (count >> 4)) & 0x0F).sum(dtype=torch.int64)
 
 
 def _as_bytes(tensor: torch.Tensor) -> torch.Tensor:

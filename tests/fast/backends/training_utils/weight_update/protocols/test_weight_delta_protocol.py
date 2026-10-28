@@ -67,6 +67,7 @@ def _protocol(tmp_path: Path, engines: list[_Engine]) -> UpdateWeightFromDelta:
         pause_generation_mode="retract",
         fully_async=False,
         colocate=False,
+        weight_delta_change_metrics=False,
     )
     protocol = UpdateWeightFromDelta(args)
     _connect(protocol, engines)

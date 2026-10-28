@@ -329,6 +329,18 @@ class RolloutRelatedConfig(BaseConfig):
             ),
         ),
     ] = "gap-zstd"
+    weight_delta_change_metrics: A[
+        bool,
+        Arg(
+            help=(
+                "Log perf/update_weights_ever_changed, the fraction of exported bytes that changed at least once "
+                "since the launch, and perf/update_weights_rechanged, the fraction of a sync's changed bytes that "
+                "had changed before: whether training keeps changing the same weights. Costs one bit per exported "
+                "byte in pinned host memory, a copy of those bits to the GPU and back, and about a dozen small GPU "
+                "kernels per changed tensor each sync."
+            ),
+        ),
+    ] = False
     custom_update_weight_post_write_path: A[
         CustomFunctionConfig | None,
         Arg(

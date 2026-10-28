@@ -82,7 +82,7 @@ def _flip_bytes(weights: dict[str, torch.Tensor], seed: int) -> dict[str, torch.
     return changed
 
 
-def _protocol(tmp_path: Path, codec: str) -> UpdateWeightFromDelta:
+def _protocol(tmp_path: Path, codec: str, change_metrics: bool) -> UpdateWeightFromDelta:
     protocol = UpdateWeightFromDelta(
         ImmutableNamespace(
             update_weight_disk_dir=str(tmp_path / "delta"),
@@ -95,6 +95,7 @@ def _protocol(tmp_path: Path, codec: str) -> UpdateWeightFromDelta:
             pause_generation_mode="retract",
             fully_async=False,
             colocate=False,
+            weight_delta_change_metrics=change_metrics,
         )
     )
     protocol.connect([_Engine()], None, None, ["cell-0"], None, protocol.required_placement, "all")
@@ -169,16 +170,22 @@ def _apply_like_an_engine(
     return manifest, applied, raw_names
 
 
+@pytest.mark.parametrize("change_metrics", [True, False])
 @pytest.mark.parametrize("codec", ["gap-zstd", "snappy-zstd"])
-def test_each_version_brings_the_previous_bytes_to_exactly_the_export(tmp_path: Path, codec: str):
+def test_each_version_brings_the_previous_bytes_to_exactly_the_export(
+    tmp_path: Path, codec: str, change_metrics: bool
+):
     weights = _initial()
     (tmp_path / "base").mkdir()
     save_file(weights, tmp_path / "base" / "model.safetensors")
-    protocol = _protocol(tmp_path, codec)
+    protocol = _protocol(tmp_path, codec, change_metrics)
     hooked: list = []
     protocol._post_write_hook = lambda args, path, engines: hooked.append(sorted(p.name for p in Path(path).iterdir()))
     _sync(protocol, 0, weights)
     assert hooked == [] and not (tmp_path / "delta").exists()
+    ever_changed = {
+        name: torch.zeros(tensor.numel() * tensor.element_size(), dtype=torch.bool) for name, tensor in weights.items()
+    }
 
     for version in (1, 2):
         previous, weights = weights, _flip_bytes(weights, seed=version)
@@ -197,13 +204,25 @@ def test_each_version_brings_the_previous_bytes_to_exactly_the_export(tmp_path: 
         assert hooked[-2:] == [["owner-00000.safetensors"], ["manifest.json", "owner-00000.safetensors"]]
         exported = sum(tensor.numel() * tensor.element_size() for tensor in weights.values())
         changed = sum(changed for _, _, changed in TENSORS.values())
-        assert protocol.pop_metrics()["perf/update_weights_density"] == pytest.approx(changed / exported)
+        metrics = protocol.pop_metrics()
+        assert metrics["perf/update_weights_density"] == pytest.approx(changed / exported)
+        rechanged = 0
+        for name, before in previous.items():
+            flipped = before.view(-1).view(torch.uint8) != weights[name].view(-1).view(torch.uint8)
+            rechanged += int((ever_changed[name] & flipped).sum())
+            ever_changed[name] |= flipped
+        if change_metrics:
+            ever = sum(int(mask.sum()) for mask in ever_changed.values())
+            assert metrics["perf/update_weights_ever_changed"] == pytest.approx(ever / exported)
+            assert metrics["perf/update_weights_rechanged"] == pytest.approx(rechanged / changed)
+        else:
+            assert "perf/update_weights_ever_changed" not in metrics and "perf/update_weights_rechanged" not in metrics
 
 
 def test_a_fresh_launch_refuses_an_export_that_differs_from_the_checkpoint(tmp_path: Path):
     weights = _initial()
     (tmp_path / "base").mkdir()
     save_file(_flip_bytes(weights, seed=9), tmp_path / "base" / "model.safetensors")
-    protocol = _protocol(tmp_path, "gap-zstd")
+    protocol = _protocol(tmp_path, "gap-zstd", change_metrics=False)
     with pytest.raises(RuntimeError, match=r"3 exported tensors differ from --hf-checkpoint's values"):
         _sync(protocol, 0, weights)
