@@ -139,6 +139,10 @@ RUN if ls /tmp/wheels/fast_hadamard_transform-*.whl 2>/dev/null | grep -q .; the
 RUN pip install /tmp/wheels/flash_mla-*.whl && \
     pip install --no-deps "nvidia-cudnn-frontend>=1.28"
 
+# nvCOMP's C library: weight-delta weight sync compresses with it
+# (miles/utils/nvcomp.py) and the engines decode with it.
+RUN pip install --no-deps nvidia-libnvcomp-cu13==5.3.0.16
+
 # Mamba kernels for nemotron_h hybrid (mamba+attention) models.
 RUN if ls /tmp/wheels/causal_conv1d-*.whl 2>/dev/null | grep -q . && \
        ls /tmp/wheels/mamba_ssm-*.whl 2>/dev/null | grep -q .; then \
