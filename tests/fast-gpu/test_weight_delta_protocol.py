@@ -21,9 +21,9 @@ from safetensors.torch import save_file
 
 from miles.backends.sglang_utils.sglang_config import SglangConfig
 from miles.backends.training_utils.weight_update.protocols.weight_delta import protocol as weight_delta
-from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import GAP_NBYTES
 from miles.backends.training_utils.weight_update.protocols.weight_delta.protocol import UpdateWeightFromDelta
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import version_dir
+from miles.kernels.weight_delta.frames import GAP_NBYTES
 from miles.utils.args.custom_view import ImmutableNamespace
 
 # name -> (dtype, shape, bytes changed per sync)

@@ -19,15 +19,15 @@ from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder 
     CHUNK_NBYTES,
     DeltaEncoder,
     EncodedTensor,
-    encode_gap_frame,
 )
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import ALIGNMENT, FRAME_NBYTES
+from miles.kernels.weight_delta.frames import GAP_NBYTES
 
 MIB = 1 << 20
 # name -> (bytes, changed positions)
 CASES = {
-    "unchanged": (3 * MIB // 2, []),
     "frames 0 and 2 of 3, the last short": (2 * MIB + 12345, [5, 70000, 2 * MIB + 7, 2 * MIB + 12344]),
+    "unchanged, between changed ones": (3 * MIB // 2, []),
     "dense, its inner over several chunks": (3 * MIB, list(range(0, 3 * MIB, 2))),
     "one byte of a tiny tensor": (100, [99]),
     "empty": (0, []),
@@ -64,6 +64,16 @@ def _undo_zstd(encoded: EncodedTensor) -> bytes:
     return b"".join(pieces)
 
 
+def _undo_gap(frame_inner: bytes, nbytes: int) -> bytes:
+    count = len(frame_inner) // (GAP_NBYTES + 1)
+    inner = torch.frombuffer(bytearray(frame_inner), dtype=torch.uint8)
+    planes = inner[: GAP_NBYTES * count].view(GAP_NBYTES, count).to(torch.int64)
+    gaps = sum(planes[plane] << 8 * plane for plane in range(GAP_NBYTES))
+    frame = torch.zeros(nbytes, dtype=torch.uint8)
+    frame[torch.cumsum(gaps, 0)] = inner[GAP_NBYTES * count :]
+    return frame.numpy().tobytes()
+
+
 @pytest.mark.parametrize("codec", ["gap-zstd", "snappy-zstd"])
 def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.device, codec: str):
     pairs = [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
@@ -87,7 +97,8 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
             assert record["nbytes"] == frame.numel() and record["inner_offset"] % ALIGNMENT == 0, name
             frame_inner = inner[record["inner_offset"] : record["inner_offset"] + record["inner_nbytes"]]
             if codec == "gap-zstd":
-                assert frame_inner == encode_gap_frame(frame).numpy().tobytes(), name
+                assert len(frame_inner) == (GAP_NBYTES + 1) * int(frame.count_nonzero()), name
+                assert _undo_gap(frame_inner, frame.numel()) == frame.numpy().tobytes(), name
             else:
                 decoded = pyarrow.Codec("snappy").decompress(frame_inner, decompressed_size=frame.numel())
                 assert decoded.to_pybytes() == frame.numpy().tobytes(), name

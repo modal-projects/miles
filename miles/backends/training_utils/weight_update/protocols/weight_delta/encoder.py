@@ -11,9 +11,9 @@ from miles.backends.training_utils.weight_update.protocols.weight_delta.publicat
     CODECS,
     FRAME_NBYTES,
 )
+from miles.kernels.weight_delta.frames import GAP_NBYTES, FrameChanges, encode_gap_frames, xor_frames_
 from miles.utils.nvcomp import CompressedBatch, NvcompCompressor
 
-GAP_NBYTES = 3
 CHUNK_NBYTES = 1 << 20
 BITS_SLICE_NBYTES = 1 << 26
 
@@ -67,63 +67,94 @@ class DeltaEncoder:
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream()
             try:
-                xors = [
-                    previous.to(self.device, non_blocking=True).bitwise_xor_(current) for previous, current in pairs
-                ]
-                frame_counts = _frame_counts(xors)
+                xors = [previous.to(self.device, non_blocking=True) for previous, _ in pairs]
+                changes = xor_frames_(xors, [current for _, current in pairs], FRAME_NBYTES)
+                frame_counts = _split(
+                    changes.counts.tolist(), [(xor.numel() + FRAME_NBYTES - 1) // FRAME_NBYTES for xor in xors]
+                )
                 changed_frames = [[i for i, count in enumerate(counts) if count] for counts in frame_counts]
                 changed_tensors = [index for index, indices in enumerate(changed_frames) if indices]
                 if not changed_tensors:
                     return encoded
                 bits = [changed_bits(xors[index]) if self._with_changed_bits else None for index in changed_tensors]
-                frames = [
-                    [xors[index][i * FRAME_NBYTES : (i + 1) * FRAME_NBYTES] for i in changed_frames[index]]
-                    for index in changed_tensors
-                ]
-                frame_inners = self._encode_frames(frames, stream)
-                inners, inner_offsets = zip(
-                    *(self._pack(tensor_inners) for tensor_inners in frame_inners), strict=True
-                )
+                if self._snappy is None:
+                    inners, layouts = self._encode_gap(changes, frame_counts)
+                else:
+                    inners, layouts = self._encode_snappy(xors, changed_frames, changed_tensors, stream)
                 payloads, zstds = self._compress(inners, stream)
             except BaseException:
                 # Queued work may still read the caller's tensors; let it finish before they are released.
                 stream.synchronize()
                 raise
-        for index, tensor_frames, tensor_inners, offsets, payload, zstd, tensor_bits in zip(
-            changed_tensors, frames, frame_inners, inner_offsets, payloads, zstds, bits, strict=True
+        for index, layout, payload, zstd, tensor_bits in zip(
+            changed_tensors, layouts, payloads, zstds, bits, strict=True
         ):
+            nbytes = pairs[index][1].numel()
             frame_records = [
                 {
                     "offset": i * FRAME_NBYTES,
-                    "nbytes": frame.numel(),
-                    "inner_offset": offset,
-                    "inner_nbytes": inner.numel(),
+                    "nbytes": min(FRAME_NBYTES, nbytes - i * FRAME_NBYTES),
+                    "inner_offset": inner_offset,
+                    "inner_nbytes": inner_nbytes,
                 }
-                for i, frame, inner, offset in zip(
-                    changed_frames[index], tensor_frames, tensor_inners, offsets, strict=True
-                )
+                for i, (inner_offset, inner_nbytes) in zip(changed_frames[index], layout, strict=True)
             ]
             encoded[index] = EncodedTensor(frame_records, payload, zstd, sum(frame_counts[index]), tensor_bits)
         return encoded
 
-    def _encode_frames(self, frames: list[list[torch.Tensor]], stream: torch.cuda.Stream) -> list[list[torch.Tensor]]:
-        if self._snappy is None:
-            return [[encode_gap_frame(frame) for frame in tensor_frames] for tensor_frames in frames]
-        batch = self._snappy.compress([frame for tensor_frames in frames for frame in tensor_frames], stream)
-        inners = [slot[:size] for slot, size in zip(batch.slots, _compressed_nbytes(batch, "snappy"), strict=True)]
-        return _split(inners, [len(tensor_frames) for tensor_frames in frames])
+    def _encode_gap(
+        self, changes: FrameChanges, frame_counts: list[list[int]]
+    ) -> tuple[list[torch.Tensor], list[list[tuple[int, int]]]]:
+        """Each changed tensor's inner, all in one buffer the kernel writes, and its frames'
+        (inner_offset, inner_nbytes)."""
+        offsets, spans, layouts, end = [], [], [], 0
+        for counts in frame_counts:
+            end += -end % ALIGNMENT
+            start, layout = end, []
+            for count in counts:
+                if count:
+                    end += -end % ALIGNMENT
+                    layout.append((end - start, (GAP_NBYTES + 1) * count))
+                offsets.append(end)
+                end += (GAP_NBYTES + 1) * count
+            if layout:
+                spans.append((start, end))
+                layouts.append(layout)
+        output = torch.zeros(end, dtype=torch.uint8, device=self.device)
+        encode_gap_frames(changes, output, offsets)
+        return [output[start:end] for start, end in spans], layouts
 
-    def _pack(self, frame_inners: list[torch.Tensor]) -> tuple[torch.Tensor, list[int]]:
-        """One tensor's frame inners back to back, each at a multiple of ALIGNMENT."""
-        pieces, offsets, total = [], [], 0
+    def _encode_snappy(
+        self,
+        xors: list[torch.Tensor],
+        changed_frames: list[list[int]],
+        changed_tensors: list[int],
+        stream: torch.cuda.Stream,
+    ) -> tuple[list[torch.Tensor], list[list[tuple[int, int]]]]:
+        """Each changed tensor's inner, packed from one nvCOMP call, and its frames' (inner_offset,
+        inner_nbytes)."""
+        frames = [
+            [xors[index][i * FRAME_NBYTES : (i + 1) * FRAME_NBYTES] for i in changed_frames[index]]
+            for index in changed_tensors
+        ]
+        batch = self._snappy.compress([frame for tensor_frames in frames for frame in tensor_frames], stream)
+        compressed = [slot[:size] for slot, size in zip(batch.slots, _compressed_nbytes(batch, "snappy"), strict=True)]
+        by_tensor = _split(compressed, [len(tensor_frames) for tensor_frames in frames])
+        packed = [self._pack(frame_inners) for frame_inners in by_tensor]
+        return [inner for inner, _ in packed], [layout for _, layout in packed]
+
+    def _pack(self, frame_inners: list[torch.Tensor]) -> tuple[torch.Tensor, list[tuple[int, int]]]:
+        """One tensor's frame inners back to back, each at a multiple of ALIGNMENT, and their
+        (inner_offset, inner_nbytes)."""
+        pieces, layout, total = [], [], 0
         for inner in frame_inners:
             if pad := -total % ALIGNMENT:
                 pieces.append(self._padding[:pad])
                 total += pad
-            offsets.append(total)
+            layout.append((total, inner.numel()))
             pieces.append(inner)
             total += inner.numel()
-        return torch.cat(pieces), offsets
+        return torch.cat(pieces), layout
 
     def _compress(
         self, inners: Sequence[torch.Tensor], stream: torch.cuda.Stream
@@ -152,31 +183,6 @@ class DeltaEncoder:
             zstds.append({"inner_nbytes": inner.numel(), "chunks": chunk_records})
             start += offset
         return payloads, zstds
-
-
-def _frame_counts(xors: list[torch.Tensor]) -> list[list[int]]:
-    """Changed bytes in each frame of each tensor, read back to the host at once."""
-    per_tensor = []
-    for xor in xors:
-        full = xor.numel() // FRAME_NBYTES
-        counts = [xor[: full * FRAME_NBYTES].view(full, FRAME_NBYTES).count_nonzero(dim=1)]
-        if xor.numel() % FRAME_NBYTES:
-            counts.append(xor[full * FRAME_NBYTES :].count_nonzero().view(1))
-        per_tensor.append(torch.cat(counts))
-    flat = torch.cat(per_tensor).tolist() if per_tensor else []
-    return _split(flat, [counts.numel() for counts in per_tensor])
-
-
-def encode_gap_frame(frame: torch.Tensor) -> torch.Tensor:
-    """Codec gap's inner encoding of an XOR frame: n changed bytes become 4n, each position's gap
-    from the previous one (the first from 0) as a little-endian u24 in three byte planes, then the
-    values."""
-    if frame.dtype != torch.uint8 or frame.ndim != 1 or frame.numel() > 1 << (8 * GAP_NBYTES):
-        raise ValueError(f"a gap frame is 1-D uint8 of at most 16 MiB, got {frame.dtype} {tuple(frame.shape)}")
-    positions = torch.nonzero(frame).squeeze(1)
-    gaps = torch.diff(positions, prepend=positions.new_zeros(1))
-    planes = torch.stack([(gaps >> 8 * plane) & 0xFF for plane in range(GAP_NBYTES)]).to(torch.uint8)
-    return torch.cat([planes.reshape(-1), frame[positions]])
 
 
 def changed_bits(xor: torch.Tensor) -> torch.Tensor:
