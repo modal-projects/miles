@@ -6,6 +6,10 @@ Convert HF weights to FP8. Use --extra-high-precision-layers-hf to keep
 additional HF weight-name substrings unquantized, for example visual. when
 the serving model keeps its vision encoder in high precision.
 
+Block FP8 is quantized as the trainer's FP8 export is (miles/utils/fp8.py): power-of-two
+scales when NVTE_FP8_BLOCK_SCALING_FP32_SCALES is 0, the Blackwell default, FP32 scales
+otherwise. Run it on the trainer's GPU type, or set the variable as the trainer has it.
+
 options:
   -h, --help            show this help message and exit
   --model-dir MODEL_DIR
@@ -31,51 +35,19 @@ from concurrent.futures import ThreadPoolExecutor
 import safetensors
 import safetensors.torch
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
+
+from miles.utils.environ import fp8_block_scaling_fp32_scales
+from miles.utils.fp8 import quantize_fp8_block
 
 FP8_INFO = torch.finfo(torch.float8_e4m3fn)
 FP8_MAX, FP8_MIN = FP8_INFO.max, FP8_INFO.min
 
 
-def ceildiv(a, b):
-    return -(-a // b)
-
-
 def block_fp8(weight, block_size):
     if weight.ndim != 2:
         raise ValueError(f"Block FP8 conversion requires a 2-D weight, got shape {tuple(weight.shape)}.")
-
-    # per block quant
-    block_n, block_k = block_size[0], block_size[1]
-
-    shape_0, shape_1 = weight.shape
-
-    n_tiles = ceildiv(shape_0, block_n)
-    k_tiles = ceildiv(shape_1, block_k)
-
-    q_weight = F.pad(
-        weight,
-        (0, k_tiles * block_k - shape_1, 0, n_tiles * block_n - shape_0),
-        mode="constant",
-        value=0.0,
-    )
-
-    qweight = q_weight.reshape(n_tiles, block_n, k_tiles, block_k)
-    block_max = torch.max(torch.abs(qweight), dim=1, keepdim=True)[0]
-    block_max = torch.max(block_max, dim=3, keepdim=True)[0]
-
-    scale = block_max.to(torch.float32) / FP8_MAX
-    qweight = (
-        (qweight / scale)
-        .clamp(min=FP8_MIN, max=FP8_MAX)
-        .reshape((n_tiles * block_n, k_tiles * block_k))
-        .to(torch.float8_e4m3fn)
-    )
-    qweight = qweight[:shape_0, :shape_1].clone().detach()
-    scale = scale.reshape(n_tiles, k_tiles)
-
-    return qweight, scale
+    return quantize_fp8_block(weight, block_size)
 
 
 def channel_fp8(weight):
@@ -172,6 +144,14 @@ def process_file(
     result_collector.add_result(filename, q_weights, modules_to_not_convert)
 
 
+def _has_rope_interleaved_indexer(input_path):
+    config_path = os.path.join(input_path, "config.json")
+    if not os.path.exists(config_path):
+        return False
+    config = json.load(open(config_path))
+    return bool((config.get("text_config") or config).get("indexer_rope_interleave"))
+
+
 def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=4, extra_high_precision_layers_hf=()):
     input_path = os.path.abspath(input_path)
     os.makedirs(output_path, exist_ok=True)
@@ -181,6 +161,11 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
             shutil.copyfile(os.path.join(input_path, filename), os.path.join(output_path, filename))
 
     safetensors_files = [f for f in os.listdir(input_path) if f.endswith(".safetensors")]
+    if strategy == "block":
+        print(f"Block FP8 scales: {'power-of-two' if fp8_block_scaling_fp32_scales() == '0' else 'FP32'}")
+    if _has_rope_interleaved_indexer(input_path):
+        # SGLang fuses this indexer's wk into a BF16 weight, so the trainer's export keeps it BF16 (quantizer_fp8.py).
+        extra_high_precision_layers_hf = (*extra_high_precision_layers_hf, ".indexer.wk.")
 
     result_collector = ConversionResult()
 

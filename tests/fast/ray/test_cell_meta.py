@@ -12,9 +12,9 @@ from tests.fast.utils.workers.worker_provider.kubernetes import fake_pod_api
 from tests.fast.utils.workers.worker_provider.kubernetes.core.test_pod_view import make_pod
 
 from miles.ray import wiring
-from miles.ray.specs import train as specs_train
 from miles.ray.specs.entrypoint import compute_specs
 from miles.ray.specs.train import compute_trainer_pool_id
+from miles.utils import environ
 from miles.utils.args.runtime import AllConfig
 from miles.utils.external_utils.command_utils.helm_backend.launcher.values.builder import (
     build_values,
@@ -165,7 +165,7 @@ async def _ignore_cell(cell_id: str, info: Any) -> None:
 
 @pytest.fixture(autouse=True)
 def trainer_env_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(specs_train, "default_fp8_block_scaling_fp32_scales", lambda: "0")
+    monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "0")
     monkeypatch.setenv(env.NAMESPACE_ENV_VAR, NAMESPACE)
     monkeypatch.setenv(env.RELEASE_ENV_VAR, _RELEASE)
 

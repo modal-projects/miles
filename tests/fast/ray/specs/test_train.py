@@ -31,6 +31,7 @@ from miles.ray.specs.train import (
 )
 from miles.ray.train.group import TrainerController
 from miles.ray.train_actor import TrainRayActor
+from miles.utils import environ
 from miles.utils.args.runtime import AllConfig
 from miles.utils.args.trainer_utils import compute_trainer_config
 from miles.utils.external_utils.command_utils.helm_backend.launcher.values.builder import (
@@ -384,10 +385,10 @@ class TestEnvironmentVariables:
     def test_the_fp8_scaling_default_is_captured_when_the_spec_is_built(self, monkeypatch):
         """The environment is rendered later inside the gpu-less worker manager, which would decide the wrong default."""
         monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "0")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "0")
         args = _make_args()
         (spec,) = specs_trainer(args)
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "1")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "1")
 
         assert spec.env_var(_make_context(spec, args))["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "0"
 
@@ -404,7 +405,7 @@ class TestEnvironmentVariables:
     def test_a_later_fp8_scaling_env_change_does_not_reach_the_trainer(self, monkeypatch):
         """The environment is rendered in another process, so a value looked up at render time is the wrong one."""
         monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "0")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "0")
 
         args = _make_args()
 
@@ -416,7 +417,7 @@ class TestEnvironmentVariables:
     def test_an_explicit_fp8_scaling_env_is_forwarded_without_probing_the_hardware(self, monkeypatch):
         """A pinned value must reach the trainer even where the hardware default cannot be computed at all."""
         monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", _unavailable_fp8_probe)
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", _unavailable_fp8_probe)
 
         args = _make_args()
 
@@ -427,7 +428,7 @@ class TestEnvironmentVariables:
     def test_an_empty_fp8_scaling_env_is_forwarded_verbatim(self, monkeypatch):
         """An empty pin disables fp32 scales, so substituting the hardware default would silently re-enable them."""
         monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "")
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "1")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "1")
 
         args = _make_args()
 
@@ -438,7 +439,7 @@ class TestEnvironmentVariables:
     def test_train_env_vars_override_the_captured_fp8_scaling_default(self, monkeypatch):
         """The captured default is written into the same dict and must not shadow a --train-env-vars entry."""
         monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "0")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "0")
 
         args = _make_args(train_env_vars={"NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1"})
 
@@ -449,12 +450,12 @@ class TestEnvironmentVariables:
     def test_the_critic_spec_captures_the_fp8_scaling_default_as_well(self, monkeypatch):
         """The critic trainer imports transformer engine like the actor, so its spec needs the same captured value."""
         monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "0")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "0")
 
         args = _make_args(use_critic=True)
 
         specs = specs_trainer(args)
-        monkeypatch.setattr(train_specs, "default_fp8_block_scaling_fp32_scales", lambda: "1")
+        monkeypatch.setattr(environ, "default_fp8_block_scaling_fp32_scales", lambda: "1")
 
         assert [spec.env_var(_make_context(spec, args))["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] for spec in specs] == [
             "0",

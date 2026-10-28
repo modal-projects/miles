@@ -8,11 +8,6 @@ except ImportError:
     should_deepgemm_weight_requant_ue8m0 = None
 
 try:
-    from sglang.srt.layers.quantization.fp8_utils import per_block_cast_to_fp8
-except ImportError:
-    per_block_cast_to_fp8 = None
-
-try:
     from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 except ImportError:
     from sglang.srt.patch_torch import monkey_patch_torch_reductions
@@ -27,7 +22,6 @@ except ImportError:
 
 __all__ = [
     "is_layer_skipped",
-    "per_block_cast_to_fp8",
     "quant_weight_ue8m0",
     "transform_scale_ue8m0",
     "should_deepgemm_weight_requant_ue8m0",

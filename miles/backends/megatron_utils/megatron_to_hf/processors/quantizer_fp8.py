@@ -1,5 +1,4 @@
 import functools
-import os
 import re
 from collections.abc import Callable
 
@@ -7,12 +6,11 @@ import torch
 
 from miles.backends.megatron_utils.sglang import (
     is_layer_skipped,
-    per_block_cast_to_fp8,
     quant_weight_ue8m0,
     should_deepgemm_weight_requant_ue8m0,
     transform_scale_ue8m0,
 )
-from miles.kernels.quant.fp8_blockwise import fp8_blockwise_cast
+from miles.utils.fp8 import quantize_fp8_block
 
 
 def quantize_params_fp8(args, megatron_name, converted_named_params, quantization_config):
@@ -159,15 +157,8 @@ def _quantize_param(args, name, weight, weight_block_size, is_skipped):
         if _get_scale_format(args, name, weight_block_size) == "ue8m0":
             qweight, scale = quant_weight_ue8m0(weight, weight_block_size=weight_block_size)
             scale = transform_scale_ue8m0(scale, mn=qweight.shape[-2])
-        # TODO: this [128, 128] is hacky. need improve
-        elif (
-            os.environ["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "0"
-            and per_block_cast_to_fp8 is not None
-            and list(weight_block_size) == [128, 128]
-        ):
-            qweight, scale = per_block_cast_to_fp8(weight)
         else:
-            qweight, scale = fp8_blockwise_cast(weight, weight_block_size)
+            qweight, scale = quantize_fp8_block(weight, weight_block_size)
         scale_name = name.replace(".weight", ".weight_scale_inv")
     else:
         # per tensor quant

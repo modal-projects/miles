@@ -18,10 +18,21 @@ def cpu_safetensors(monkeypatch):
     )
 
 
-def _convert(tmp_path, weights, strategy, **kwargs):
+@pytest.fixture
+def cpu_block_fp8(monkeypatch):
+    """Stands in for the trainer's GPU kernel; tests/fast-gpu/test_fp8_quantizer.py checks its bytes."""
+
+    def quantize(weight, block_size):
+        rows, cols = (-(-size // block) for size, block in zip(weight.shape, block_size, strict=True))
+        return weight.to(torch.float8_e4m3fn), torch.ones(rows, cols)
+
+    monkeypatch.setattr(converter, "quantize_fp8_block", quantize)
+
+
+def _convert(tmp_path, weights, strategy, config=None, **kwargs):
     source, target = tmp_path / "source", tmp_path / "converted"
     source.mkdir()
-    (source / "config.json").write_text(json.dumps({"model_type": "qwen3_5_moe"}))
+    (source / "config.json").write_text(json.dumps(config or {"model_type": "qwen3_5_moe"}))
     safetensors.torch.save_file(weights, source / "model.safetensors")
     converter.convert_fp8(
         str(source), str(target), strategy, block_size=[128, 128] if strategy == "block" else None, **kwargs
@@ -44,7 +55,9 @@ def _assert_unchanged(actual, name, original, ignored):
 
 
 @pytest.mark.parametrize("strategy", ["block", "channel", "tensor"])
-def test_extra_high_precision_layers_preserve_weights_and_record_exclusions(tmp_path, cpu_safetensors, strategy):
+def test_extra_high_precision_layers_preserve_weights_and_record_exclusions(
+    tmp_path, cpu_safetensors, cpu_block_fp8, strategy
+):
     matrix = torch.arange(35, dtype=torch.bfloat16).reshape(5, 7) + 1
     quantized = "model.layers.0.mlp.experts.0.gate_proj.weight"
     preserved = {
@@ -79,7 +92,7 @@ def test_extra_high_precision_layers_preserve_weights_and_record_exclusions(tmp_
 
 
 @pytest.mark.parametrize("strategy", ["block", "channel", "tensor"])
-def test_no_extra_exclusions_preserves_existing_conversion(tmp_path, cpu_safetensors, strategy):
+def test_no_extra_exclusions_preserves_existing_conversion(tmp_path, cpu_safetensors, cpu_block_fp8, strategy):
     matrix = torch.arange(35, dtype=torch.bfloat16).reshape(5, 7) + 1
     weights = {
         name: matrix.clone()
@@ -107,3 +120,18 @@ def test_selected_unsupported_block_weight_raises(tmp_path, cpu_safetensors):
     weights = {"model.layers.0.linear_attn.conv1d.weight": torch.ones(5, 1, 3, dtype=torch.bfloat16)}
     with pytest.raises(ValueError, match="Block FP8 conversion requires a 2-D weight"):
         _convert(tmp_path, weights, "block")
+
+
+@pytest.mark.parametrize("indexer_rope_interleave", [True, False])
+def test_a_rope_interleaved_indexer_keeps_wk_unquantized(
+    tmp_path, cpu_safetensors, cpu_block_fp8, indexer_rope_interleave
+):
+    matrix = torch.arange(35, dtype=torch.bfloat16).reshape(5, 7) + 1
+    wk, wq_b = "model.layers.0.self_attn.indexer.wk.weight", "model.layers.0.self_attn.indexer.wq_b.weight"
+    config = {"model_type": "glm_moe_dsa", "indexer_rope_interleave": indexer_rope_interleave}
+    actual, ignored = _convert(tmp_path, {wk: matrix.clone(), wq_b: matrix.clone()}, "block", config=config)
+    assert actual[wq_b].dtype == torch.float8_e4m3fn
+    if indexer_rope_interleave:
+        _assert_unchanged(actual, wk, matrix, ignored)
+    else:
+        assert actual[wk].dtype == torch.float8_e4m3fn
