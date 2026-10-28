@@ -4065,6 +4065,50 @@ class TestMilesValidateArgsHttpLora:
         miles_validate_args(self._parse(tmp_path, ["--check-lora-weight-equal"]))
 
 
+class TestMilesValidateArgsWeightDelta:
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            (["--colocate"], "not compatible with --colocate"),
+            (["--update-weights-interval", "2"], "--update-weights-interval above 1"),
+            (["--indep-dp", *DYNAMIC_BATCH_ARGS], "does not support --indep-dp"),
+            (["--offload-rollout"], "does not support --offload-rollout"),
+            (["--check-weight-update-equal"], "does not support --check-weight-update-equal"),
+            (["--sglang-load-format", "dummy"], "load --hf-checkpoint's safetensors bytes"),
+            ([], "requires --update-weight-disk-dir"),
+        ],
+        ids=[
+            "colocate",
+            "update_interval",
+            "indep_dp",
+            "offload_rollout",
+            "ci_weight_checker",
+            "dummy_load",
+            "no_disk_dir",
+        ],
+    )
+    def test_each_setup_weight_delta_does_not_support_is_refused_at_startup(self, extra, message):
+        args = _parse_megatron_args(["--update-weight-transfer-mode", "weight-delta", *extra])
+
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            miles_validate_args(args)
+
+    def test_a_lora_run_that_serves_its_adapter_is_refused(self, tmp_path):
+        from transformers import Qwen3Config
+
+        Qwen3Config(num_hidden_layers=1).save_pretrained(tmp_path)
+        args = _parse_megatron_args(
+            [
+                *("--lora-rank", "8", "--target-modules", "q_proj", "--hf-checkpoint", str(tmp_path)),
+                *("--update-weight-transfer-mode", "weight-delta"),
+                *("--update-weight-disk-dir", str(tmp_path / "versions")),
+            ]
+        )
+
+        with pytest.raises(AssertionError, match="sends full weights, not adapters"):
+            miles_validate_args(args)
+
+
 class TestWeightUpdateDeadlines:
     def _parse(self, extra: list[str]) -> argparse.Namespace:
         parser = get_megatron_arg_parser()
@@ -4144,6 +4188,13 @@ class TestRolloutFaultToleranceNeedsAPartialTargetWeightUpdate:
     def test_the_disk_delta_transfer_mode_is_rejected(self) -> None:
         """Only p2p is a partial-target update; every other mode fails the same way broadcast does."""
         args = self._parse(["--use-fault-tolerance", "--update-weight-transfer-mode", "disk-delta"])
+
+        with pytest.raises(AssertionError, match=self._MESSAGE):
+            miles_validate_args(args)
+
+    def test_the_weight_delta_transfer_mode_is_rejected(self) -> None:
+        """Weight delta cannot catch a restarted engine up yet, so it is not a partial-target update either."""
+        args = self._parse(["--use-fault-tolerance", "--update-weight-transfer-mode", "weight-delta"])
 
         with pytest.raises(AssertionError, match=self._MESSAGE):
             miles_validate_args(args)
