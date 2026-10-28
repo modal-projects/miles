@@ -124,6 +124,13 @@ def test_ranks_are_data_replicas_only_with_tp_and_ep_gathered(ungathered: str):
         get_data_replica_rank_and_size(SimpleNamespace(), placement)
 
 
+def test_every_per_owner_rank_is_its_own_data_replica():
+    """Per-owner ranks yield different tensors, so each one sends its own, with no collective needed."""
+    placement = WeightUpdatePlacement(gather_pp=False, per_owner=True)
+
+    assert get_data_replica_rank_and_size(SimpleNamespace(), placement) == (0, 1)
+
+
 def test_bridge_writes_each_rollout_engine_rank_once():
     """Megatron Bridge gathers PP, so every rank holds the whole model; planning per PP stage would make
     every stage write every rollout engine rank."""

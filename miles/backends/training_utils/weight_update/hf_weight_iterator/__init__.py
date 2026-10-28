@@ -23,27 +23,32 @@ class WeightUpdatePlacement:
     A gathered dim: every yielded tensor is full along that dim on every rank
     of that dim's group. A non-gathered dim: each rank yields its own shard of
     the param set.
+
+    ``per_owner``: each tensor is yielded exactly once in its pipeline stage,
+    by one of the ranks holding it, instead of by every one of them.
     """
 
     gather_pp: bool
     # Always gathered today; explicit so a future protocol can relax them.
     gather_tp: bool = True
     gather_ep: bool = True
+    per_owner: bool = False
 
     @property
     def is_full_gather(self) -> bool:
-        return self.gather_pp and self.gather_tp and self.gather_ep
+        return self.gather_pp and self.gather_tp and self.gather_ep and not self.per_owner
 
 
 def resolve_placement(required: WeightUpdatePlacement, forced: WeightUpdatePlacement | None) -> WeightUpdatePlacement:
     """Join of the protocol's required placement and the iterator's forced one:
-    a dim is gathered if either side gathers it."""
+    a dim is gathered if either side gathers it, and per-owner only if both allow it."""
     if forced is None:
         return required
     return WeightUpdatePlacement(
         gather_pp=required.gather_pp or forced.gather_pp,
         gather_tp=required.gather_tp or forced.gather_tp,
         gather_ep=required.gather_ep or forced.gather_ep,
+        per_owner=required.per_owner and forced.per_owner,
     )
 
 

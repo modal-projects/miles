@@ -72,9 +72,10 @@ def get_hf_weight_iterator(
 ) -> HfWeightIteratorBase:
     from miles.backends.megatron_utils.update_weight.hf_weight_iterator_bridge import HfWeightIteratorBridge
     from miles.backends.megatron_utils.update_weight.hf_weight_iterator_direct import HfWeightIteratorDirect
+    from miles.backends.megatron_utils.update_weight.hf_weight_iterator_per_owner import HfWeightIteratorPerOwner
 
     cls = {
-        "raw": HfWeightIteratorDirect,
+        "raw": HfWeightIteratorPerOwner if required_placement.per_owner else HfWeightIteratorDirect,
         "bridge": HfWeightIteratorBridge,
     }[args.megatron_to_hf_mode]
 
