@@ -341,6 +341,16 @@ class SGLangApiClient:
             },
         )
 
+    async def prepare_weights_from_delta(self, manifest: str):
+        """Have the engine read one weight-delta version (its manifest path) while it keeps serving."""
+        return await self._make_request("prepare_weights_from_delta", {"manifest": manifest})
+
+    async def update_weights_from_delta(self, manifest: str, weight_version: str):
+        """Apply the prepared weight-delta version in place, inside the caller's pause."""
+        return await self._make_request(
+            "update_weights_from_delta", {"manifest": manifest, "weight_version": weight_version}
+        )
+
     async def update_weights_from_disk(
         self, model_path: str, load_format: str | None = None, weight_version: str | None = None
     ):

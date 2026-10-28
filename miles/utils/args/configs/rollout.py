@@ -251,12 +251,14 @@ class RolloutRelatedConfig(BaseConfig):
         str,
         Arg(
             type_parser=None,
-            choices=["broadcast", "broadcast_packed", "p2p", "disk-delta"],
+            choices=["broadcast", "broadcast_packed", "p2p", "disk-delta", "weight-delta"],
             help=(
                 "The method to transfer weights to remote rollout engines during update weight. "
                 "'disk-delta' diffs each sync against a CPU snapshot of the previous one and publishes "
                 "only the changed bytes to --update-weight-disk-dir; each engine's /pull_weights applies "
-                "them into a host-local checkpoint that the engine reloads from."
+                "them into a host-local checkpoint that the engine reloads from. 'weight-delta' has each "
+                "trainer rank publish the XOR of its exported tensors that changed, encoded on its GPU, to "
+                "--update-weight-disk-dir; engines load --hf-checkpoint and apply every version in place."
             ),
         ),
     ] = "broadcast"
@@ -264,9 +266,10 @@ class RolloutRelatedConfig(BaseConfig):
         str | None,
         Arg(
             help=(
-                "Filesystem directory disk-delta weight sync publishes to: one delta directory "
-                "(changed tensors only) per sync, written by the trainer and read by every "
-                "rollout host. Required for --update-weight-transfer-mode=disk-delta."
+                "Filesystem directory disk-delta and weight-delta weight sync publish to: one delta "
+                "directory (changed tensors only) per sync, written by the trainer and read by every "
+                "rollout host. For weight-delta it is the run's history, like --save: a resumed run "
+                "deletes only the versions after the one it resumes at. Required for both modes."
             )
         ),
     ] = None
@@ -309,12 +312,29 @@ class RolloutRelatedConfig(BaseConfig):
             ),
         ),
     ] = "xxh3-128"
+    weight_delta_codec: A[
+        str,
+        Arg(
+            choices=["gap-zstd", "snappy-zstd"],
+            help=(
+                "How weight-delta weight sync encodes each changed frame of a tensor's XOR before the "
+                "owner-wide Zstd. gap-zstd keeps only the changed bytes, 4 bytes each (the gap from the "
+                "previous changed byte, then the XOR value); snappy-zstd compresses whole frames with Snappy, "
+                "which engines decode with nvCOMP (on Blackwell, its decompression engine). gap-zstd is the "
+                "smaller on the wire at any density, the fraction of bytes a sync changes that "
+                "perf/update_weights_density reports, but past 3 to 5 percent its frames before the Zstd "
+                "outgrow Snappy's, which costs trainer GPU memory, engine host memory and host-to-GPU copies: "
+                "keep gap-zstd while density stays under 3 percent (RL syncs change well under 1 percent) "
+                "and choose snappy-zstd above 5 percent."
+            ),
+        ),
+    ] = "gap-zstd"
     custom_update_weight_post_write_path: A[
         CustomFunctionConfig | None,
         Arg(
             help=(
-                "Path to a custom function called on each trainer rank after a disk-delta sync's "
-                "files are written, before the engines read them — to publish the writes on a "
+                "Path to a custom function called on each trainer rank after a disk-delta or weight-delta "
+                "sync's files are written, before the engines read them — to publish the writes on a "
                 "non-POSIX filesystem (no cross-host visibility without an explicit sync). "
                 "Signature: ``def hook(args, version_dir: str, rollout_engines) -> None``; the hook gates itself."
             ),

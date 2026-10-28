@@ -864,7 +864,7 @@ def miles_validate_args(args):
             setattr(args, k, v)
 
     mode = args.update_weight_transfer_mode
-    if mode not in ("broadcast", "broadcast_packed", "p2p", "disk-delta"):
+    if mode not in ("broadcast", "broadcast_packed", "p2p", "disk-delta", "weight-delta"):
         raise ValueError(f"Unknown --update-weight-transfer-mode {mode!r}")
     if mode == "broadcast_packed" and (args.train_backend != "megatron" or args.colocate):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
@@ -1281,6 +1281,44 @@ def miles_validate_args(args):
         )
         assert args.prefill_num_servers is None, "P2P weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
+
+    if args.update_weight_transfer_mode == "weight-delta":
+        assert not args.colocate, "Weight-delta weight transfer mode is not compatible with --colocate."
+        assert args.train_backend == "megatron" and args.megatron_to_hf_mode == "raw", (
+            "Weight-delta weight transfer needs Megatron's raw exporter: each trainer rank writes the tensors "
+            "it exports."
+        )
+        assert (
+            args.prefill_num_servers is None
+        ), "Weight-delta weight transfer mode has not been tested when PD is enabled."
+        assert args.lora_rank <= 0, "LoRA weight sync is not supported for weight-delta weight transfer."
+        assert not args.indep_dp, (
+            "Weight-delta weight transfer does not support --indep-dp: the previous version lives in the "
+            "trainer cell that published it, and a cell taking over the weight update has none."
+        )
+        assert not args.offload_rollout, (
+            "Weight-delta weight transfer does not support --offload-rollout: an engine that releases its "
+            "weights loses the versions it applied."
+        )
+        assert not args.check_weight_update_equal, (
+            "Weight-delta weight transfer does not support --check-weight-update-equal, which --ci-test turns on: "
+            "it scrambles the engines' weights before the first sync, and every version builds on what they "
+            "loaded. Pass --ci-disable-weight-update-checker."
+        )
+        assert args.sglang_load_format in ("auto", "safetensors", "fastsafetensors") and (
+            os.environ.get("MILES_SGLANG_DUMMY_LOAD") != "1"
+        ), "Weight-delta weight transfer needs the engines to load --hf-checkpoint's safetensors bytes."
+        assert args.update_weight_disk_dir, (
+            "--update-weight-transfer-mode=weight-delta requires --update-weight-disk-dir, the run's version "
+            "history on a filesystem the trainer and the rollout engines share."
+        )
+        assert os.path.isdir(args.hf_checkpoint), (
+            "--update-weight-transfer-mode=weight-delta requires --hf-checkpoint to be a local directory: "
+            "the trainer checks its export against its headers."
+        )
+        from miles.utils.nvcomp import nvcomp_distribution
+
+        nvcomp_distribution()
 
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (

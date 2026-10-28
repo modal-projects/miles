@@ -3772,6 +3772,26 @@ class TestMilesValidateArgsDiskDeltaResume:
         assert "ckpt_step" not in vars(args)
 
 
+class TestMilesValidateArgsWeightDelta:
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            (["--colocate"], "not compatible with --colocate"),
+            (["--indep-dp", *DYNAMIC_BATCH_ARGS], "does not support --indep-dp"),
+            (["--offload-rollout"], "does not support --offload-rollout"),
+            (["--check-weight-update-equal"], "does not support --check-weight-update-equal"),
+            (["--sglang-load-format", "dummy"], "load --hf-checkpoint's safetensors bytes"),
+            ([], "requires --update-weight-disk-dir"),
+        ],
+        ids=["colocate", "indep_dp", "offload_rollout", "ci_weight_checker", "dummy_load", "no_disk_dir"],
+    )
+    def test_each_setup_weight_delta_does_not_support_is_refused_at_startup(self, extra, message):
+        args = _parse_megatron_args(["--update-weight-transfer-mode", "weight-delta", *extra])
+
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            miles_validate_args(args)
+
+
 class TestWeightUpdateDeadlines:
     def _parse(self, extra: list[str]) -> argparse.Namespace:
         parser = get_megatron_arg_parser()
@@ -3851,6 +3871,13 @@ class TestRolloutFaultToleranceNeedsAPartialTargetWeightUpdate:
     def test_the_disk_delta_transfer_mode_is_rejected(self) -> None:
         """Only p2p is a partial-target update; every other mode fails the same way broadcast does."""
         args = self._parse(["--use-fault-tolerance", "--update-weight-transfer-mode", "disk-delta"])
+
+        with pytest.raises(AssertionError, match=self._MESSAGE):
+            miles_validate_args(args)
+
+    def test_the_weight_delta_transfer_mode_is_rejected(self) -> None:
+        """Weight delta cannot catch a restarted engine up yet, so it is not a partial-target update either."""
+        args = self._parse(["--use-fault-tolerance", "--update-weight-transfer-mode", "weight-delta"])
 
         with pytest.raises(AssertionError, match=self._MESSAGE):
             miles_validate_args(args)

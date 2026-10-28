@@ -94,6 +94,10 @@ async def init_or_reset_inference_controller(
     assert (
         args.update_weight_transfer_mode != "disk-delta"
     ), "Hot restart does not support disk-delta weight transfer because its first update only captures a baseline"
+    assert args.update_weight_transfer_mode != "weight-delta", (
+        "Hot restart does not support weight-delta weight transfer: engines that outlived the trainer hold "
+        "versions it applied, and every launch starts the engines from --hf-checkpoint"
+    )
 
     logger.info("The inference controller outlived a previous orchestration script; taking it over as it is")
 

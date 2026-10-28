@@ -42,6 +42,7 @@ _STALLED_SECONDS = 5.0
 _SHORT_BUDGET_SECONDS = 0.05
 _BROADCAST_ARGS = Namespace(update_weight_transfer_mode="broadcast", custom_agent_function_path=None)
 _DISK_DELTA_ARGS = Namespace(update_weight_transfer_mode="disk-delta", custom_agent_function_path=None)
+_WEIGHT_DELTA_ARGS = Namespace(update_weight_transfer_mode="weight-delta", custom_agent_function_path=None)
 
 
 class _FakeTrainer:
@@ -455,6 +456,15 @@ class TestTheInferenceSideIsInitedOrReset:
 
         with pytest.raises(AssertionError, match="does not support disk-delta weight transfer"):
             await init_or_reset_inference_controller(controller, args=_DISK_DELTA_ARGS, trainers=[])
+
+        assert controller.calls == ["is_initialized"]
+
+    async def test_a_surviving_controller_rejects_weight_delta_weight_transfer(self):
+        """Weight delta starts every launch's engines from --hf-checkpoint; a surviving engine applied versions."""
+        controller = _FakeInferenceController(initialized=True)
+
+        with pytest.raises(AssertionError, match="does not support weight-delta weight transfer"):
+            await init_or_reset_inference_controller(controller, args=_WEIGHT_DELTA_ARGS, trainers=[])
 
         assert controller.calls == ["is_initialized"]
 
