@@ -31,6 +31,7 @@ TENSORS = {
     "model.layers.0.mlp.down_proj.weight": (torch.bfloat16, (1024, 1536), 3000),
     "model.layers.0.mlp.up_proj.weight": (torch.uint8, (1024, 1024), 40),
     "model.norm.weight": (torch.float32, (4096,), 7),
+    "model.layers.0.input_layernorm.weight": (torch.float32, (4096,), 0),
     "model.embed_tokens.weight": (torch.bfloat16, (256, 512), 0),
 }
 

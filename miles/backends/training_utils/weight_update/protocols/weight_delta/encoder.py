@@ -29,9 +29,11 @@ class EncodedTensor:
 
 
 class DeltaEncoder:
-    """Works on the device's current stream and uploads previous on its own: ``encode`` returns once it
-    no longer reads the pairs, and keeps each changed tensor's inner on the GPU until max_pending_nbytes
-    of them wait for the outer Zstd; ``finish`` returns once every payload is on the host."""
+    """Works on the device's current stream, with two copy streams of its own for previous and current.
+    After ``encode``, the caller's later work on the current stream runs only once the pairs have been
+    read and previous holds current's bytes; each changed tensor's inner stays on the GPU until
+    max_pending_nbytes of them wait for the outer Zstd. ``finish`` returns once every payload is on
+    the host."""
 
     def __init__(self, codec: str, device: torch.device, max_pending_nbytes: int, with_changed_bits: bool = False):
         if codec not in CODECS:
@@ -43,6 +45,7 @@ class DeltaEncoder:
         self._zstd = NvcompCompressor("zstd", self.device)
         self._padding = torch.zeros(ALIGNMENT - 1, dtype=torch.uint8, device=self.device)
         self._upload_stream = torch.cuda.Stream(device=self.device)
+        self._download_stream = torch.cuda.Stream(device=self.device)
         self._pending: list[torch.Tensor] = []
         self._pending_nbytes = 0
         self._payloads: list[memoryview] = []
@@ -50,10 +53,9 @@ class DeltaEncoder:
 
     def encode(self, pairs: Sequence[tuple[torch.Tensor, torch.Tensor]]) -> list[EncodedTensor | None]:
         """Each pair is a tensor's previous bytes (pinned host) and current bytes (on this device,
-        complete on its current stream), contiguous 1-D uint8 of one length. None for a tensor that
-        did not change."""
+        complete on its current stream), contiguous 1-D uint8 of one length; previous ends up holding
+        current's bytes. None for a tensor that did not change."""
         for index, (previous, current) in enumerate(pairs):
-            # Pinned host bytes are always copied to the device, so the in-place XOR leaves them intact.
             if (
                 previous.dtype != torch.uint8
                 or current.dtype != torch.uint8
@@ -75,9 +77,13 @@ class DeltaEncoder:
             try:
                 xors = [torch.empty(previous.numel(), dtype=torch.uint8, device=self.device) for previous, _ in pairs]
                 self._upload_stream.wait_stream(stream)
-                with torch.cuda.stream(self._upload_stream):
-                    for xor, (previous, _) in zip(xors, pairs, strict=True):
+                self._download_stream.wait_stream(stream)
+                for xor, (previous, current) in zip(xors, pairs, strict=True):
+                    with torch.cuda.stream(self._upload_stream):
                         xor.copy_(previous, non_blocking=True)
+                    self._download_stream.wait_event(self._upload_stream.record_event())
+                    with torch.cuda.stream(self._download_stream):
+                        previous.copy_(current, non_blocking=True)
                 stream.wait_stream(self._upload_stream)
                 changes = xor_frames_(xors, [current for _, current in pairs], FRAME_NBYTES)
                 frame_counts = _split(
@@ -99,8 +105,12 @@ class DeltaEncoder:
             except BaseException:
                 # Queued work may still read the caller's tensors; let it finish before they are released.
                 self._upload_stream.synchronize()
+                self._download_stream.synchronize()
                 stream.synchronize()
                 raise
+            finally:
+                # The caller may reuse the current tensors' memory once this returns.
+                stream.wait_stream(self._download_stream)
         for index, layout, tensor_bits in zip(changed_tensors, layouts, bits, strict=True):
             nbytes = pairs[index][1].numel()
             frame_records = [
