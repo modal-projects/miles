@@ -65,7 +65,7 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             self._post_write_hook = load_function(args.custom_update_weight_post_write_path)
         self._version: int | None = None
         self._previous: dict[str, torch.Tensor] = {}
-        self._next: dict[str, torch.Tensor] = {}
+        self._raw_current: dict[str, torch.Tensor] = {}
         self._encoder: DeltaEncoder | None = None
         self._replay: list[int] = []
         # Only for --weight-delta-change-metrics; the sync never reads it.
@@ -78,8 +78,9 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._exported: dict[str, tuple[str, list[int]]] = {}
         self._directory: Path | None = None
         self._writer: OwnerWriter | None = None
-        # (name, dtype, shape, raw bytes or None, the encoder's result or None), in the order they are written.
-        self._writes: list[tuple[str, str, list[int], memoryview | None, EncodedTensor | None]] = []
+        # (name, dtype, shape, the encoder's result or None for a raw tensor), in the order they are written.
+        self._writes: list[tuple[str, str, list[int], EncodedTensor | None]] = []
+        self._changed_raw: set[str] = set()
         self._record: dict | None = None
         self._rechanged: list[torch.Tensor] = []
         self._stats = {
@@ -149,6 +150,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             self._error = error
 
     def _copy_to_previous(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
+        # TODO: holding previous on the GPU would skip its host round trip each sync, but keeps one owner
+        # share of GPU memory through training.
         for name, tensor in bucket:
             current = _as_bytes(tensor)
             self._previous[name] = torch.empty(current.numel(), dtype=torch.uint8, pin_memory=True)
@@ -161,41 +164,48 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                 raise ValueError(f"{name} is exported now but was not at the launch")
             current = _as_bytes(tensor)
             dtype, shape = self._exported[name]
-            if name not in self._next:
-                self._next[name] = torch.empty(current.numel(), dtype=torch.uint8, pin_memory=True)
             self._stats["exported_nbytes"] += current.numel()
             if is_raw(dtype, shape):
-                self._next[name].copy_(current)
-                changed_nbytes = int(torch.count_nonzero(self._next[name] != self._previous[name]))
-                if changed_nbytes:
-                    self._writes.append((name, dtype, shape, memoryview(self._next[name].numpy()), None))
-                    self._stats["changed_nbytes"] += changed_nbytes
-                    if self._ever_changed is not None:
-                        bits = changed_bits(self._next[name] ^ self._previous[name])
-                        self._track_changes(name, bits.to(current.device))
+                if name not in self._raw_current:
+                    self._raw_current[name] = torch.empty(current.numel(), dtype=torch.uint8, pin_memory=True)
+                self._raw_current[name].copy_(current, non_blocking=True)
+                self._writes.append((name, dtype, shape, None))
             else:
+                # The encoder overwrites previous with current, so a failed sync must end the run.
                 pairs.append((self._previous[name], current))
-                xor_tensors.append((name, dtype, shape, current))
+                xor_tensors.append((name, dtype, shape))
         started = time.monotonic()
         encoded = self._encoder.encode(pairs)
         self._stats["encode_s"] += time.monotonic() - started
-        for (name, dtype, shape, current), result in zip(xor_tensors, encoded, strict=True):
+        for (name, dtype, shape), result in zip(xor_tensors, encoded, strict=True):
             if result is not None:
-                self._writes.append((name, dtype, shape, None, result))
+                self._writes.append((name, dtype, shape, result))
                 self._stats["changed_nbytes"] += result.changed_nbytes
                 if result.changed_bits is not None:
                     self._track_changes(name, result.changed_bits)
-            self._next[name].copy_(current, non_blocking=True)
+
+    def _compare_raw(self) -> None:
+        for name, _, _, encoded in self._writes:
+            if encoded is not None:
+                continue
+            current, previous = self._raw_current[name], self._previous[name]
+            changed_nbytes = int(torch.count_nonzero(current != previous))
+            if changed_nbytes:
+                self._changed_raw.add(name)
+                self._stats["changed_nbytes"] += changed_nbytes
+                if self._ever_changed is not None:
+                    self._track_changes(name, changed_bits(current ^ previous).cuda())
+                previous.copy_(current)
 
     def _write_owner_file(self) -> None:
         started = time.monotonic()
         compressed = iter(zip(*self._encoder.finish(), strict=True))
         self._stats["encode_s"] += time.monotonic() - started
-        for name, dtype, shape, raw, encoded in self._writes:
-            if encoded is None:
-                self._writer.add_raw(name, dtype, shape, raw)
-            else:
+        for name, dtype, shape, encoded in self._writes:
+            if encoded is not None:
                 self._writer.add_xor(name, dtype, shape, encoded.frames, *next(compressed))
+            elif name in self._changed_raw:
+                self._writer.add_raw(name, dtype, shape, memoryview(self._previous[name].numpy()))
 
     def _track_changes(self, name: str, bits: torch.Tensor) -> None:
         if name not in self._ever_changed:
@@ -206,6 +216,11 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
 
     def after_base_weights(self) -> None:
         torch.cuda.current_stream().synchronize()
+        if self._error is None and self._writer is not None:
+            try:
+                self._compare_raw()
+            except Exception as error:
+                self._error = error
         self._stats["rechanged_nbytes"] = int(torch.stack(self._rechanged).sum()) if self._rechanged else 0
         self._ever_changed_nbytes += self._stats["changed_nbytes"] - self._stats["rechanged_nbytes"]
         self._stats["ever_changed_nbytes"] = self._ever_changed_nbytes
@@ -248,7 +263,6 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                 error = caught
         _raise_if_any_rank_failed(error, f"publishing version {weight_version}")
         self._version = weight_version
-        self._previous, self._next = self._next, self._previous
         if dist.get_rank() == 0:
             self._record_metrics(records)
             try:
