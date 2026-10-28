@@ -274,7 +274,8 @@ send LoRA weights to the remote engines today.
 With `--lora-merge-for-rollout`, each sync sends `W + (alpha / rank) * B @ A` as
 ordinary weights instead of the adapter. Native LoRA merges each adapter into its
 host weight in Megatron's layout before the base-weight conversion, as for
-`--save-hf`, so the rollout's quantization applies unchanged.
+`--save-hf`, so the rollout's quantization applies unchanged and `weight-delta`
+carries a LoRA run this way.
 
 The legacy `--lora-sync-from-tensor` flag is still accepted by the parser but is
 not consumed by the implementation. The topology selects the synchronization

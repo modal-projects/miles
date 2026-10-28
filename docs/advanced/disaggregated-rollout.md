@@ -106,6 +106,7 @@ miles-managed path:
 | `broadcast_packed` | Pack each weight bucket into one byte buffer and issue one NCCL broadcast | Non-colocated Megatron with SGLang mixed-dtype flattened-bucket support; trades contiguous bucket storage for fewer collectives |
 | `p2p` | Convert and re-shard weights, then write them directly to rollout-rank memory over RDMA | miles-managed, in-cluster jobs with direct rank-to-rank connectivity; see [P2P Weight Transfer](/advanced/p2p-weight-transfer) |
 | `disk-delta` | Publish changed canonical checkpoint bytes to shared storage, let rollout hosts materialize them locally, then reload | Trainer and rollout cannot share an NCCL fabric, or model-sized full-weight transfer dominates the update |
+| `weight-delta` | Each trainer rank XORs the tensors it exports with the previous version, compresses the changed bytes on its GPU and writes them to `--update-weight-disk-dir` under a manifest; engines prepare each version while serving and apply it in a pause | Trainer and rollout cannot share an NCCL fabric, and each update changes a small share of the weight bytes |
 
 These are weight synchronization choices, not different rollout APIs. In the
 broadcast and P2P modes, miles transfers tensors into known engine ranks directly.
@@ -183,7 +184,7 @@ one for policy versions:
 ```bash
 --rollout-external-url https://rollout.example \
 --rollout-external-control-url https://control.example \
---update-weight-transfer-mode disk-delta \
+--update-weight-transfer-mode weight-delta \
 --update-weight-disk-dir /shared/miles/weight-updates \
 --fully-async
 ```
@@ -194,7 +195,7 @@ key, put it in the job's `MILES_ROLLOUT_EXTERNAL_API_KEY` environment variable;
 miles sends it as `Authorization: Bearer <key>` on rollout requests and weight
 calls. It is not a flag because flags are logged and saved with checkpoints.
 
-The current integration publishes with `disk-delta`, runs
+The current integration publishes with `weight-delta` or `disk-delta`, runs
 fully async rollout, and does not run eval during training or score the student
 for top-k on-policy distillation (`--opd-log-prob-top-k`).
 
@@ -264,13 +265,14 @@ is visible. The publication contract therefore needs:
    up through later versions; and
 5. an activation acknowledgement before a replica advertises the new version.
 
-Disk-delta provides version and base identity, atomic file writes, and
-final-state checksums. miles runs `--custom-update-weight-post-write-path`
+Both delta modes provide version and base identity and atomic file writes.
+disk-delta carries final-state checksums. miles runs `--custom-update-weight-post-write-path`
 after writing a version and after a resume deletes versions, so storage that
 needs an explicit commit makes the change visible before miles announces it.
-Disk-delta counts its directories from the launch, so `weight_v000001` holds
-weight version 0. Replica catch-up, admission, and activation belong to the
-external rollout service.
+weight-delta names each version's directory by its weight version; disk-delta
+counts its directories from the launch, so `weight_v000001` holds weight
+version 0. Replica catch-up, admission, and activation belong to the external
+rollout service.
 
 ## Fully async rollout
 

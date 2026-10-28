@@ -58,6 +58,7 @@ from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
 from miles.utils.function_registry import function_registry
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
 from miles.utils.lora.arguments import validate_lora_args
+from miles.utils.lora.utils import lora_rollout_enabled
 from miles.utils.object_store_config import compute_mooncake_init_kwargs_vanilla
 from miles.utils.run_uuid import RUN_UUID_LENGTH, validate_run_uuid
 from miles.utils.workers.naming import DEPLOY_INSTANCE_ID_MAX_LENGTH
@@ -4087,6 +4088,26 @@ class TestMilesValidateArgsHttpLora:
         miles_validate_args(self._parse(tmp_path, ["--check-lora-weight-equal"]))
 
 
+class TestMilesValidateArgsWeightDelta:
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            (["--colocate"], "not compatible with --colocate"),
+            (["--indep-dp", *DYNAMIC_BATCH_ARGS], "does not support --indep-dp"),
+            (["--offload-rollout"], "does not support --offload-rollout"),
+            (["--check-weight-update-equal"], "does not support --check-weight-update-equal"),
+            (["--sglang-load-format", "dummy"], "load --hf-checkpoint's safetensors bytes"),
+            ([], "requires --update-weight-disk-dir"),
+        ],
+        ids=["colocate", "indep_dp", "offload_rollout", "ci_weight_checker", "dummy_load", "no_disk_dir"],
+    )
+    def test_each_setup_weight_delta_does_not_support_is_refused_at_startup(self, extra, message):
+        args = _parse_megatron_args(["--update-weight-transfer-mode", "weight-delta", *extra])
+
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            miles_validate_args(args)
+
+
 _EXTERNAL_ROLLOUT_ARGS = [
     "--rollout-external-url",
     "https://rollout",
@@ -4099,6 +4120,12 @@ _EXTERNAL_DISK_DELTA_ARGS = [
     "disk-delta",
     "--fully-async",
 ]
+_EXTERNAL_WEIGHT_DELTA_ARGS = [
+    *_EXTERNAL_ROLLOUT_ARGS,
+    "--update-weight-transfer-mode",
+    "weight-delta",
+    "--fully-async",
+]
 
 
 class TestMilesValidateArgsExternalRollout:
@@ -4106,7 +4133,7 @@ class TestMilesValidateArgsExternalRollout:
         "extra, message",
         [
             (["--rollout-external-url", "https://rollout"], "set both"),
-            (_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode disk-delta"),
+            (_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode weight-delta or disk-delta"),
             ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "disk-delta"], "fully async runs only"),
             ([*_EXTERNAL_DISK_DELTA_ARGS, "--rollout-external-engine-addrs", "host:1"], "runs its own engines"),
             (
@@ -4149,9 +4176,10 @@ class TestMilesValidateArgsExternalRollout:
         with pytest.raises(AssertionError, match=re.escape(message)):
             miles_validate_args(args)
 
-    @pytest.mark.parametrize("mode", ["disk-delta"])
+    @pytest.mark.parametrize("mode", ["weight-delta", "disk-delta"])
     def test_an_external_rollout_starts_no_engines_of_miles_own(self, mode, tmp_path, monkeypatch):
         """Nor does disk-delta need a rollout-host directory: the service materializes each version."""
+        monkeypatch.setattr("miles.utils.nvcomp.nvcomp_distribution", lambda: None)
         args = _parse_megatron_args(
             [
                 *_EXTERNAL_ROLLOUT_ARGS,
@@ -4171,6 +4199,38 @@ class TestMilesValidateArgsExternalRollout:
 
 
 class TestLoRAMergeForRollout:
+    def _parse_lora(self, tmp_path, extra: list[str]) -> argparse.Namespace:
+        from transformers import Qwen3Config
+
+        Qwen3Config(num_hidden_layers=1).save_pretrained(tmp_path)
+        return _parse_megatron_args(
+            ["--lora-rank", "8", "--target-modules", "q_proj", "--hf-checkpoint", str(tmp_path), *extra]
+        )
+
+    def test_a_merged_lora_run_publishes_full_weights_over_weight_delta(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("miles.utils.nvcomp.nvcomp_distribution", lambda: None)
+        args = self._parse_lora(
+            tmp_path,
+            [
+                *_EXTERNAL_WEIGHT_DELTA_ARGS,
+                "--lora-merge-for-rollout",
+                *("--update-weight-disk-dir", str(tmp_path / "versions")),
+            ],
+        )
+
+        miles_validate_args(args)
+
+        assert not lora_rollout_enabled(args)
+
+    def test_weight_delta_refuses_a_lora_run_that_serves_its_adapter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("miles.utils.nvcomp.nvcomp_distribution", lambda: None)
+        args = self._parse_lora(
+            tmp_path, [*_EXTERNAL_WEIGHT_DELTA_ARGS, "--update-weight-disk-dir", str(tmp_path / "versions")]
+        )
+
+        with pytest.raises(AssertionError, match="passes --lora-merge-for-rollout"):
+            miles_validate_args(args)
+
     @pytest.mark.parametrize(
         "extra, message",
         [
@@ -4268,6 +4328,13 @@ class TestRolloutFaultToleranceNeedsAPartialTargetWeightUpdate:
     def test_the_disk_delta_transfer_mode_is_rejected(self) -> None:
         """Only p2p is a partial-target update; every other mode fails the same way broadcast does."""
         args = self._parse(["--use-fault-tolerance", "--update-weight-transfer-mode", "disk-delta"])
+
+        with pytest.raises(AssertionError, match=self._MESSAGE):
+            miles_validate_args(args)
+
+    def test_the_weight_delta_transfer_mode_is_rejected(self) -> None:
+        """Weight delta cannot catch a restarted engine up yet, so it is not a partial-target update either."""
+        args = self._parse(["--use-fault-tolerance", "--update-weight-transfer-mode", "weight-delta"])
 
         with pytest.raises(AssertionError, match=self._MESSAGE):
             miles_validate_args(args)
