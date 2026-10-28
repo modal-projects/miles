@@ -96,6 +96,7 @@ def _protocol(tmp_path: Path, codec: str, change_metrics: bool) -> UpdateWeightF
             fully_async=False,
             colocate=False,
             weight_delta_change_metrics=change_metrics,
+            update_weight_buffer_size=512 << 20,
         )
     )
     protocol.connect([_Engine()], None, None, ["cell-0"], None, protocol.required_placement, "all")
