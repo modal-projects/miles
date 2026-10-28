@@ -10,7 +10,7 @@ from miles.utils.args.configs.backend_fields import RawTrainerBackendConfig
 from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.args.runtime import TrainerConfig
 from miles.utils.args.trainer_utils import compute_trainer_config, compute_trainer_total_gpus
-from miles.utils.environ import default_fp8_block_scaling_fp32_scales
+from miles.utils.environ import fp8_block_scaling_fp32_scales
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.math_utils import exact_div
 from miles.utils.megatron_args_utils import compute_trainer_num_cells
@@ -156,7 +156,7 @@ class TrainerSpec(BaseServeSpec):
         return cls(
             args=config,
             name=compute_trainer_pool_id(config.trainer_id),
-            fp8_block_scaling_fp32_scales=_compute_fp8_block_scaling_fp32_scales(),
+            fp8_block_scaling_fp32_scales=fp8_block_scaling_fp32_scales(),
             port_infos=[
                 PortInfo(name=MASTER_PORT_NAME, static_port=9000, mode="master", allow_dynamic=True),
                 DEFAULT_RPC_PORT_INFO,
@@ -248,11 +248,3 @@ def compute_trainer_env_vars(args, ctx: WorkerLaunchContext, *, fp8_scales: str)
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 
     return env_vars
-
-
-def _compute_fp8_block_scaling_fp32_scales() -> str:
-    return (
-        x
-        if (x := os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")) is not None
-        else default_fp8_block_scaling_fp32_scales()
-    )
