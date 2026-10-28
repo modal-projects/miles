@@ -50,7 +50,7 @@ from miles.utils.function_registry import load_function
 from miles.utils.hf_utils.config import is_dsa, load_hf_config
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.lora.arguments import validate_lora_args, validate_lora_args_after_megatron
-from miles.utils.lora.utils import is_lora_enabled, lora_sync_sends_base
+from miles.utils.lora.utils import is_lora_enabled, lora_rollout_enabled, lora_sync_sends_base
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp
 from miles.utils.object_store_config import (
     MOONCAKE_MASTER_ADDRESS_KEY,
@@ -1099,7 +1099,7 @@ def miles_validate_args(args):
 
     validate_length_penalty_args(args)
     mode = args.update_weight_transfer_mode
-    if mode not in ("broadcast", "broadcast_packed", "p2p", "disk-delta", "ici", "http-lora"):
+    if mode not in ("broadcast", "broadcast_packed", "p2p", "disk-delta", "ici", "http-lora", "weight-delta"):
         raise ValueError(f"Unknown --update-weight-transfer-mode {mode!r}")
     if mode == "broadcast_packed" and (args.train_backend != "megatron" or args.colocate):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
@@ -1533,9 +1533,9 @@ def miles_validate_args(args):
         assert (
             args.rollout_external_url is not None and args.rollout_external_control_url is not None
         ), "--rollout-external-url and --rollout-external-control-url name one external rollout: set both."
-        assert args.update_weight_transfer_mode == "disk-delta", (
+        assert args.update_weight_transfer_mode in ("weight-delta", "disk-delta"), (
             "An external rollout service loads each version from --update-weight-disk-dir: it needs "
-            "--update-weight-transfer-mode disk-delta."
+            "--update-weight-transfer-mode weight-delta or disk-delta."
         )
         assert args.fully_async, (
             "An external rollout service serves fully async runs only: the other rollout loops abort every "
@@ -1554,6 +1554,50 @@ def miles_validate_args(args):
             f"An external rollout service serves one policy, and --megatron-config names {model_ids}: its "
             "weight API carries one version stream."
         )
+
+    if args.update_weight_transfer_mode == "weight-delta":
+        assert not args.colocate, "Weight-delta weight transfer mode is not compatible with --colocate."
+        assert (
+            args.update_weights_interval == 1
+        ), "Weight-delta weight transfer mode has not been tested with --update-weights-interval above 1."
+        assert args.train_backend == "megatron" and args.megatron_to_hf_mode == "raw", (
+            "Weight-delta weight transfer needs Megatron's raw exporter: each trainer rank writes the tensors "
+            "it exports."
+        )
+        assert (
+            args.prefill_num_servers is None
+        ), "Weight-delta weight transfer mode has not been tested when PD is enabled."
+        assert not lora_rollout_enabled(args), (
+            "Weight-delta weight transfer sends full weights, not adapters: a LoRA run passes "
+            "--lora-merge-for-rollout."
+        )
+        assert not args.indep_dp, (
+            "Weight-delta weight transfer does not support --indep-dp: the previous version lives in the "
+            "trainer cell that published it, and a cell taking over the weight update has none."
+        )
+        assert not args.offload_rollout, (
+            "Weight-delta weight transfer does not support --offload-rollout: an engine that releases its "
+            "weights loses the versions it applied."
+        )
+        assert not args.check_weight_update_equal, (
+            "Weight-delta weight transfer does not support --check-weight-update-equal, which --ci-test turns on: "
+            "it scrambles the engines' weights before the first sync, and every version builds on what they "
+            "loaded. Pass --ci-disable-weight-update-checker."
+        )
+        assert args.sglang_load_format in ("auto", "safetensors", "fastsafetensors") and (
+            os.environ.get("MILES_SGLANG_DUMMY_LOAD") != "1"
+        ), "Weight-delta weight transfer needs the engines to load --hf-checkpoint's safetensors bytes."
+        assert args.update_weight_disk_dir, (
+            "--update-weight-transfer-mode=weight-delta requires --update-weight-disk-dir, the run's version "
+            "history on a filesystem the trainer and the rollout engines share."
+        )
+        assert os.path.isdir(args.hf_checkpoint), (
+            "--update-weight-transfer-mode=weight-delta requires --hf-checkpoint to be a local directory: "
+            "the trainer checks its export against its headers."
+        )
+        from miles.utils.nvcomp import nvcomp_distribution
+
+        nvcomp_distribution()
 
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (
