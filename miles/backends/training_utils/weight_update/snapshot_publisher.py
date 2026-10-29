@@ -7,6 +7,7 @@ from pathlib import Path
 import safetensors.torch
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 
 from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
 from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase
@@ -21,6 +22,13 @@ HF_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
 def _is_hf_metadata_file(path: Path) -> bool:
     # The base checkpoint's weight index must not overwrite the exported shard mapping.
     return path.is_file() and path.suffix not in HF_WEIGHT_SUFFIXES and not path.name.endswith(".index.json")
+
+
+def _hf_weight_files(checkpoint: Path) -> list[Path]:
+    index = checkpoint / "model.safetensors.index.json"
+    if index.is_file():
+        return sorted({checkpoint / name for name in json.loads(index.read_text())["weight_map"].values()})
+    return sorted(checkpoint.glob("*.safetensors"))
 
 
 class SnapshotPublisher:
@@ -90,10 +98,26 @@ class SnapshotPublisher:
             assert weight_map, f"HF export to {path} produced no weights"
             base_checkpoint = Path(hf_checkpoint)
             if base_checkpoint.is_dir():
+                for source in _hf_weight_files(base_checkpoint):
+                    with safe_open(source, framework="pt", device="cpu") as checkpoint:
+                        unexported = {
+                            name: checkpoint.get_tensor(name) for name in checkpoint.keys() if name not in weight_map
+                        }
+                    if not unexported:
+                        continue
+                    shard_index += 1
+                    shard_name = f"model-{shard_index:05d}.safetensors"
+                    safetensors.torch.save_file(unexported, path / shard_name)
+                    for name, tensor in unexported.items():
+                        weight_map[name] = shard_name
+                        total_size += tensor.numel() * tensor.element_size()
                 for meta_file in base_checkpoint.iterdir():
                     if _is_hf_metadata_file(meta_file):
                         shutil.copy2(meta_file, path / meta_file.name)
             else:
-                logger.warning(f"hf_checkpoint {hf_checkpoint} is not a local dir; metadata not copied to {path}")
+                logger.warning(
+                    f"hf_checkpoint {hf_checkpoint} is not a local dir; its unexported weights and metadata are not "
+                    f"copied to {path}"
+                )
             index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
             (path / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
