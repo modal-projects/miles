@@ -45,7 +45,6 @@ register_cuda_ci(
     suite="stage-c-4-gpu-h200",
     labels=["precision", "megatron"],
     hardware=["hopper", "blackwell"],
-    num_gpus=4,
 )
 
 HIDDEN = 512
