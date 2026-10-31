@@ -105,19 +105,16 @@ def _mmap_rows(path: str, name: str, row_start: int, row_end: int, row_bytes: in
     if n == 0:
         return torch.zeros(0, row_bytes, dtype=torch.uint8)
     offset = 8 + header_len + begin + row_start * row_bytes
-    _prefetch_in_background(path, offset, n * row_bytes)
+    _prefetch_in_background(path, name, offset, n * row_bytes)
     mm = np.memmap(path, dtype=np.uint8, mode="r", offset=offset, shape=(n, row_bytes))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return torch.from_numpy(mm)
 
 
-def _prefetch_in_background(path: str, offset: int, nbytes: int) -> None:
+def _prefetch_in_background(path: str, name: str, offset: int, nbytes: int) -> None:
     """Read a mapped byte range once in a background thread, so the first lookups of new n-grams hit the
-    page cache instead of faulting rows in one at a time from network storage.
-
-    Ranks on one host share the page cache, so each chunk is read by whichever rank claims it first.
-    """
+    page cache instead of faulting rows in one at a time from network storage."""
     if not ENGRAM_PREFETCH:
         return
     claims = os.path.join(tempfile.gettempdir(), "miles-engram-prefetch")
@@ -135,17 +132,10 @@ def _prefetch_in_background(path: str, offset: int, nbytes: int) -> None:
                 except FileExistsError:
                     continue
                 # the whole chunk, since a rank that claims it first may need less of it than another
-                pos, end = start, min(start + ENGRAM_PREFETCH_CHUNK, size)
-                while pos < end:
-                    got = os.preadv(f.fileno(), [memoryview(buf)[: end - pos]], pos)
-                    if got <= 0:
-                        break
-                    pos += got
-                    read += got
-        logger.info(
-            f"Engram prefetch of {os.path.basename(path)} read {read / 2**30:.1f} GiB "
-            f"in {time.monotonic() - started:.0f} s"
-        )
+                for pos in range(start, min(start + ENGRAM_PREFETCH_CHUNK, size), len(buf)):
+                    read += os.preadv(f.fileno(), [buf], pos)
+        if read:
+            logger.info(f"Engram prefetch of {name} read {read / 2**30:.1f} GiB in {time.monotonic() - started:.0f} s")
 
     threading.Thread(target=read_unclaimed_chunks, name="engram-prefetch", daemon=True).start()
 
