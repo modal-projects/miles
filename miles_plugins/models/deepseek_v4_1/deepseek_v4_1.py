@@ -668,8 +668,10 @@ def get_dsv41_spec(args, config, vp_stage):
     config.miles_dsa_topk_backend = args.miles_dsa_topk_backend
     _install_patches(config)
     # Megatron compiles its hyper-connection and fused functions without dynamic=True, so each new
-    # micro-batch length would recompile them mid-run. This setting is process-wide.
-    torch._dynamo.config.assume_static_by_default = False
+    # micro-batch length would recompile them mid-run. Change the process-wide default: assigning
+    # the config only applies to this thread, and these functions also compile in other threads,
+    # such as autograd's backward.
+    torch._dynamo.config._config["assume_static_by_default"].default = False
 
     _orig_get_spec = _eav_specs.get_experimental_attention_variant_module_spec
 
