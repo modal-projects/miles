@@ -22,7 +22,7 @@ from safetensors.torch import save_file
 from miles.backends.sglang_utils.sglang_config import SglangConfig
 from miles.backends.training_utils.weight_update.protocols.weight_delta import protocol as weight_delta
 from miles.backends.training_utils.weight_update.protocols.weight_delta.protocol import UpdateWeightFromDelta
-from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import version_dir
+from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import checksum, version_dir
 from miles.kernels.weight_delta.frames import GAP_NBYTES
 from miles.utils.args.custom_view import ImmutableNamespace
 
@@ -148,6 +148,7 @@ def _apply_like_an_engine(
             name = names[name_start:name_end]
             region = payload[offset : offset + column["tensors.nbytes"][index]]
             data = previous[name].clone().view(-1).view(torch.uint8)
+            before = data.clone()
             if column["tensors.raw"][index]:
                 raw_names.append(name)
                 data.copy_(torch.frombuffer(bytearray(region), dtype=torch.uint8))
@@ -167,6 +168,8 @@ def _apply_like_an_engine(
                     data[frame_offset:][:nbytes] ^= _decode_frame(
                         manifest["codec"], inner[inner_offset:][:inner_nbytes], nbytes
                     )
+            changed = None if column["tensors.raw"][index] else (data != before).numpy()
+            assert int(column["tensors.checksum"][index]) == checksum(data.numpy(), changed), name
             applied[name] = data
             name_start, chunk_start, frame_start = name_end, chunk_end, frame_end
     return manifest, applied, raw_names

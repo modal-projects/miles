@@ -20,7 +20,11 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import Weigh
 from miles.backends.training_utils.weight_update.protocol import WeightTransferProtocol
 from miles.backends.training_utils.weight_update.protocols.delta import _safetensors_dtype
 from miles.backends.training_utils.weight_update.protocols.utils.data_replica import get_data_replica_rank_and_size
-from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import DeltaEncoder, changed_bits
+from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder import (
+    DeltaEncoder,
+    EncodedTensor,
+    changed_bits,
+)
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import (
     OwnerWriter,
     is_raw,
@@ -73,8 +77,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._exported: dict[str, tuple[str, list[int]]] = {}
         self._directory: Path | None = None
         self._writer: OwnerWriter | None = None
-        # (name, dtype, shape, XOR frame records or None for a raw tensor), in the order they are written.
-        self._writes: list[tuple[str, str, list[int], list[dict] | None]] = []
+        # (name, dtype, shape, the encoder's result or None for a raw tensor), in the order they are written.
+        self._writes: list[tuple[str, str, list[int], EncodedTensor | None]] = []
         self._changed_raw: set[str] = set()
         self._record: dict | None = None
         self._rechanged: list[torch.Tensor] = []
@@ -174,14 +178,14 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._stats["encode_s"] += time.monotonic() - started
         for (name, dtype, shape), result in zip(xor_tensors, encoded, strict=True):
             if result is not None:
-                self._writes.append((name, dtype, shape, result.frames))
+                self._writes.append((name, dtype, shape, result))
                 self._stats["changed_nbytes"] += result.changed_nbytes
                 if result.changed_bits is not None:
                     self._track_changes(name, result.changed_bits)
 
     def _compare_raw(self) -> None:
-        for name, _, _, frames in self._writes:
-            if frames is not None:
+        for name, _, _, encoded in self._writes:
+            if encoded is not None:
                 continue
             current, previous = self._raw_current[name], self._previous[name]
             changed_nbytes = int(torch.count_nonzero(current != previous))
@@ -196,9 +200,9 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         started = time.monotonic()
         compressed = iter(zip(*self._encoder.finish(), strict=True))
         self._stats["encode_s"] += time.monotonic() - started
-        for name, dtype, shape, frames in self._writes:
-            if frames is not None:
-                self._writer.add_xor(name, dtype, shape, frames, *next(compressed))
+        for name, dtype, shape, encoded in self._writes:
+            if encoded is not None:
+                self._writer.add_xor(name, dtype, shape, encoded.frames, *next(compressed), encoded.checksum)
             elif name in self._changed_raw:
                 self._writer.add_raw(name, dtype, shape, memoryview(self._previous[name].numpy()))
 

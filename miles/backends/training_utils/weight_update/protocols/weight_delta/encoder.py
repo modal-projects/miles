@@ -4,6 +4,7 @@ inner encodings, then every changed tensor's outer Zstd chunks."""
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import (
@@ -20,12 +21,14 @@ BITS_SLICE_NBYTES = 1 << 26
 
 @dataclass(frozen=True)
 class EncodedTensor:
-    """A changed tensor's frame records, how many of its bytes changed, and which when the encoder was
-    asked (changed_bits). Its payload and Zstd record come from finish."""
+    """A changed tensor's frame records, how many of its bytes changed, which when the encoder was
+    asked (changed_bits), and the checksum of its new bytes where they changed. Its payload and Zstd
+    record come from finish."""
 
     frames: list[dict]
     changed_nbytes: int
     changed_bits: torch.Tensor | None
+    checksum: int
 
 
 class DeltaEncoder:
@@ -75,19 +78,23 @@ class DeltaEncoder:
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream()
             try:
-                xors = [torch.empty(previous.numel(), dtype=torch.uint8, device=self.device) for previous, _ in pairs]
+                # The XOR kernel works in 4-byte words; a current that does not start on one is copied.
+                xors = [_word_padded(previous.numel(), self.device) for previous, _ in pairs]
+                currents = [current if current.data_ptr() % 4 == 0 else current.clone() for _, current in pairs]
                 self._upload_stream.wait_stream(stream)
                 self._download_stream.wait_stream(stream)
-                for xor, (previous, current) in zip(xors, pairs, strict=True):
+                for xor, (previous, _), current in zip(xors, pairs, currents, strict=True):
                     with torch.cuda.stream(self._upload_stream):
                         xor.copy_(previous, non_blocking=True)
                     self._download_stream.wait_event(self._upload_stream.record_event())
                     with torch.cuda.stream(self._download_stream):
                         previous.copy_(current, non_blocking=True)
                 stream.wait_stream(self._upload_stream)
-                changes = xor_frames_(xors, [current for _, current in pairs], FRAME_NBYTES)
-                frame_counts = _split(
-                    changes.counts.tolist(), [(xor.numel() + FRAME_NBYTES - 1) // FRAME_NBYTES for xor in xors]
+                changes = xor_frames_(xors, currents, FRAME_NBYTES)
+                tensor_frames = [(xor.numel() + FRAME_NBYTES - 1) // FRAME_NBYTES for xor in xors]
+                frame_counts = _split(changes.counts.tolist(), tensor_frames)
+                frame_checksums = _split(
+                    changes.tile_checksums.cpu().numpy().view(np.uint64).sum(axis=1, dtype=np.uint64), tensor_frames
                 )
                 changed_frames = [[i for i, count in enumerate(counts) if count] for counts in frame_counts]
                 changed_tensors = [index for index, indices in enumerate(changed_frames) if indices]
@@ -122,7 +129,8 @@ class DeltaEncoder:
                 }
                 for i, (inner_offset, inner_nbytes) in zip(changed_frames[index], layout, strict=True)
             ]
-            encoded[index] = EncodedTensor(frame_records, sum(frame_counts[index]), tensor_bits)
+            checksum = int(np.sum(frame_checksums[index], dtype=np.uint64))
+            encoded[index] = EncodedTensor(frame_records, sum(frame_counts[index]), tensor_bits, checksum)
         return encoded
 
     def finish(self) -> tuple[list[memoryview], list[dict]]:
@@ -224,6 +232,11 @@ def _pack_bits(mask: torch.Tensor) -> torch.Tensor:
     packed >>= 56
     packed &= 0xFF
     return packed.to(torch.uint8)
+
+
+def _word_padded(nbytes: int, device: torch.device) -> torch.Tensor:
+    """nbytes of a new buffer that also owns the bytes up to the next multiple of 4."""
+    return torch.empty(-(-nbytes // 4) * 4, dtype=torch.uint8, device=device)[:nbytes]
 
 
 def _layout(

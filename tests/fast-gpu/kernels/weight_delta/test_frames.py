@@ -1,6 +1,7 @@
-"""The weight-delta frame kernels against a torch reference: XOR and changed bytes per frame, and
-codec gap's bytes at each frame's offset, including the golden bytes engines decode."""
+"""The weight-delta frame kernels against a torch reference: XOR, changed bytes and the checksum per
+frame, and codec gap's bytes at each frame's offset, including the golden bytes engines decode."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -10,6 +11,7 @@ register_cuda_ci(
     est_time=60, suite="stage-b-2-gpu-h200", labels=["weight-update"], hardware=["hopper", "blackwell"], num_gpus=1
 )
 
+from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import checksum
 from miles.kernels.weight_delta.frames import GAP_NBYTES, TILE_NBYTES, encode_gap_frames, xor_frames_
 
 MIB = 1 << 20
@@ -34,11 +36,20 @@ CASES = {
 
 
 def _pair(nbytes: int, changed: list[int], seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Current is followed in its storage by bytes that differ from previous's: the kernel reads a
+    tensor's last word whole and must not count them."""
     generator = torch.Generator().manual_seed(seed)
     previous = torch.randint(0, 256, (nbytes,), dtype=torch.uint8, generator=generator)
     current = previous.clone()
     current[changed] ^= torch.randint(1, 256, (len(changed),), dtype=torch.uint8, generator=generator)
-    return previous.cuda(), current.cuda()
+    beyond = torch.randint(1, 256, (4,), dtype=torch.uint8, generator=generator)
+    return previous.cuda(), torch.cat([current, beyond]).cuda()[:nbytes]
+
+
+def _target(previous: torch.Tensor) -> torch.Tensor:
+    """A copy of previous that owns the bytes up to its next multiple of 4, as xor_frames_ needs."""
+    target = torch.empty(-(-previous.numel() // 4) * 4, dtype=torch.uint8, device="cuda")[: previous.numel()]
+    return target.copy_(previous)
 
 
 def _gap_frame_reference(frame: torch.Tensor) -> bytes:
@@ -51,8 +62,9 @@ def _gap_frame_reference(frame: torch.Tensor) -> bytes:
 def _encode(pairs: list[tuple[torch.Tensor, torch.Tensor]], frame_nbytes: int = MIB):
     """Both kernels over a batch, each frame's encoding 16 bytes past the previous one's end, on a
     buffer filled with FILL. Returns the targets, counts, buffer and offsets."""
-    targets = [previous.clone() for previous, _ in pairs]
+    targets = [_target(previous) for previous, _ in pairs]
     changes = xor_frames_(targets, [current for _, current in pairs], frame_nbytes)
+    checksums = changes.tile_checksums.cpu().numpy().view(np.uint64).sum(axis=1, dtype=np.uint64)
     counts = changes.counts.tolist()
     offsets, end = [], 0
     for count in counts:
@@ -60,15 +72,19 @@ def _encode(pairs: list[tuple[torch.Tensor, torch.Tensor]], frame_nbytes: int = 
         end += (GAP_NBYTES + 1) * count + 16
     output = torch.full((end,), FILL, dtype=torch.uint8, device="cuda")
     encode_gap_frames(changes, output, offsets)
-    return targets, counts, output.cpu(), offsets
+    return targets, counts, checksums.tolist(), output.cpu(), offsets
 
 
-def _check(pairs, targets, counts, output, offsets, frame_nbytes: int = MIB) -> None:
+def _check(pairs, targets, counts, checksums, output, offsets, frame_nbytes: int = MIB) -> None:
     written = torch.zeros(output.numel(), dtype=torch.bool)
     frame = 0
     for (previous, current), target in zip(pairs, targets, strict=True):
         xor = previous ^ current
         assert torch.equal(target, xor)
+        frames = -(-xor.numel() // frame_nbytes)
+        assert sum(checksums[frame : frame + frames]) % 2**64 == checksum(
+            current.cpu().numpy(), changed=(xor != 0).cpu().numpy()
+        )
         for start in range(0, xor.numel(), frame_nbytes):
             reference = xor[start : start + frame_nbytes]
             assert counts[frame] == int(reference.count_nonzero())
@@ -87,7 +103,7 @@ def test_the_golden_frame_is_the_gap_planes_then_the_values():
     current = previous.clone()
     current[[0, 300, 70300]] = torch.tensor([0x11, 0x22, 0x33], dtype=torch.uint8, device="cuda")
 
-    _, counts, output, offsets = _encode([(previous, current)])
+    _, counts, _, output, offsets = _encode([(previous, current)])
 
     assert counts == [3]
     assert output[offsets[0] : offsets[0] + len(GOLDEN_PAYLOAD)].numpy().tobytes() == GOLDEN_PAYLOAD
@@ -111,10 +127,10 @@ def test_a_batch_of_every_case_matches_the_reference():
 def test_the_largest_gap_fits_a_16_mib_frame():
     pairs = [_pair(1 << 24, [(1 << 24) - 1], seed=0)]
 
-    targets, counts, output, offsets = _encode(pairs, frame_nbytes=1 << 24)
+    targets, counts, checksums, output, offsets = _encode(pairs, frame_nbytes=1 << 24)
 
     assert output[offsets[0] : offsets[0] + GAP_NBYTES].numpy().tobytes() == b"\xff\xff\xff"
-    _check(pairs, targets, counts, output, offsets, frame_nbytes=1 << 24)
+    _check(pairs, targets, counts, checksums, output, offsets, frame_nbytes=1 << 24)
 
 
 @pytest.mark.parametrize(
@@ -124,6 +140,7 @@ def test_the_largest_gap_fits_a_16_mib_frame():
         "frame under a tile",
         "lengths differ",
         "not uint8",
+        "not 4-byte aligned",
         "offsets not one per frame",
         "gap frame over 16 MiB",
     ],
@@ -135,6 +152,7 @@ def test_what_the_kernels_cannot_take_is_refused(case: str):
         "frame under a tile": (lambda: xor_frames_([tensor], [tensor.clone()], TILE_NBYTES // 2), "power of two"),
         "lengths differ": (lambda: xor_frames_([tensor], [tensor[:-1].clone()], MIB), "^pair 0: "),
         "not uint8": (lambda: xor_frames_([tensor.view(torch.int16)], [tensor.view(torch.int16)], MIB), "^pair 0: "),
+        "not 4-byte aligned": (lambda: xor_frames_([tensor[1:]], [tensor[1:].clone()], MIB), "^pair 0: "),
         "offsets not one per frame": (
             lambda: encode_gap_frames(xor_frames_([tensor], [tensor.clone()], MIB), tensor.clone(), [0, 0]),
             "one per frame",
