@@ -667,8 +667,8 @@ def get_dsv41_spec(args, config, vp_stage):
     config.v41_runtime = V41Runtime()
     config.miles_dsa_topk_backend = args.miles_dsa_topk_backend
     _install_patches(config)
-    # Compile the hyper-connection and loss functions for any token count on their first call, so
-    # micro-batches of new sizes do not recompile them mid-run. This setting is process-wide.
+    # Megatron compiles its hyper-connection and fused functions without dynamic=True, so each new
+    # micro-batch length would recompile them mid-run. This setting is process-wide.
     torch._dynamo.config.assume_static_by_default = False
 
     _orig_get_spec = _eav_specs.get_experimental_attention_variant_module_spec
