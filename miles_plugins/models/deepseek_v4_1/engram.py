@@ -1,6 +1,10 @@
+import hashlib
 import json
 import logging
 import os
+import tempfile
+import threading
+import time
 import warnings
 from dataclasses import dataclass
 
@@ -101,10 +105,39 @@ def _mmap_rows(path: str, name: str, row_start: int, row_end: int, row_bytes: in
     if n == 0:
         return torch.zeros(0, row_bytes, dtype=torch.uint8)
     offset = 8 + header_len + begin + row_start * row_bytes
+    _prefetch_in_background(path, name, offset, n * row_bytes)
     mm = np.memmap(path, dtype=np.uint8, mode="r", offset=offset, shape=(n, row_bytes))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return torch.from_numpy(mm)
+
+
+def _prefetch_in_background(path: str, name: str, offset: int, nbytes: int) -> None:
+    """Read a mapped byte range once in a background thread, so the first lookups of new n-grams hit the
+    page cache instead of faulting rows in one at a time from network storage."""
+    if not ENGRAM_PREFETCH:
+        return
+    claims = os.path.join(tempfile.gettempdir(), "miles-engram-prefetch")
+    os.makedirs(claims, exist_ok=True)
+    key = hashlib.sha1(os.path.realpath(path).encode()).hexdigest()[:16]
+
+    def read_unclaimed_chunks():
+        buf = bytearray(64 << 20)
+        read, started = 0, time.monotonic()
+        with open(path, "rb", buffering=0) as f:
+            size = os.fstat(f.fileno()).st_size
+            for start in range(offset - offset % ENGRAM_PREFETCH_CHUNK, offset + nbytes, ENGRAM_PREFETCH_CHUNK):
+                try:
+                    os.close(os.open(os.path.join(claims, f"{key}-{start}"), os.O_CREAT | os.O_EXCL))
+                except FileExistsError:
+                    continue
+                # the whole chunk, since a rank that claims it first may need less of it than another
+                for pos in range(start, min(start + ENGRAM_PREFETCH_CHUNK, size), len(buf)):
+                    read += os.preadv(f.fileno(), [buf], pos)
+        if read:
+            logger.info(f"Engram prefetch of {name} read {read / 2**30:.1f} GiB in {time.monotonic() - started:.0f} s")
+
+    threading.Thread(target=read_unclaimed_chunks, name="engram-prefetch", daemon=True).start()
 
 
 @dataclass(frozen=True)
@@ -155,6 +188,8 @@ def build_engram_layout(config: TransformerConfig) -> EngramLayout | None:
 ENGRAM_GATE_CHUNK = int(os.environ.get("MILES_DSV41_ENGRAM_GATE_CHUNK", "4096"))
 ENGRAM_HOST_TABLE = os.environ.get("MILES_DSV41_ENGRAM_HOST_TABLE", "sharded")
 ENGRAM_GATHER_THREADS = int(os.environ.get("MILES_DSV41_ENGRAM_GATHER_THREADS", "16"))
+ENGRAM_PREFETCH = os.environ.get("MILES_DSV41_ENGRAM_PREFETCH", "1") == "1"
+ENGRAM_PREFETCH_CHUNK = 1 << 30
 assert ENGRAM_HOST_TABLE in ("sharded", "shared"), ENGRAM_HOST_TABLE
 
 
