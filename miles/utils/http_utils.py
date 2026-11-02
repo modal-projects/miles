@@ -350,6 +350,11 @@ async def _post_buffer(url: str, payload: dict) -> np.ndarray:
         raise httpx.ReadError(str(exc)) from exc
 
 
+def rollout_external_headers() -> dict[str, str]:
+    api_key = os.environ.get("MILES_ROLLOUT_EXTERNAL_API_KEY")
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _client_concurrency, _distributed_post_enabled
