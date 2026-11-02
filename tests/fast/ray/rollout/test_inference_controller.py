@@ -1877,3 +1877,20 @@ class TestRemovedWeightUpdateInterruptionGuards:
     def test_the_controller_module_no_longer_knows_about_failure_modes(self) -> None:
         """Only the removed injection entry point needed a FailureMode here; the worker manager owns it now."""
         assert not hasattr(inference_controller_module, "FailureMode")
+
+
+@pytest.mark.asyncio
+async def test_the_controller_hands_each_published_version_to_the_external_rollout_service(monkeypatch):
+    controller = InferenceController(
+        make_args(rollout_external_control_url="https://control"), engine_provider=None, router_providers=[]
+    )
+    served: list[int] = []
+
+    async def serve(version: int) -> dict[str, float]:
+        served.append(version)
+        return {"perf/update_weights_external_s": 1.0}
+
+    monkeypatch.setattr(controller._external_rollout, "serve", serve)
+
+    assert await controller.update_external_rollout(4) == {"perf/update_weights_external_s": 1.0}
+    assert served == [4]

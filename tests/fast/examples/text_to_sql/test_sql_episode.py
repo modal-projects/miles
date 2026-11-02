@@ -102,7 +102,7 @@ def sql_episode(monkeypatch):
     spec = importlib.util.spec_from_file_location("sql_episode", REPO_ROOT / "examples/text_to_sql/sql_episode.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setattr(module, "compute_routing_headers", lambda args, sample: {})
+    monkeypatch.setattr(module, "compute_request_headers", lambda args, sample: {})
     return module
 
 
@@ -138,6 +138,7 @@ async def _run(sql_episode, monkeypatch, turns: list, *, max_context_len: int = 
     args = SimpleNamespace(
         sglang_router_ip="router",
         sglang_router_port=1,
+        rollout_external_url=None,
         text_to_sql_max_tool_turns=2,
         rollout_max_response_len=1000,
         rollout_max_context_len=max_context_len,

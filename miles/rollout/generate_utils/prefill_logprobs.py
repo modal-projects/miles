@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
 
-from miles.rollout.generate_utils.generate_endpoint_utils import compute_routing_headers, router_routes_by_key
+from miles.rollout.generate_utils.generate_endpoint_utils import compute_request_headers, router_routes_by_key
 from miles.utils.http_utils import post
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 from miles.utils.processing_utils import encode_image_for_rollout_engine
@@ -175,7 +175,7 @@ async def recompute_samples_rollout_logprobs_via_prefill(
         return
 
     for sample in samples_to_score:
-        headers = compute_routing_headers(args, sample)
+        headers = compute_request_headers(args, sample)
 
         await post(flush_url, {}, headers=headers)
         await recompute_rollout_logprobs_via_prefill(

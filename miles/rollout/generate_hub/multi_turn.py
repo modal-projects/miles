@@ -9,8 +9,9 @@ from copy import deepcopy
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import (
     compute_prompt_ids_from_sample,
+    compute_request_headers,
     compute_request_payload,
-    compute_routing_headers,
+    generation_url,
     update_sample_from_response,
 )
 from miles.rollout.generate_utils.tool_call_utils import (
@@ -31,7 +32,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     tokenizer = input.state.tokenizer
     assert not args.partial_rollout, "Partial rollout is not supported"
 
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = generation_url(args)
 
     execute_tool_function = load_function(args.generate_execute_tool_function_path)
 
@@ -63,7 +64,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             break
 
         gen_t0 = time.time()
-        output = await post(url, payload, headers=compute_routing_headers(args, sample))
+        output = await post(url, payload, headers=compute_request_headers(args, sample))
         sink = None if input.evaluation else TrajectoryLifecycle().sink
         if sink is not None:
             tokens = output.get("meta_info", {}).get("completion_tokens", "")
