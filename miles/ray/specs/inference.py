@@ -162,6 +162,11 @@ def compute_inference_controller_provider(args, *, capability: BackendCapability
     return capability.static_worker_provider(pool_id=INFERENCE_CONTROLLER_POOL_ID)
 
 
+def runs_session_servers(args) -> bool:
+    """Whether Miles runs session servers: in front of its own engines or of an external rollout."""
+    return bool(args.use_session_server and (args.sglang.models or args.rollout_external_url is not None))
+
+
 def session_server_worker_name(cell_index: int) -> str:
     return compute_worker_name(pool_id=SESSION_SERVER_POOL_ID, cell_index=cell_index)
 
@@ -235,7 +240,7 @@ class SessionServerSpec(BaseCommandSpec):
     def scheduling(self, scaling: ScalingConfig) -> SchedulingSpec:
         args = self.args
         return SchedulingSpec(
-            num_cells=(args.session_server_workers if args.use_session_server and args.sglang.models else 0),
+            num_cells=args.session_server_workers if runs_session_servers(args) else 0,
             num_workers_per_cell=1,
             num_gpus_per_worker=0,
             num_cpus_per_worker=0,
@@ -246,14 +251,18 @@ class SessionServerSpec(BaseCommandSpec):
     def launch_command(self, ctx: LaunchCommandContext) -> str:
         args = ctx.args
         interpreter_prefix = self.interpreter_prefix
-        (router_addrs,) = ctx.pool_addrs[compute_router_pool_id(0)]
+        if args.rollout_external_url is not None:
+            backend_url = args.rollout_external_url
+        else:
+            (router_addrs,) = ctx.pool_addrs[compute_router_pool_id(0)]
+            backend_url = router_addrs["primary"].addr
         session_config = compute_session_server_config(
             args,
             host=args.session_server_ip or ctx.self_addrs["primary"].host,
             port=ctx.self_addrs["primary"].port,
             # TODO: make the indexing it k8s native compatible
             instance_id=compute_session_server_instance_id(args, ctx.cell_index),
-            backend_url=router_addrs["primary"].addr,
+            backend_url=backend_url,
         )
         launch_argv = [*interpreter_prefix, "-m", "miles.rollout.session.server", *config_to_argv(session_config)]
         return shlex.join(launch_argv)

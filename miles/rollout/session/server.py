@@ -21,6 +21,7 @@ from yarl import URL
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.core import ProxyRequest
 from miles.rollout.session.sessions import setup_session_routes
+from miles.utils.http_utils import rollout_external_headers
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.workers.argv_utils import parse_config_argv
 
@@ -52,6 +53,7 @@ class SessionServer:
 
     def __init__(self, config: SessionServerConfig):
         self.backend_url = config.backend_url
+        self.backend_headers = rollout_external_headers()
         self.app = FastAPI(lifespan=self._lifespan)
 
         # Every turn's backend reply is megabytes (per-token logprobs, R3). aiohttp parses it in C;
@@ -91,6 +93,8 @@ class SessionServer:
             url = f"{url}?{request.query}"
 
         headers = {k: v for k, v in headers.items() if k.lower() not in _DROP_REQUEST_HEADERS}
+        if self.backend_headers:
+            headers = {k: v for k, v in headers.items() if k.lower() != "authorization"} | self.backend_headers
 
         try:
             # The body is read inside the try: a reply cut off mid-body is a transport error (502), as with httpx.
