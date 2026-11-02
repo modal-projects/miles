@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from tests.fast.ray.checksum_fixtures import make_checksum_controller
@@ -144,6 +144,7 @@ def _orchestration_args(**overrides) -> Namespace:
         mini_ft_controller_poll_interval=0.01,
         log_inference_engine_weight_checksums=True,
         update_weight_engine_request_timeout=5.0,
+        rollout_external_url=None,
     )
     values.update(overrides)
     return Namespace(**values)
@@ -213,6 +214,34 @@ async def test_the_window_is_scoped_to_the_policy_the_script_is_publishing():
     assert calls["start_update_weights"] == dict(model_id="alpha")
     assert calls["end_update_weights"]["checksum_model_id"] == "alpha"
     assert calls["end_update_weights"]["collect_checksums"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_external_rollout_serves_each_version_before_the_rollout_takes_it():
+    """The rollout's next requests count on the version."""
+    from miles.ray.placement_group import update_weights
+
+    order: list[str] = []
+    inference_controller = _OrderRecordingInferenceController(order)
+    inference_controller.update_external_rollout = AsyncMock(
+        side_effect=lambda version: order.append("update_external_rollout") or {"perf/update_weights_external_s": 2.0}
+    )
+    executor = MagicMock(set_weight_version=AsyncMock(side_effect=lambda *a, **k: order.append("set_weight_version")))
+
+    with patch("miles.ray.placement_group.tracking") as tracking:
+        await update_weights(
+            _orchestration_args(rollout_external_url="https://rollout", wandb_always_use_train_step=False),
+            _actor_model(order),
+            executor,
+            inference_controller,
+            rollout_id=3,
+        )
+
+    assert order[2:] == ["end_update_weights", "update_external_rollout", "set_weight_version"]
+    inference_controller.update_external_rollout.assert_awaited_once_with(11)
+    tracking.log.assert_called_once_with(
+        ANY, {"perf/update_weights_external_s": 2.0, "rollout/step": 3}, step_key="rollout/step"
+    )
 
 
 def _checksum_response(engine_checksums: list[dict[str, str]]) -> list[tuple[ServerCellMetadata, dict[str, Any]]]:
