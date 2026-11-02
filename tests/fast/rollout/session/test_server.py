@@ -124,6 +124,13 @@ class TestDoProxy:
         assert result["headers"]["x-upstream"] == "yes"
         assert result["headers"]["content-type"] == "application/json"
 
+    def test_an_external_rollouts_api_key_replaces_the_agents_credentials(self, echo_backend, monkeypatch):
+        monkeypatch.setenv("MILES_ROLLOUT_EXTERNAL_API_KEY", "endpoint-key")
+
+        result = _proxy_to(echo_backend, "echo", headers={"Authorization": "Bearer agent-key"})
+
+        assert json.loads(result["response_body"])["headers"]["authorization"] == "Bearer endpoint-key"
+
     def test_does_not_follow_redirects(self, echo_backend):
         assert _proxy_to(echo_backend, "moved")["status_code"] == 307
 

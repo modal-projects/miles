@@ -21,8 +21,9 @@ from text_to_sql_recipe.config import RewardConfig
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import (
     compute_prompt_ids_from_sample,
+    compute_request_headers,
     compute_request_payload,
-    compute_routing_headers,
+    generation_url,
     update_sample_from_response,
 )
 from miles.rollout.generate_utils.tool_call_utils import append_observation_tokens
@@ -41,7 +42,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     sample = deepcopy(input.sample)
     tokenizer = input.state.tokenizer
     task = sample.metadata["task"]
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = generation_url(args)
     max_tool_turns = args.text_to_sql_max_tool_turns
     turn_token_cap = input.sampling_params.get("max_new_tokens", args.rollout_max_response_len)
 
@@ -61,7 +62,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         if payload is None:
             sample.status = halt_status
             break
-        output = await post(url, payload, headers=compute_routing_headers(args, sample))
+        output = await post(url, payload, headers=compute_request_headers(args, sample))
         await update_sample_from_response(args, sample, payload=payload, output=output, update_loss_mask=True)
         finish_reason = output["meta_info"]["finish_reason"]["type"]
         if finish_reason == "abort":

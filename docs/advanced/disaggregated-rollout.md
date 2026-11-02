@@ -43,11 +43,10 @@ the prefill and decode phases inside an SGLang deployment.
 |---|---|---|---|
 | miles-managed rollout | Part of the miles job | A miles-managed router and engine handles | miles converts, transfers, pauses, updates, and resumes the engines |
 | Attached SGLang engines | Owned by the deployment | Fixed engine addresses supplied with `--rollout-external-engine-addrs` | miles still addresses and controls each engine through its engine handle |
-| External rollout service | Independent and dynamically scaled | One stable rollout endpoint | miles publishes versions; the rollout service materializes and activates them across its replicas |
+| External rollout service | Independent and dynamically scaled | One rollout endpoint and one control endpoint | miles publishes versions; the rollout service materializes and activates them across its replicas |
 
-miles supports the first two topologies today. The single-endpoint external
-rollout service is coming soon and extends that separation from GPU placement
-to independent scaling, routing, and lifecycle.
+miles supports all three. The external rollout service extends the separation
+from GPU placement to independent scaling, routing, and lifecycle.
 
 `--rollout-external-engine-addrs` is the second row, not the third. It prevents
 miles from launching SGLang, but miles still knows the individual engine addresses, checks
@@ -176,71 +175,82 @@ disaggregation. It also requires `--hf-checkpoint` to be a local checkpoint
 directory. The implementation is selected by the Megatron actor; it is not a
 general FSDP weight-update path.
 
-## External rollout service contract
+## External rollout service
 
-The coming single-endpoint integration builds on the current disk-delta
-publication path and removes the need for miles to hold one handle per rollout
-engine. The commands above cover miles-managed and attached-engine deployments;
-this section defines the external-service boundary.
+An external rollout service gives miles two URLs, one for rollout requests and
+one for policy versions:
 
-The intended boundary has two independent data paths:
+```bash
+--rollout-external-url https://rollout.example \
+--rollout-external-control-url https://control.example \
+--update-weight-transfer-mode disk-delta \
+--update-weight-disk-dir /shared/miles/weight-updates \
+--fully-async
+```
+
+miles then launches no router and no engines. Rollout requests, including the
+session server's, go to `--rollout-external-url`. If the service needs an API
+key, put it in the job's `MILES_ROLLOUT_EXTERNAL_API_KEY` environment variable;
+miles sends it as `Authorization: Bearer <key>` on rollout requests and weight
+calls. It is not a flag because flags are logged and saved with checkpoints.
+
+The current integration publishes with `disk-delta`, runs
+fully async rollout, and does not run eval during training or score the student
+for top-k on-policy distillation (`--opd-log-prob-top-k`).
+
+The boundary has two data paths, and miles holds no handle to any replica:
 
 ```mermaid
 flowchart LR
-    T[miles trainer] -->|publish policy version| S[(Version store)]
-    W[miles rollout worker] -->|version-constrained request| G[External rollout endpoint]
+    T[miles trainer] -->|publish version| S[(Version store)]
+    I[miles inference controller] -->|announce version, wait until served| C[Control endpoint]
+    W[miles rollout worker] -->|rollout request| G[Rollout endpoint]
     S -->|materialize and verify| E[Rollout replicas]
+    C --> E
     G --> E
     E -->|trajectory and served version| W
 ```
-
-miles does not need to know how many replicas are behind the endpoint, where
-they run, or how the service replaces them. The integration is defined by
-ownership:
 
 | miles owns | The external rollout service owns |
 |---|---|
 | Training state and optimizer steps | Replica placement, scaling, and health |
 | Conversion to canonical rollout-visible tensors | Materializing published versions on rollout hosts |
 | Policy version numbering and publication | Verifying lineage and final-state checksums before activation |
-| The policy-version requirement attached to each rollout request | Routing requests only to replicas that satisfy that requirement |
-| Recording the served version on returned samples | Staging, admission control, activation, and reporting the version that served a request |
-
-The rollout endpoint and the version store are separate interfaces. The
-request path should not have to carry model-sized weights, and publishing a new
-version should not require miles to enumerate the current replicas.
+| Announcing each version and waiting until it is served | Activating it on every replica taking traffic before acknowledging it |
+| Recording the served version on returned samples | Routing, admission control, and reporting the version that served a request |
 
 One open-source package implementing the rollout-service side is
 [Stitch](https://github.com/modal-projects/stitch). It connects miles policy
-publication and version-constrained requests to an independently managed
-rollout fleet. The miles contract remains package-agnostic.
+publication and rollout requests to an independently managed rollout fleet.
+The miles contract remains package-agnostic.
 
-Stitch pins the miles revision it integrates against;
-[Miles fork](https://github.com/modal-projects/stitch/blob/main/cookbook/miles_disagg/MILES_FORK.md)
-records the trainer-side commits that pin depends on, how the same ownership
-split lands in code, and how to move the pin forward.
+### Weight API
 
-### Policy-version requirements
+miles calls three endpoints on `--rollout-external-control-url`:
 
-An external rollout request needs more than an inference payload. It must be
-able to express the policy version the caller can accept:
+| Call | When | Reply |
+|---|---|---|
+| `POST /start {"version": S}` | Once, at the first weight sync of a run or a resume | `{"start_id": ...}` |
+| `GET /status` | After `/start`, until a replica serves `S` | `{"serving": {"<version>": <replicas>}}` |
+| `POST /versions {"version": N, "base_version": B, "start": S, "start_id": ...}` | After publishing each later version; `B` is the version miles saw served last, which `N` builds on | Once every replica taking traffic serves `N`: `{"seconds": ..., "engines": {...}}` |
 
-- A **minimum version** permits any replica at or above the requested version.
-  This bounds staleness while allowing the fleet to converge gradually.
-- An **exact version** requires the replica to serve one particular policy.
-  It is useful for reproducibility, evaluation, and update validation.
+`S` is the trainer's weight version when it starts or resumes. Before `/start`,
+a resume deletes the versions published after `S`, so the service retires any
+replica past `S`; every later `/versions` names this start, and the service
+refuses a version from another one. miles sends rollout requests only once a
+replica serves `S`, and counts on each later version only once `/versions`
+returns. Requests therefore carry no version constraint: each response's
+weight version is recorded on its sample, as with miles-managed engines.
 
-If no compatible replica is ready, the service returns a retryable response
-instead of silently serving an older policy. Retrying a stateful generation is
-safe only when the rollout integration defines an idempotency and session
-contract; the generic miles request path should not assume that every failed
-generation can be replayed.
+miles sends a call again on no answer, 408, 429 or 5xx; any other 4xx stops the
+run. The service answers 409 for a version it cannot take and 422 for a version
+no replica could apply. A reply slower than the service's request limit may
+come back as a 303 redirect to where it will appear; miles follows it.
 
-The response reports which version served the request. For long or agentic
-trajectories, recording both the version at generation start and at generation
-end also exposes whether an activation occurred while the request was in
-flight. miles can then attach the observed version to the sample rather than
-inferring it from the trainer's latest published version.
+The `/versions` reply's `engines` map carries each replica's sync stats under
+`prepare` and `update`, one entry per GPU. miles logs the wait as
+`perf/update_weights_external_s` and each stat at its slowest GPU as
+`perf/update_weights_engine_prepare_*` and `perf/update_weights_engine_apply_*`.
 
 ### Publication and replica convergence
 
@@ -254,13 +264,13 @@ is visible. The publication contract therefore needs:
    up through later versions; and
 5. an activation acknowledgement before a replica advertises the new version.
 
-Disk-delta already provides version and base identity, atomic file writes, and
-final-state checksums. For an external consumer, the publication hook and
-version store must also expose the completed version as one commit boundary.
-Replica catch-up, admission, and activation belong to the external rollout
-system. Other publication formats can implement the same boundary without
-using disk-delta, as long as miles and the rollout system agree on version
-identity and rollout-visible weights.
+Disk-delta provides version and base identity, atomic file writes, and
+final-state checksums. miles runs `--custom-update-weight-post-write-path`
+after writing a version and after a resume deletes versions, so storage that
+needs an explicit commit makes the change visible before miles announces it.
+Disk-delta counts its directories from the launch, so `weight_v000001` holds
+weight version 0. Replica catch-up, admission, and activation belong to the
+external rollout service.
 
 ## Fully async rollout
 
@@ -275,9 +285,7 @@ With miles-managed engines, fully async rollout keeps generation in flight
 while the trainer consumes completed groups and takes optimizer steps. At each
 configured update boundary, the current schedule still synchronizes the active
 generation call before invoking the weight updater. Disk-delta host
-materialization occurs before the subsequent engine pause, but current `main`
-does not overlap an opaque external publication with that active generation
-call.
+materialization occurs before the subsequent engine pause.
 
 An external rollout service allows policy publication and replica preparation
 to proceed without draining the entire fleet. Only activation needs a short
