@@ -6,6 +6,7 @@ from miles.ray.specs.inference import (
     SESSION_SERVER_POOL_ID,
     compute_inference_controller_provider,
     compute_router_providers,
+    runs_session_servers,
 )
 from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.args.runtime import RolloutConfig
@@ -44,7 +45,7 @@ class RolloutExecutorSpec(BaseServeSpec):
             router_providers=compute_router_providers(ctx.args, capability=ctx.capability),
             session_server_provider=(
                 ctx.capability.static_worker_provider(pool_id=SESSION_SERVER_POOL_ID)
-                if ctx.args.use_session_server and ctx.args.sglang.models
+                if runs_session_servers(ctx.args)
                 else None
             ),
             inference_controller_provider=compute_inference_controller_provider(ctx.args, capability=ctx.capability),
