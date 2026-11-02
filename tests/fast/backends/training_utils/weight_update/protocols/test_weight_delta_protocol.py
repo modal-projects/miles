@@ -134,6 +134,18 @@ def test_a_resume_replays_the_history_in_order_after_deleting_what_came_later(tm
     assert [(name, kwargs) for _, name, kwargs in calls] == expected
 
 
+def test_without_engines_of_its_own_a_resume_only_cuts_the_history(tmp_path: Path):
+    """An external rollout service catches its engines up itself."""
+    delta_dir = tmp_path / "delta"
+    _publish(delta_dir, 1, 2, 3, 4)
+    protocol = _protocol(tmp_path, [])
+
+    _launch_exporting_nothing(protocol, 2)
+
+    assert _published(delta_dir) == ["weight_v000001", "weight_v000002"]
+    assert protocol.pop_metrics() == {}
+
+
 @pytest.mark.parametrize(
     "labels, sealed, unsealed, version, message",
     [

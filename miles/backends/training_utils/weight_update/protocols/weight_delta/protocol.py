@@ -40,6 +40,7 @@ from miles.backends.training_utils.weight_update.session import (
     maybe_resume_engines,
     set_weight_version,
 )
+from miles.backends.training_utils.weight_update.utils import engine_stat_metrics
 from miles.utils import async_utils
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.disk_delta import make_tensor_reader
@@ -336,6 +337,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
 
     def _apply(self, versions: Sequence[int]) -> None:
         updaters = list(self.cell_updaters_of_cell_id.values())
+        if not updaters:
+            return
         prepare_s = apply_s = 0.0
         for version in versions:
             manifest = str(version_dir(self._delta_dir, version) / "manifest.json")
@@ -351,8 +354,8 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                 maybe_resume_engines(self.args, updaters)
             prepare_s += prepared - started
             apply_s += time.monotonic() - prepared
-            self.update_weight_metrics.update(_engine_stats(prepare_replies, "prepare"))
-            self.update_weight_metrics.update(_engine_stats(apply_replies, "apply"))
+            self.update_weight_metrics.update(engine_stat_metrics(prepare_replies, "prepare"))
+            self.update_weight_metrics.update(engine_stat_metrics(apply_replies, "apply"))
         self.update_weight_metrics["perf/update_weights_prepare_s"] = prepare_s
         self.update_weight_metrics["perf/update_weights_apply_s"] = apply_s
 
@@ -431,16 +434,6 @@ def _call(updaters: Sequence[_RolloutCellUpdater], name: str, **kwargs) -> list:
         if isinstance(result, dict) and result.get("success") is False:
             updater.mark_errored(RuntimeError(f"{name} failed on a rollout engine: {result.get('message')}"))
     return results
-
-
-def _engine_stats(replies: Sequence, phase: str) -> dict[str, float]:
-    """Each numeric stat the engines report per GPU, at its largest: the slowest GPU sets the pace."""
-    gpus = [gpu for reply in replies if isinstance(reply, dict) for gpu in reply.get("stats") or () if gpu]
-    keys = {key for gpu in gpus for key, value in gpu.items() if isinstance(value, int | float)}
-    return {
-        f"perf/update_weights_engine_{phase}_{key}": max(gpu[key] for gpu in gpus if key in gpu)
-        for key in sorted(keys)
-    }
 
 
 def _raise_if_any_rank_failed(error: BaseException | None, doing: str) -> None:

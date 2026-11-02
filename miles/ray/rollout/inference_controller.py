@@ -10,6 +10,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.rollout.eval_fleet import EvalFleetInfo, EvalFleetPin, InferenceControllerEvalFleet
+from miles.ray.rollout.external_rollout import ExternalRollout
 from miles.ray.rollout.rollout_server import RolloutServer, create_rollout_servers
 from miles.ray.rollout.router_manager import resolve_router_addrs
 from miles.ray.rollout.server_cell import ServerCell, ServerCellMetadata
@@ -63,6 +64,9 @@ class InferenceController:
         self._eval_fleet: InferenceControllerEvalFleet | None = None
         self._watcher_disposers: list[StopWatchFn] = []
         self._ticker: SimpleTicker | None = None
+        self._external_rollout = (
+            ExternalRollout(args.rollout_external_control_url) if args.rollout_external_control_url else None
+        )
 
     @lock_exempt
     @init_once
@@ -283,6 +287,10 @@ class InferenceController:
         await asyncio.gather(*[cell.mark_weights_ready() for _, cell in updated_cells if cell.is_pending_weights])
 
         return checksum_results
+
+    @with_lock
+    async def update_external_rollout(self, weight_version: int) -> dict[str, float]:
+        return await self._external_rollout.serve(weight_version)
 
     @requires_lock
     async def _collect_update_checksums(

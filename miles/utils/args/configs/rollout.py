@@ -227,6 +227,25 @@ class RolloutRelatedConfig(BaseConfig):
             ),
         ),
     ] = None
+    rollout_external_url: A[
+        str | None,
+        Arg(
+            help=(
+                "Base URL of an external rollout service's generation endpoint. Miles launches no router or engines "
+                "of its own. The service's API key comes from the MILES_ROLLOUT_EXTERNAL_API_KEY environment "
+                "variable, as arguments are logged."
+            ),
+        ),
+    ] = None
+    rollout_external_control_url: A[
+        str | None,
+        Arg(
+            help=(
+                "Base URL of the external rollout service's weight API, set with --rollout-external-url: Miles "
+                "tells it each version it publishes and waits until the service serves it."
+            ),
+        ),
+    ] = None
     rollout_external_router_pd: A[
         bool,
         Arg(

@@ -41,7 +41,8 @@ from miles.utils.types import Sample
 
 from .generate_utils.generate_endpoint_utils import (
     apply_sample_max_response_len,
-    compute_routing_headers,
+    compute_request_headers,
+    generation_url,
     get_indexer_topk_from_response,
     router_routes_by_key,
 )
@@ -161,7 +162,7 @@ async def generate(
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = generation_url(args)
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -235,7 +236,7 @@ async def generate(
         if not sample.tokens:  # Initialize sample.tokens for the first turn
             sample.tokens = prompt_ids
 
-    headers = compute_routing_headers(args, sample)
+    headers = compute_request_headers(args, sample)
 
     output = await post(url, payload, headers=headers)
     if args.use_opd and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":

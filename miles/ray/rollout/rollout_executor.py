@@ -107,11 +107,20 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         args = self.args
         if args.starts_inference_engines:
             await resolve_router_addrs(args, router_providers=self._router_providers)
+        if args.starts_inference_engines or args.rollout_external_url is not None:
             await wait_session_server_ready(args, provider=self._session_server_provider)
         await self._refresh_inference_runtime_mut_state()
 
         # TODO make args immutable
-        init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+        init_tracking(
+            args,
+            primary=False,
+            router_addr=(
+                None
+                if args.rollout_external_url is not None
+                else f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+            ),
+        )
         object_store.init_instance(args, contribute_segment=False)
         if args.use_output_store:
             store = connect_output_store(output_store_backend_config(args))
