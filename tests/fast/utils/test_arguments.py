@@ -258,7 +258,9 @@ class TestRolloutExternalDerivation:
 
     def test_without_either_arg_rollout_stays_internal(self):
         """The default run keeps launching its own engines."""
-        args = SimpleNamespace(rollout_external_engine_addrs=None, custom_inference_engine_provider_path=None)
+        args = SimpleNamespace(
+            rollout_external_engine_addrs=None, custom_inference_engine_provider_path=None, rollout_external_url=None
+        )
 
         assert _compute_rollout_external(args) is False
 
@@ -4093,6 +4095,89 @@ class TestMilesValidateArgsHttpLora:
 
     def test_tensors_mode_accepts_check_lora_weight_equal(self, tmp_path):
         miles_validate_args(self._parse(tmp_path, ["--check-lora-weight-equal"]))
+
+
+_EXTERNAL_ROLLOUT_ARGS = [
+    "--rollout-external-url",
+    "https://rollout",
+    "--rollout-external-control-url",
+    "https://control",
+]
+_EXTERNAL_DISK_DELTA_ARGS = [
+    *_EXTERNAL_ROLLOUT_ARGS,
+    "--update-weight-transfer-mode",
+    "disk-delta",
+    "--fully-async",
+]
+
+
+class TestMilesValidateArgsExternalRollout:
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            (["--rollout-external-url", "https://rollout"], "set both"),
+            (_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode disk-delta"),
+            ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "disk-delta"], "fully async runs only"),
+            ([*_EXTERNAL_DISK_DELTA_ARGS, "--rollout-external-engine-addrs", "host:1"], "runs its own engines"),
+            (
+                [
+                    *_EXTERNAL_DISK_DELTA_ARGS,
+                    "--eval-interval",
+                    "5",
+                    "--eval-prompt-data",
+                    "aime",
+                    "/data/aime.jsonl",
+                ],
+                "eval during training",
+            ),
+            (
+                [
+                    *_EXTERNAL_DISK_DELTA_ARGS,
+                    *("--use-opd", "--opd-type", "sglang", "--opd-log-prob-top-k", "4"),
+                    *("--opd-top-k-strategy", "only-teacher"),
+                ],
+                "score the student",
+            ),
+            (
+                [*_EXTERNAL_DISK_DELTA_ARGS, "--megatron-config", encode_megatron_config("a", "b")],
+                "serves one policy",
+            ),
+        ],
+        ids=[
+            "one_url",
+            "not_a_delta_mode",
+            "not_fully_async",
+            "external_engines",
+            "eval",
+            "opd_student_scores",
+            "several_policies",
+        ],
+    )
+    def test_each_setup_an_external_rollout_does_not_support_is_refused_at_startup(self, extra, message):
+        args = _parse_megatron_args(extra)
+
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            miles_validate_args(args)
+
+    @pytest.mark.parametrize("mode", ["disk-delta"])
+    def test_an_external_rollout_starts_no_engines_of_miles_own(self, mode, tmp_path, monkeypatch):
+        """Nor does disk-delta need a rollout-host directory: the service materializes each version."""
+        args = _parse_megatron_args(
+            [
+                *_EXTERNAL_ROLLOUT_ARGS,
+                "--update-weight-transfer-mode",
+                mode,
+                "--fully-async",
+                "--update-weight-disk-dir",
+                str(tmp_path / "versions"),
+                "--hf-checkpoint",
+                str(tmp_path),
+            ]
+        )
+
+        miles_validate_args(args)
+
+        assert args.rollout_external and not args.starts_inference_engines
 
 
 class TestLoRAMergeForRollout:

@@ -625,7 +625,11 @@ def _compute_init_expected_num_cells(
 
 
 def _compute_rollout_external(args: argparse.Namespace) -> bool:
-    return args.rollout_external_engine_addrs is not None or args.custom_inference_engine_provider_path is not None
+    return (
+        args.rollout_external_engine_addrs is not None
+        or args.custom_inference_engine_provider_path is not None
+        or args.rollout_external_url is not None
+    )
 
 
 _BACKEND_ENGINE_PROVIDER_PATH = "miles.ray.specs.inference.backend_inference_engine_provider"
@@ -1525,6 +1529,32 @@ def miles_validate_args(args):
         assert args.prefill_num_servers is None, "P2P weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
 
+    if args.rollout_external_url is not None or args.rollout_external_control_url is not None:
+        assert (
+            args.rollout_external_url is not None and args.rollout_external_control_url is not None
+        ), "--rollout-external-url and --rollout-external-control-url name one external rollout: set both."
+        assert args.update_weight_transfer_mode == "disk-delta", (
+            "An external rollout service loads each version from --update-weight-disk-dir: it needs "
+            "--update-weight-transfer-mode disk-delta."
+        )
+        assert args.fully_async, (
+            "An external rollout service serves fully async runs only: the other rollout loops abort every "
+            "engine after each rollout, and the service lists none."
+        )
+        assert args.rollout_external_engine_addrs is None and args.custom_inference_engine_provider_path is None, (
+            "An external rollout service runs its own engines: it does not combine with "
+            "--rollout-external-engine-addrs or --custom-inference-engine-provider-path."
+        )
+        assert args.eval_interval is None, "An external rollout service does not serve eval during training yet."
+        assert not (
+            args.use_opd and args.opd_log_prob_top_k > 0
+        ), "An external rollout service does not score the student for --opd-log-prob-top-k yet."
+        model_ids = resolve_megatron_config(args, base_args={}).model_ids
+        assert len(model_ids) <= 1, (
+            f"An external rollout service serves one policy, and --megatron-config names {model_ids}: its "
+            "weight API carries one version stream."
+        )
+
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (
             "Disk-delta weight transfer mode is not compatible with --colocate. Colocate transfers "
@@ -1539,7 +1569,7 @@ def miles_validate_args(args):
             "--update-weight-transfer-mode=disk-delta requires --update-weight-disk-dir to point at "
             "a filesystem shared between the trainer and the rollout engines."
         )
-        assert args.update_weight_local_checkpoint_dir, (
+        assert args.update_weight_local_checkpoint_dir or args.rollout_external_url is not None, (
             "--update-weight-transfer-mode=disk-delta requires --update-weight-local-checkpoint-dir "
             "(a rollout-host-local directory, e.g. NVMe)."
         )
@@ -1623,7 +1653,9 @@ def miles_validate_args(args):
 
     if args.debug_train_only:
         args.rollout_num_gpus = 0
-    args.starts_inference_engines = not args.debug_train_only or args.eval_num_gpus > 0
+    args.starts_inference_engines = (
+        not args.debug_train_only or args.eval_num_gpus > 0
+    ) and args.rollout_external_url is None
 
     if args.use_critic and not args.debug_rollout_only:
         if args.offload_train is None:

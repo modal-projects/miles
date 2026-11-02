@@ -5,8 +5,9 @@ Simple single-turn generation.
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import (
     compute_prompt_ids_from_sample,
+    compute_request_headers,
     compute_request_payload,
-    compute_routing_headers,
+    generation_url,
     update_sample_from_response,
 )
 from miles.utils.http_utils import post
@@ -19,7 +20,7 @@ async def generate(input: GenerateFnInput, url: str | None = None) -> GenerateFn
     sample = input.sample
     sampling_params = input.sampling_params
     assert sample.status in {Sample.Status.PENDING, Sample.Status.ABORTED}, f"{sample.status=}"
-    url = url or f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = url or generation_url(args)
 
     prompt_ids = compute_prompt_ids_from_sample(input.state, sample)
 
@@ -54,7 +55,7 @@ async def generate(input: GenerateFnInput, url: str | None = None) -> GenerateFn
         sample.status = halt_status
         return GenerateFnOutput(samples=sample)
 
-    output = await post(url, payload, headers=compute_routing_headers(args, sample))
+    output = await post(url, payload, headers=compute_request_headers(args, sample))
     await update_sample_from_response(args, sample, payload=payload, output=output, tokenizer=input.state.tokenizer)
 
     return GenerateFnOutput(samples=sample)

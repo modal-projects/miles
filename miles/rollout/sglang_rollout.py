@@ -43,7 +43,8 @@ from miles.utils.types import Sample
 from .generate_utils.generate_endpoint_utils import (
     adopt_expanded_prompt_ids,
     apply_sample_max_response_len,
-    compute_routing_headers,
+    compute_request_headers,
+    generation_url,
     get_indexer_topk_from_response,
     router_routes_by_key,
     token_space_request_fields,
@@ -171,7 +172,7 @@ async def generate(
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = generation_url(args)
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -264,7 +265,7 @@ async def generate(
         # A partial-rollout resume resends the tokens SGLang already expanded, so nothing is expanded again.
         payload.update(token_space_request_fields(len(sample.tokens) if len(sample.response) > 0 else 0))
 
-    headers = compute_routing_headers(args, sample)
+    headers = compute_request_headers(args, sample)
 
     output = await post(url, payload, headers=headers)
     adopt_expanded_prompt_ids(sample, payload, output)

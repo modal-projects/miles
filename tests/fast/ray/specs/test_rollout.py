@@ -111,7 +111,16 @@ class TestRolloutExecutorSpec:
         assert kwargs["session_server_provider"] is None
         assert "session-server" not in capability.requested_static_pool_ids
 
-    def test_the_executor_is_given_the_way_to_reach_the_inference_controller(self):
+    def test_an_external_rollout_run_is_given_its_session_servers(self) -> None:
+        """Session servers front an external rollout too, so the executor must wait for the ones deployed."""
+        capability = FakeBackendCapability(static_provider=object())
+        config = make_rollout_config(use_session_server=True, rollout_external_url="https://rollout")
+        config = config.model_copy(update={"sglang": config.sglang.model_copy(update={"models": []})})
+        spec = RolloutExecutorSpec.create(config)
+
+        kwargs = spec.ctor_kwargs(_context(spec, capability))
+
+        assert kwargs["session_server_provider"] is capability.static_provider
         """Pinning the eval fleet is a call on the controller, so the executor must be able to address it."""
         capability = FakeBackendCapability(static_provider=object())
         spec = spec_rollout_executor()

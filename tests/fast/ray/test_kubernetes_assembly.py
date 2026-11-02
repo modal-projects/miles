@@ -460,6 +460,7 @@ class TestKubernetesDriverAssembly:
             num_epoch=3,
             debug_train_only=True,
             starts_inference_engines=False,
+            rollout_external_url=None,
             raw_megatron=SimpleNamespace(trainers=[]),
         )
 

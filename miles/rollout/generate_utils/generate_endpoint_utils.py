@@ -21,6 +21,7 @@ from miles.rollout.generate_utils.sampling_mask import (
     should_return_sampling_mask,
 )
 from miles.router.backend import make_router_backend
+from miles.utils.http_utils import rollout_external_headers
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 from miles.utils.media_refs import has_media, rollout_media_payload
 from miles.utils.output_store.plan import (
@@ -62,12 +63,20 @@ def compute_prompt_ids_from_sample(state, sample, tools=None):
         return state.tokenizer.encode(prompt, add_special_tokens=False)
 
 
+def generation_url(args) -> str:
+    base = args.rollout_external_url or f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    return f"{base.rstrip('/')}/generate"
+
+
 def router_routes_by_key(args) -> bool:
     return make_router_backend(args).routes_by_key(args.sglang.models)
 
 
-def compute_routing_headers(args, sample: Sample) -> dict[str, str]:
-    return make_router_backend(args).routing_headers(sample.routing_key, args.sglang.models)
+def compute_request_headers(args, sample: Sample) -> dict[str, str]:
+    headers = make_router_backend(args).routing_headers(sample.routing_key, args.sglang.models)
+    if args.rollout_external_url is not None:
+        headers |= rollout_external_headers()
+    return headers
 
 
 def apply_sample_max_response_len(sampling_params: dict[str, Any], sample: Sample) -> dict[str, Any]:

@@ -276,3 +276,26 @@ def test_routed_experts_cover_the_prompt_the_engine_served():
     asyncio.run(update_sample_from_response(args, sample, {"input_ids": sample.tokens}, output))
 
     assert sample.rollout_routed_experts.shape == (served_prompt_tokens + len(response) - 1, layers, topk)
+
+
+def test_generation_goes_to_the_external_rollout_or_else_to_miles_own_router():
+    external = SimpleNamespace(rollout_external_url="https://rollout/", sglang_router_ip=None, sglang_router_port=None)
+    own = SimpleNamespace(rollout_external_url=None, sglang_router_ip="10.0.0.1", sglang_router_port=3000)
+
+    assert generate_endpoint_utils.generation_url(external) == "https://rollout/generate"
+    assert generate_endpoint_utils.generation_url(own) == "http://10.0.0.1:3000/generate"
+
+
+def test_only_requests_to_the_external_rollout_carry_its_api_key(monkeypatch):
+    monkeypatch.setenv("MILES_ROLLOUT_EXTERNAL_API_KEY", "key")
+    router = SimpleNamespace(routing_headers=lambda key, models: {"X-Routing-Key": key})
+    monkeypatch.setattr(generate_endpoint_utils, "make_router_backend", lambda args: router)
+    sample = SimpleNamespace(routing_key="k")
+    external = SimpleNamespace(rollout_external_url="https://rollout", sglang=SimpleNamespace(models=[]))
+    own = SimpleNamespace(rollout_external_url=None, sglang=SimpleNamespace(models=[]))
+
+    assert generate_endpoint_utils.compute_request_headers(external, sample) == {
+        "X-Routing-Key": "k",
+        "Authorization": "Bearer key",
+    }
+    assert generate_endpoint_utils.compute_request_headers(own, sample) == {"X-Routing-Key": "k"}

@@ -48,8 +48,10 @@ from miles.utils.hot_restart import (
     wait_trainers_idle,
     wait_until_worker_not_initialized,
 )
+from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.test_utils.fault_injector.controller import reach_fault_hook_async
 from miles.utils.test_utils.fault_injector.models import FaultHookName
+from miles.utils.tracking_utils import tracking
 from miles.utils.workers.backend_capability.base import BackendCapability
 from miles.utils.workers.types import DeployComponent, DeploymentIdentity
 from miles.utils.workers.worker_handle import BaseWorkerHandle
@@ -421,6 +423,11 @@ async def update_weights(
     )
 
     if output.weight_version is not None:
+        if args.rollout_external_url is not None:
+            metrics = await inference_controller.update_external_rollout(output.weight_version)
+            if rollout_id is not None:
+                metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
+                tracking.log(args, metrics, step_key="rollout/step")
         await rollout_executor.set_weight_version(output.weight_version, trainer_model_id=trainer_model_id)
 
 
@@ -513,7 +520,7 @@ async def create_rollout_components(
 ) -> RolloutComponents:
     if args.starts_inference_engines:
         await resolve_router_addrs(args, router_providers=compute_router_providers(args, capability=capability))
-
+    if args.starts_inference_engines or args.rollout_external_url is not None:
         session_server_provider = (
             capability.static_worker_provider(pool_id=SESSION_SERVER_POOL_ID) if args.use_session_server else None
         )
