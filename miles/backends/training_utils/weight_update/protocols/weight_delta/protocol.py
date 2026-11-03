@@ -27,6 +27,7 @@ from miles.backends.training_utils.weight_update.protocols.weight_delta.encoder 
 )
 from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import (
     OwnerWriter,
+    is_published,
     is_raw,
     seal,
     version_dir,
@@ -234,8 +235,6 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                 if self._error is None:
                     self._write_owner_file()
                 self._record = self._writer.finish()
-                if self._error is None:
-                    self._run_post_write_hook(self._directory)
             except Exception as error:
                 self._error = self._error or error
         _raise_if_any_rank_failed(self._error, "exporting this version")
@@ -258,9 +257,14 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
                     base_version=self._version,
                     target_version=weight_version,
                 )
-                self._run_post_write_hook(self._directory)
             except Exception as caught:
                 error = caught
+        _raise_if_any_rank_failed(error, f"sealing version {weight_version}")
+        # After the manifest, so the hook publishes each rank's file and the manifest at once.
+        try:
+            self._run_post_write_hook(self._directory)
+        except Exception as caught:
+            error = caught
         _raise_if_any_rank_failed(error, f"publishing version {weight_version}")
         self._version = weight_version
         if dist.get_rank() == 0:
@@ -289,9 +293,7 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             if (match := _VERSION_DIR_NAME.fullmatch(entry.name))
         )
         history = [v for v in published if v <= version]
-        if history and not (
-            history[-1] == version and (version_dir(self._delta_dir, version) / "manifest.json").exists()
-        ):
+        if history and not (history[-1] == version and is_published(version_dir(self._delta_dir, version))):
             raise RuntimeError(
                 f"{self._delta_dir} holds no published version {version}, the trainer's: the run stopped between "
                 f"saving it and publishing it, so resume from an earlier save"

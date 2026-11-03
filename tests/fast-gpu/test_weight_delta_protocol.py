@@ -203,7 +203,7 @@ def test_each_version_brings_the_previous_bytes_to_exactly_the_export(
         for name, data in applied.items():
             assert torch.equal(data, weights[name].view(-1).view(torch.uint8)), name
         assert raw_names == ["model.norm.weight"]
-        assert hooked[-2:] == [["owner-00000.safetensors"], ["manifest.json", "owner-00000.safetensors"]]
+        assert hooked == [["manifest.json", "owner-00000.safetensors"]] * version
         exported = sum(tensor.numel() * tensor.element_size() for tensor in weights.values())
         changed = sum(changed for _, _, changed in TENSORS.values())
         metrics = protocol.pop_metrics()
