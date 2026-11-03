@@ -127,6 +127,17 @@ def seal(
     return path
 
 
+def is_published(directory: Path) -> bool:
+    manifest = directory / "manifest.json"
+    if not manifest.is_file():
+        return False
+    for file in json.loads(manifest.read_bytes())["files"]:
+        path = directory / file["name"]
+        if not path.is_file() or path.stat().st_size != file["nbytes"]:
+            return False
+    return True
+
+
 def _regions(table: str, rows: Sequence[Mapping]) -> dict[str, np.ndarray]:
     fields = ("offset", "nbytes", "inner_offset", "inner_nbytes")
     return {f"{table}.{field}": np.array([row[field] for row in rows], dtype=np.int64) for field in fields}
