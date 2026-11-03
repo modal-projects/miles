@@ -1,3 +1,4 @@
+import json
 import re
 
 import pytest
@@ -89,8 +90,10 @@ def _publish(delta_dir: Path, *versions: int, sealed: bool = True) -> None:
     for version in versions:
         directory = version_dir(delta_dir, version)
         directory.mkdir(parents=True)
+        (directory / "owner-00000.safetensors").write_bytes(b"data")
         if sealed:
-            (directory / "manifest.json").write_text("{}")
+            files = [{"name": "owner-00000.safetensors", "nbytes": 4}]
+            (directory / "manifest.json").write_text(json.dumps({"files": files}))
 
 
 def _published(delta_dir: Path) -> list[str]:
@@ -170,6 +173,23 @@ def test_a_launch_that_cannot_start_from_the_history_is_refused_before_anything_
 
     assert _published(delta_dir) == before
     assert {name for _, name, _ in calls} == {"get_weight_version"}
+
+
+@pytest.mark.parametrize("owner", [None, b"da"], ids=["missing", "short"])
+def test_a_version_whose_listed_file_is_missing_or_short_is_not_published(tmp_path: Path, owner: bytes | None):
+    delta_dir = tmp_path / "delta"
+    _publish(delta_dir, 1, 2)
+    path = version_dir(delta_dir, 2) / "owner-00000.safetensors"
+    if owner is None:
+        path.unlink()
+    else:
+        path.write_bytes(owner)
+    before = _published(delta_dir)
+
+    with pytest.raises(RuntimeError, match=re.escape("holds no published version 2")):
+        _protocol(tmp_path, [_Engine([], 0)]).begin_sync(2, iter_buckets=None)
+
+    assert _published(delta_dir) == before
 
 
 def test_engines_resume_even_when_an_update_fails(tmp_path: Path):
