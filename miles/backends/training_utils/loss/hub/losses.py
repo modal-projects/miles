@@ -114,7 +114,7 @@ def policy_loss_function(
     total_lengths = batch["total_lengths"]
     max_seq_lens = batch.get("max_seq_lens", None)
     calculate_entropy = args.entropy_coef != 0 or args.observe_training_entropy
-    rollout_sampling_mask = get_rollout_sampling_masks(batch) if args.use_sampling_support_replay else None
+    rollout_sampling_mask = get_rollout_sampling_masks(batch) if args.use_rollout_sampling_support_replay else None
 
     log_probs_and_entropy = get_log_probs_and_entropy(
         logits,
