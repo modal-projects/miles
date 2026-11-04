@@ -86,7 +86,7 @@ def test_each_later_version_names_the_start_and_reports_the_wait_and_the_slowest
         "perf/update_weights_engine_prepare_read_s": 2.0,
         "perf/update_weights_engine_apply_gpu_s": 0.1,
     }
-    assert requests[-1][:3] == ("POST", "/versions", {"version": 4, "start": 3, "start_id": "s1"})
+    assert requests[-1][:3] == ("POST", "/versions", {"version": 4, "base_version": 3, "start": 3, "start_id": "s1"})
 
 
 def test_a_call_the_platform_lost_is_sent_again_and_a_refusal_stops_the_run(service):
@@ -102,6 +102,8 @@ def test_a_call_the_platform_lost_is_sent_again_and_a_refusal_stops_the_run(serv
     with pytest.raises(httpx.HTTPStatusError, match="409"):
         _serve(ExternalRollout("https://control"), 0, 1, 2)
     assert [path for _, path, _, _ in requests] == ["/start", "/status", "/versions", "/versions", "/versions"]
+    # The call sent again names the same base; the next version follows the one served.
+    assert [(body["version"], body["base_version"]) for _, _, body, _ in requests[2:]] == [(1, 0), (1, 0), (2, 1)]
 
 
 def test_a_reply_slower_than_its_endpoint_allows_is_followed_through_its_redirect(service):

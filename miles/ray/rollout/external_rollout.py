@@ -17,6 +17,7 @@ class ExternalRollout:
     def __init__(self, control_url: str) -> None:
         self._url = control_url.rstrip("/")
         self._start: dict | None = None
+        self._served: int | None = None
 
     async def serve(self, version: int) -> dict[str, float]:
         """The first version starts the run and waits for one engine; later ones, for every engine taking traffic."""
@@ -27,8 +28,10 @@ class ExternalRollout:
             while not (await self._call("/status", None))["serving"].get(str(version)):
                 await asyncio.sleep(_STATUS_POLL_S)
             logger.info(f"the external rollout serves version {version}")
+            self._served = version
             return {}
-        reply = await self._call("/versions", {"version": version, **self._start})
+        reply = await self._call("/versions", {"version": version, "base_version": self._served, **self._start})
+        self._served = version
         stats = [engine["stats"] or {} for engine in reply["engines"].values()]
         metrics = {
             "perf/update_weights_external_s": reply["seconds"],

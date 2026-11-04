@@ -233,7 +233,7 @@ miles calls three endpoints on `--rollout-external-control-url`:
 |---|---|---|
 | `POST /start {"version": S}` | Once, at the first weight sync of a run or a resume | `{"start_id": ...}` |
 | `GET /status` | After `/start`, until a replica serves `S` | `{"serving": {"<version>": <replicas>}}` |
-| `POST /versions {"version": N, "start": S, "start_id": ...}` | After publishing each later version | Once every replica taking traffic serves `N`: `{"seconds": ..., "engines": {...}}` |
+| `POST /versions {"version": N, "base_version": B, "start": S, "start_id": ...}` | After publishing each later version; `B` is the version miles saw served last, which `N` builds on | Once every replica taking traffic serves `N`: `{"seconds": ..., "engines": {...}}` |
 
 `S` is the trainer's weight version when it starts or resumes. Before `/start`,
 a resume deletes the versions published after `S`, so the service retires any
