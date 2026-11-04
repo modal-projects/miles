@@ -269,7 +269,9 @@ is visible. The publication contract therefore needs:
 5. an activation acknowledgement before a replica advertises the new version.
 
 Both delta modes provide version and base identity and atomic file writes.
-disk-delta carries final-state checksums. miles runs `--custom-update-weight-post-write-path`
+disk-delta carries final-state checksums; weight-delta carries checksums of the
+bytes each version changes only under `--check-weight-transfer-checksum`, and
+engines check them after applying. miles runs `--custom-update-weight-post-write-path`
 after writing a version and after a resume deletes versions, so storage that
 needs an explicit commit makes the change visible before miles announces it.
 weight-delta names each version's directory by its weight version; disk-delta
