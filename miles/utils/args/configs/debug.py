@@ -170,7 +170,8 @@ class DebugConfig(BaseConfig):
         Arg(
             action=argparse.BooleanOptionalAction,
             help="Hash every P2P weight write on the sending trainer rank and on the receiving engine rank and "
-            "fail the write when they differ. Defaults on under --ci-test.",
+            "fail the write when they differ; with weight delta, publish each changed tensor's checksum, which "
+            "the engines check after applying. Defaults on under --ci-test.",
         ),
     ] = None
     enable_event_analyzer: A[
