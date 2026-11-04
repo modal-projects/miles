@@ -130,10 +130,13 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             self.args.weight_delta_codec,
             torch.device("cuda", torch.cuda.current_device()),
             self.args.update_weight_buffer_size,
+            checksums=self.args.check_weight_transfer_checksum,
             with_changed_bits=self._ever_changed is not None,
         )
         self._directory = version_dir(self._delta_dir, weight_version)
-        self._writer = OwnerWriter(self._directory, dist.get_rank())
+        self._writer = OwnerWriter(
+            self._directory, dist.get_rank(), checksums=self.args.check_weight_transfer_checksum
+        )
         return True
 
     def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:

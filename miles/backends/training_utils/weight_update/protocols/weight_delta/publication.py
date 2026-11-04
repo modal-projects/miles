@@ -58,15 +58,16 @@ class _Tensor(NamedTuple):
     offset: int  # in the payload
     nbytes: int
     inner_nbytes: int
-    checksum: int
+    checksum: int | None
 
 
 class OwnerWriter:
     """One trainer GPU's file for one version: the payload of its changed tensors, and as columns where
     each tensor's bytes lie in it. Ragged columns are flat values plus each row's end."""
 
-    def __init__(self, directory: Path, owner: int) -> None:
+    def __init__(self, directory: Path, owner: int, *, checksums: bool) -> None:
         self._path = directory / f"owner-{owner:05d}.safetensors"
+        self._checksums = checksums
         self._tensors: list[_Tensor] = []
         self._chunks: list[Mapping] = []
         self._frames: list[Mapping] = []
@@ -76,7 +77,8 @@ class OwnerWriter:
         self._payload_nbytes = 0
 
     def add_raw(self, name: str, dtype: str, shape: Sequence[int], data) -> None:
-        self._add(name, dtype, shape, data, raw=True, inner_nbytes=0, chunks=(), frames=(), checksum=checksum(data))
+        raw_checksum = checksum(data) if self._checksums else None
+        self._add(name, dtype, shape, data, raw=True, inner_nbytes=0, chunks=(), frames=(), checksum=raw_checksum)
 
     def add_xor(
         self,
@@ -86,9 +88,9 @@ class OwnerWriter:
         frames: Sequence[Mapping],
         payload,
         zstd: Mapping,
-        checksum: int,
+        checksum: int | None,
     ) -> None:
-        """checksum: of the tensor's new bytes where they changed."""
+        """checksum: of the tensor's new bytes where they changed, None without checksums."""
         self._add(
             name,
             dtype,
@@ -117,7 +119,11 @@ class OwnerWriter:
             "tensors.inner_nbytes": np.array([tensor.inner_nbytes for tensor in tensors], dtype=np.int64),
             "tensors.chunk_end": np.array(self._chunk_ends, dtype=np.int64),
             "tensors.frame_end": np.array(self._frame_ends, dtype=np.int64),
-            "tensors.checksum": np.array([tensor.checksum for tensor in tensors], dtype=np.uint64),
+            **(
+                {"tensors.checksum": np.array([tensor.checksum for tensor in tensors], dtype=np.uint64)}
+                if self._checksums
+                else {}
+            ),
             **_regions("chunks", self._chunks),
             **_regions("frames", self._frames),
             "tensors.name": np.frombuffer(b"".join(names), dtype=np.uint8),

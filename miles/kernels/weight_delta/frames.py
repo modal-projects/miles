@@ -33,7 +33,14 @@ def _checksum_terms(word_indices, words):
 
 @triton.jit(do_not_specialize=["nframes"])
 def _xor_frames_kernel(
-    table, nframes, tile_counts, tile_last_positions, tile_checksums, TILE: tl.constexpr, BLOCK_WORDS: tl.constexpr
+    table,
+    nframes,
+    tile_counts,
+    tile_last_positions,
+    tile_checksums,
+    TILE: tl.constexpr,
+    BLOCK_WORDS: tl.constexpr,
+    CHECKSUM: tl.constexpr,
 ):
     frame = tl.program_id(0)
     tile = tl.program_id(1)
@@ -60,10 +67,12 @@ def _xor_frames_kernel(
         count += tl.sum(bytes_changed.to(tl.int32), axis=0)
         top = tl.where((xor >> 24) != 0, 3, tl.where((xor >> 16) != 0, 2, tl.where((xor >> 8) != 0, 1, 0)))
         last = tl.maximum(last, tl.max(tl.where(xor != 0, offsets * 4 + top, -1), axis=0))
-        checksum += tl.sum(_checksum_terms(first_word + offsets, new & ((changed >> 7) * 255)), axis=0)
+        if CHECKSUM:
+            checksum += tl.sum(_checksum_terms(first_word + offsets, new & ((changed >> 7) * 255)), axis=0)
     tl.store(tile_counts + frame * tl.num_programs(1) + tile, count)
     tl.store(tile_last_positions + frame * tl.num_programs(1) + tile, last)
-    tl.store(tile_checksums + frame * tl.num_programs(1) + tile, checksum.to(tl.int64, bitcast=True))
+    if CHECKSUM:
+        tl.store(tile_checksums + frame * tl.num_programs(1) + tile, checksum.to(tl.int64, bitcast=True))
 
 
 @dataclass(frozen=True)
@@ -72,13 +81,13 @@ class FrameChanges:
     holds its target address, length, other address and first word in its tensor; per tile of
     TILE_NBYTES, ``tile_counts`` holds the changed bytes, ``tile_last_positions`` the last one's
     position in the frame, or -1, and ``tile_checksums`` the checksum of the changed bytes' new values
-    (publication.checksum), as int64 bits."""
+    (publication.checksum), as int64 bits, or None without checksums."""
 
     frame_nbytes: int
     table: torch.Tensor
     tile_counts: torch.Tensor
     tile_last_positions: torch.Tensor
-    tile_checksums: torch.Tensor
+    tile_checksums: torch.Tensor | None
 
     @property
     def counts(self) -> torch.Tensor:
@@ -86,7 +95,9 @@ class FrameChanges:
         return self.tile_counts.sum(dim=1, dtype=torch.int64)
 
 
-def xor_frames_(targets: Sequence[torch.Tensor], others: Sequence[torch.Tensor], frame_nbytes: int) -> FrameChanges:
+def xor_frames_(
+    targets: Sequence[torch.Tensor], others: Sequence[torch.Tensor], frame_nbytes: int, *, checksums: bool
+) -> FrameChanges:
     """XORs each of ``others`` into its target in place and finds what changed in each frame of
     ``frame_nbytes``; queued on the current stream. Both start 4-byte aligned; a target also owns
     the bytes up to its next multiple of 4."""
@@ -121,16 +132,18 @@ def xor_frames_(targets: Sequence[torch.Tensor], others: Sequence[torch.Tensor],
     table = torch.tensor(rows, dtype=torch.int64, pin_memory=True).to(device, non_blocking=True)
     tile_counts = torch.empty((nframes, tiles), dtype=torch.int32, device=device)
     tile_last_positions = torch.empty((nframes, tiles), dtype=torch.int32, device=device)
-    tile_checksums = torch.empty((nframes, tiles), dtype=torch.int64, device=device)
+    tile_checksums = torch.empty((nframes, tiles), dtype=torch.int64, device=device) if checksums else None
     if nframes:
         _xor_frames_kernel[(nframes, tiles)](
             table,
             nframes,
             tile_counts,
             tile_last_positions,
-            tile_checksums,
+            # Without checksums the kernel writes none.
+            tile_counts if tile_checksums is None else tile_checksums,
             TILE=TILE_NBYTES,
             BLOCK_WORDS=BLOCK_NBYTES // 4,
+            CHECKSUM=checksums,
             num_warps=4,
         )
     return FrameChanges(frame_nbytes, table, tile_counts, tile_last_positions, tile_checksums)

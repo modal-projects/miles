@@ -56,10 +56,10 @@ def test_fp32_tensors_and_tensors_of_at_most_one_dimension_are_raw(dtype, shape,
 
 def test_a_version_is_its_owner_files_and_a_manifest_that_lists_them(tmp_path):
     directory = publication.version_dir(tmp_path, 5)
-    changed = publication.OwnerWriter(directory, 0)
+    changed = publication.OwnerWriter(directory, 0, checksums=True)
     changed.add_raw("a.bias", "BF16", [2], b"\x01\x02\x03\x04")
     changed.add_xor("b.weight", "U8", [4, 4], FRAMES, b"zstd!!", ZSTD, XOR_CHECKSUM)
-    unchanged = publication.OwnerWriter(directory, 7)
+    unchanged = publication.OwnerWriter(directory, 7, checksums=True)
 
     path = publication.seal(
         directory, [unchanged.finish(), changed.finish()], codec="gap-zstd", base_version=4, target_version=5
@@ -74,7 +74,7 @@ def test_a_version_is_its_owner_files_and_a_manifest_that_lists_them(tmp_path):
 def test_each_tensor_reads_back_from_its_columns_and_starts_on_the_alignment(tmp_path):
     second_frame = {"offset": 1 << 20, "nbytes": 8, "inner_offset": 16, "inner_nbytes": 3}
     two_frames = {"inner_nbytes": 19, "chunks": [{"offset": 0, "nbytes": 5, "inner_offset": 0, "inner_nbytes": 19}]}
-    writer = publication.OwnerWriter(tmp_path, 0)
+    writer = publication.OwnerWriter(tmp_path, 0, checksums=True)
     writer.add_raw("a.bias", "BF16", [3], b"abcdef")
     writer.add_xor("b.weight", "U8", [4, 4], FRAMES, b"zstd!!", ZSTD, 1)
     writer.add_xor("c.weight", "BF16", [2, 262146], [*FRAMES, second_frame], b"chunk", two_frames, 2**64 - 1)
@@ -91,8 +91,22 @@ def test_each_tensor_reads_back_from_its_columns_and_starts_on_the_alignment(tmp
     assert all(offset % publication.ALIGNMENT == 0 for _, _, _, _, offset, *_ in rows)
 
 
+def test_without_checksums_a_file_has_no_checksum_column_and_the_same_tensors(tmp_path):
+    files = {}
+    for checksums in (True, False):
+        writer = publication.OwnerWriter(tmp_path / str(checksums), 0, checksums=checksums)
+        writer.add_raw("a.bias", "BF16", [3], b"abcdef")
+        writer.add_xor("b.weight", "U8", [4, 4], FRAMES, b"zstd!!", ZSTD, XOR_CHECKSUM)
+        writer.finish()
+        files[checksums] = tmp_path / str(checksums) / "owner-00000.safetensors"
+
+    with safe_open(files[False], framework="numpy") as owner:
+        assert "tensors.checksum" not in owner.keys()
+    assert _read_owner_file(files[False]) == _read_owner_file(files[True])
+
+
 def test_an_owner_whose_tensors_did_not_change_writes_nothing(tmp_path):
-    assert publication.OwnerWriter(tmp_path / "weight_v000001", 0).finish() is None
+    assert publication.OwnerWriter(tmp_path / "weight_v000001", 0, checksums=True).finish() is None
     assert not (tmp_path / "weight_v000001").exists()
 
 
@@ -170,7 +184,7 @@ def test_one_wrong_byte_changes_the_checksum_wherever_it_is():
 
 
 def test_a_raw_tensor_carries_the_checksum_of_all_its_bytes(tmp_path):
-    writer = publication.OwnerWriter(tmp_path, 0)
+    writer = publication.OwnerWriter(tmp_path, 0, checksums=True)
     writer.add_raw("a.bias", "BF16", [3], b"abcdef")
     writer.finish()
 

@@ -21,14 +21,13 @@ BITS_SLICE_NBYTES = 1 << 26
 
 @dataclass(frozen=True)
 class EncodedTensor:
-    """A changed tensor's frame records, how many of its bytes changed, which when the encoder was
-    asked (changed_bits), and the checksum of its new bytes where they changed. Its payload and Zstd
-    record come from finish."""
+    """A changed tensor's frames and changed byte count, plus, if the encoder was asked, which bytes
+    changed (changed_bits) and their checksum. Its payload and Zstd record come from finish."""
 
     frames: list[dict]
     changed_nbytes: int
     changed_bits: torch.Tensor | None
-    checksum: int
+    checksum: int | None
 
 
 class DeltaEncoder:
@@ -38,12 +37,21 @@ class DeltaEncoder:
     max_pending_nbytes of them wait for the outer Zstd. ``finish`` returns once every payload is on
     the host."""
 
-    def __init__(self, codec: str, device: torch.device, max_pending_nbytes: int, with_changed_bits: bool = False):
+    def __init__(
+        self,
+        codec: str,
+        device: torch.device,
+        max_pending_nbytes: int,
+        *,
+        checksums: bool,
+        with_changed_bits: bool = False,
+    ):
         if codec not in CODECS:
             raise ValueError(f"weight-delta codec must be one of {CODECS}, got {codec!r}")
         self.device = torch.device(device)
         self._max_pending_nbytes = max_pending_nbytes
         self._with_changed_bits = with_changed_bits
+        self._checksums = checksums
         self._snappy = NvcompCompressor("snappy", self.device) if codec == "snappy-zstd" else None
         self._zstd = NvcompCompressor("zstd", self.device)
         self._padding = torch.zeros(ALIGNMENT - 1, dtype=torch.uint8, device=self.device)
@@ -90,12 +98,15 @@ class DeltaEncoder:
                     with torch.cuda.stream(self._download_stream):
                         previous.copy_(current, non_blocking=True)
                 stream.wait_stream(self._upload_stream)
-                changes = xor_frames_(xors, currents, FRAME_NBYTES)
+                changes = xor_frames_(xors, currents, FRAME_NBYTES, checksums=self._checksums)
                 tensor_frames = [(xor.numel() + FRAME_NBYTES - 1) // FRAME_NBYTES for xor in xors]
                 frame_counts = _split(changes.counts.tolist(), tensor_frames)
-                frame_checksums = _split(
-                    changes.tile_checksums.cpu().numpy().view(np.uint64).sum(axis=1, dtype=np.uint64), tensor_frames
-                )
+                frame_checksums = None
+                if self._checksums:
+                    frame_checksums = _split(
+                        changes.tile_checksums.cpu().numpy().view(np.uint64).sum(axis=1, dtype=np.uint64),
+                        tensor_frames,
+                    )
                 changed_frames = [[i for i, count in enumerate(counts) if count] for counts in frame_counts]
                 changed_tensors = [index for index, indices in enumerate(changed_frames) if indices]
                 if not changed_tensors:
@@ -129,7 +140,7 @@ class DeltaEncoder:
                 }
                 for i, (inner_offset, inner_nbytes) in zip(changed_frames[index], layout, strict=True)
             ]
-            checksum = int(np.sum(frame_checksums[index], dtype=np.uint64))
+            checksum = None if frame_checksums is None else int(np.sum(frame_checksums[index], dtype=np.uint64))
             encoded[index] = EncodedTensor(frame_records, sum(frame_counts[index]), tensor_bits, checksum)
         return encoded
 

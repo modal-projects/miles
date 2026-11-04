@@ -63,7 +63,7 @@ def _encode(pairs: list[tuple[torch.Tensor, torch.Tensor]], frame_nbytes: int = 
     """Both kernels over a batch, each frame's encoding 16 bytes past the previous one's end, on a
     buffer filled with FILL. Returns the targets, counts, buffer and offsets."""
     targets = [_target(previous) for previous, _ in pairs]
-    changes = xor_frames_(targets, [current for _, current in pairs], frame_nbytes)
+    changes = xor_frames_(targets, [current for _, current in pairs], frame_nbytes, checksums=True)
     checksums = changes.tile_checksums.cpu().numpy().view(np.uint64).sum(axis=1, dtype=np.uint64)
     counts = changes.counts.tolist()
     offsets, end = [], 0
@@ -124,6 +124,20 @@ def test_a_batch_of_every_case_matches_the_reference():
     _check(pairs, *_encode(pairs))
 
 
+def test_without_checksums_the_xor_finds_the_same_changes_and_no_checksums():
+    pairs = [_pair(nbytes, changed, seed) for seed, (nbytes, changed) in enumerate(CASES.values())]
+    targets = {checksums: [_target(previous) for previous, _ in pairs] for checksums in (True, False)}
+    changes = {
+        checksums: xor_frames_(targets[checksums], [current for _, current in pairs], MIB, checksums=checksums)
+        for checksums in (True, False)
+    }
+
+    assert changes[False].tile_checksums is None
+    assert torch.equal(changes[False].tile_counts, changes[True].tile_counts)
+    assert torch.equal(changes[False].tile_last_positions, changes[True].tile_last_positions)
+    assert all(torch.equal(a, b) for a, b in zip(targets[False], targets[True], strict=True))
+
+
 def test_the_largest_gap_fits_a_16_mib_frame():
     pairs = [_pair(1 << 24, [(1 << 24) - 1], seed=0)]
 
@@ -148,17 +162,31 @@ def test_the_largest_gap_fits_a_16_mib_frame():
 def test_what_the_kernels_cannot_take_is_refused(case: str):
     tensor = torch.zeros(MIB, dtype=torch.uint8, device="cuda")
     call, match = {
-        "frame not a power of two": (lambda: xor_frames_([tensor], [tensor.clone()], 3 * TILE_NBYTES), "power of two"),
-        "frame under a tile": (lambda: xor_frames_([tensor], [tensor.clone()], TILE_NBYTES // 2), "power of two"),
-        "lengths differ": (lambda: xor_frames_([tensor], [tensor[:-1].clone()], MIB), "^pair 0: "),
-        "not uint8": (lambda: xor_frames_([tensor.view(torch.int16)], [tensor.view(torch.int16)], MIB), "^pair 0: "),
-        "not 4-byte aligned": (lambda: xor_frames_([tensor[1:]], [tensor[1:].clone()], MIB), "^pair 0: "),
+        "frame not a power of two": (
+            lambda: xor_frames_([tensor], [tensor.clone()], 3 * TILE_NBYTES, checksums=True),
+            "power of two",
+        ),
+        "frame under a tile": (
+            lambda: xor_frames_([tensor], [tensor.clone()], TILE_NBYTES // 2, checksums=True),
+            "power of two",
+        ),
+        "lengths differ": (lambda: xor_frames_([tensor], [tensor[:-1].clone()], MIB, checksums=True), "^pair 0: "),
+        "not uint8": (
+            lambda: xor_frames_([tensor.view(torch.int16)], [tensor.view(torch.int16)], MIB, checksums=True),
+            "^pair 0: ",
+        ),
+        "not 4-byte aligned": (
+            lambda: xor_frames_([tensor[1:]], [tensor[1:].clone()], MIB, checksums=True),
+            "^pair 0: ",
+        ),
         "offsets not one per frame": (
-            lambda: encode_gap_frames(xor_frames_([tensor], [tensor.clone()], MIB), tensor.clone(), [0, 0]),
+            lambda: encode_gap_frames(
+                xor_frames_([tensor], [tensor.clone()], MIB, checksums=True), tensor.clone(), [0, 0]
+            ),
             "one per frame",
         ),
         "gap frame over 16 MiB": (
-            lambda: encode_gap_frames(xor_frames_([], [], 1 << 25), tensor.clone(), []),
+            lambda: encode_gap_frames(xor_frames_([], [], 1 << 25, checksums=True), tensor.clone(), []),
             "at most 16 MiB",
         ),
     }[case]

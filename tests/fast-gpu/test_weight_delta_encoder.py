@@ -80,7 +80,7 @@ def test_exactly_the_changed_frames_decode_back_from_each_payload(device: torch.
     pairs = [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
     snapshots = [previous.clone() for previous, _ in pairs]
 
-    encoder = DeltaEncoder(codec, device, MAX_PENDING_NBYTES, with_changed_bits=True)
+    encoder = DeltaEncoder(codec, device, MAX_PENDING_NBYTES, checksums=True, with_changed_bits=True)
     encoded = encoder.encode(pairs)
     payloads, zstds = encoder.finish()
     torch.cuda.synchronize()
@@ -120,7 +120,9 @@ def test_the_payloads_are_the_same_whether_zstd_runs_once_or_after_every_batch(d
         [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
         for _ in range(2)
     )
-    once, every_batch = DeltaEncoder(codec, device, MAX_PENDING_NBYTES), DeltaEncoder(codec, device, 1)
+    once, every_batch = DeltaEncoder(codec, device, MAX_PENDING_NBYTES, checksums=True), DeltaEncoder(
+        codec, device, 1, checksums=True
+    )
 
     encoded_once = once.encode(pairs_once)
     encoded_every_batch = [result for pair in pairs_every_batch for result in every_batch.encode([pair])]
@@ -150,7 +152,7 @@ def test_a_pair_the_encoder_cannot_take_is_refused_by_its_index(device: torch.de
     }[case]()
 
     with pytest.raises(ValueError, match="^pair 1: "):
-        DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES).encode([good, bad])
+        DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES, checksums=True).encode([good, bad])
     assert bad[0].eq(bad[0].flatten()[0]).all(), "a refused previous must be left as it was"
 
 
@@ -158,7 +160,7 @@ def test_a_current_off_a_word_boundary_encodes_as_an_aligned_one(device: torch.d
     nbytes, changed = 2 * MIB + 3, [1, 70001, 2 * MIB + 2]
     (previous, current), (previous_too, _) = (_pair(nbytes, changed, 0, device) for _ in range(2))
     unaligned = torch.empty(nbytes + 1, dtype=torch.uint8, device=device)[1:].copy_(current)
-    aligned, off_word = (DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES) for _ in range(2))
+    aligned, off_word = (DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES, checksums=True) for _ in range(2))
 
     (expected,), (result,) = aligned.encode([(previous, current)]), off_word.encode([(previous_too, unaligned)])
 
@@ -171,7 +173,7 @@ def test_a_current_off_a_word_boundary_encodes_as_an_aligned_one(device: torch.d
 
 
 def test_a_payload_stays_intact_while_other_pinned_memory_is_reused(device: torch.device):
-    encoder = DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES)
+    encoder = DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES, checksums=True)
     encoder.encode([_pair(MIB, list(range(0, MIB, 7)), 0, device)])
     (payload,), _ = encoder.finish()
     expected = bytes(payload)
@@ -182,8 +184,27 @@ def test_a_payload_stays_intact_while_other_pinned_memory_is_reused(device: torc
     assert bytes(payload) == expected
 
 
+@pytest.mark.parametrize("codec", ["gap-zstd", "snappy-zstd"])
+def test_without_checksums_the_payloads_are_the_same_and_no_checksum_is_given(device: torch.device, codec: str):
+    pairs = {
+        checksums: [_pair(nbytes, changed, seed, device) for seed, (nbytes, changed) in enumerate(CASES.values())]
+        for checksums in (True, False)
+    }
+    encoders = {checksums: DeltaEncoder(codec, device, MAX_PENDING_NBYTES, checksums=checksums) for checksums in pairs}
+
+    encoded = {checksums: encoders[checksums].encode(pairs[checksums]) for checksums in pairs}
+    (payloads_on, zstds_on), (payloads_off, zstds_off) = encoders[True].finish(), encoders[False].finish()
+
+    assert [result and result.frames for result in encoded[False]] == [
+        result and result.frames for result in encoded[True]
+    ]
+    assert all(result is None or result.checksum is None for result in encoded[False])
+    assert [bytes(payload) for payload in payloads_off] == [bytes(payload) for payload in payloads_on]
+    assert zstds_off == zstds_on
+
+
 def test_an_empty_batch_encodes_to_nothing(device: torch.device):
-    encoder = DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES)
+    encoder = DeltaEncoder("gap-zstd", device, MAX_PENDING_NBYTES, checksums=True)
 
     assert encoder.encode([]) == []
     assert encoder.finish() == ([], [])
