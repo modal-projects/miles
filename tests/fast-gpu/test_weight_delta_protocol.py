@@ -22,7 +22,7 @@ from safetensors.torch import save_file
 from miles.backends.sglang_utils.sglang_config import SglangConfig
 from miles.backends.training_utils.weight_update.protocols.weight_delta import protocol as weight_delta
 from miles.backends.training_utils.weight_update.protocols.weight_delta.protocol import UpdateWeightFromDelta
-from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import version_dir
+from miles.backends.training_utils.weight_update.protocols.weight_delta.publication import checksum, version_dir
 from miles.kernels.weight_delta.frames import GAP_NBYTES
 from miles.utils.args.custom_view import ImmutableNamespace
 
@@ -83,7 +83,7 @@ def _flip_bytes(weights: dict[str, torch.Tensor], seed: int) -> dict[str, torch.
     return changed
 
 
-def _protocol(tmp_path: Path, codec: str, change_metrics: bool) -> UpdateWeightFromDelta:
+def _protocol(tmp_path: Path, codec: str, change_metrics: bool, checksums: bool) -> UpdateWeightFromDelta:
     protocol = UpdateWeightFromDelta(
         ImmutableNamespace(
             update_weight_disk_dir=str(tmp_path / "delta"),
@@ -97,6 +97,7 @@ def _protocol(tmp_path: Path, codec: str, change_metrics: bool) -> UpdateWeightF
             fully_async=False,
             colocate=False,
             weight_delta_change_metrics=change_metrics,
+            check_weight_transfer_checksum=checksums,
             update_weight_buffer_size=512 << 20,
         )
     )
@@ -128,7 +129,7 @@ def _decode_frame(codec: str, inner: bytes, nbytes: int) -> torch.Tensor:
 
 
 def _apply_like_an_engine(
-    directory: Path, previous: dict[str, torch.Tensor]
+    directory: Path, previous: dict[str, torch.Tensor], checksums: bool
 ) -> tuple[dict, dict[str, torch.Tensor], list[str]]:
     """The manifest, every changed tensor's new bytes, and which tensors came raw."""
     manifest = json.loads((directory / "manifest.json").read_text())
@@ -139,6 +140,7 @@ def _apply_like_an_engine(
     for file in manifest["files"]:
         with safe_open(directory / file["name"], framework="numpy") as owner:
             column = {key: owner.get_tensor(key) for key in owner.keys()}
+        assert ("tensors.checksum" in column) == checksums
         names, payload = bytes(column["tensors.name"]).decode(), bytes(column["payload"])
         name_start = chunk_start = frame_start = 0
         for index, offset in enumerate(column["tensors.offset"]):
@@ -148,6 +150,7 @@ def _apply_like_an_engine(
             name = names[name_start:name_end]
             region = payload[offset : offset + column["tensors.nbytes"][index]]
             data = previous[name].clone().view(-1).view(torch.uint8)
+            before = data.clone()
             if column["tensors.raw"][index]:
                 raw_names.append(name)
                 data.copy_(torch.frombuffer(bytearray(region), dtype=torch.uint8))
@@ -167,20 +170,24 @@ def _apply_like_an_engine(
                     data[frame_offset:][:nbytes] ^= _decode_frame(
                         manifest["codec"], inner[inner_offset:][:inner_nbytes], nbytes
                     )
+            changed = None if column["tensors.raw"][index] else (data != before).numpy()
+            if checksums:
+                assert int(column["tensors.checksum"][index]) == checksum(data.numpy(), changed), name
             applied[name] = data
             name_start, chunk_start, frame_start = name_end, chunk_end, frame_end
     return manifest, applied, raw_names
 
 
+@pytest.mark.parametrize("checksums", [True, False])
 @pytest.mark.parametrize("change_metrics", [True, False])
 @pytest.mark.parametrize("codec", ["gap-zstd", "snappy-zstd"])
 def test_each_version_brings_the_previous_bytes_to_exactly_the_export(
-    tmp_path: Path, codec: str, change_metrics: bool
+    tmp_path: Path, codec: str, change_metrics: bool, checksums: bool
 ):
     weights = _initial()
     (tmp_path / "base").mkdir()
     save_file(weights, tmp_path / "base" / "model.safetensors")
-    protocol = _protocol(tmp_path, codec, change_metrics)
+    protocol = _protocol(tmp_path, codec, change_metrics, checksums)
     hooked: list = []
     protocol._post_write_hook = lambda args, path, engines: hooked.append(sorted(p.name for p in Path(path).iterdir()))
     _sync(protocol, 0, weights)
@@ -193,7 +200,9 @@ def test_each_version_brings_the_previous_bytes_to_exactly_the_export(
         previous, weights = weights, _flip_bytes(weights, seed=version)
         _sync(protocol, version, weights)
 
-        manifest, applied, raw_names = _apply_like_an_engine(version_dir(tmp_path / "delta", version), previous)
+        manifest, applied, raw_names = _apply_like_an_engine(
+            version_dir(tmp_path / "delta", version), previous, checksums
+        )
         assert (manifest["codec"], manifest["base_version"], manifest["target_version"]) == (
             codec,
             version - 1,
@@ -225,6 +234,6 @@ def test_a_fresh_launch_refuses_an_export_that_differs_from_the_checkpoint(tmp_p
     weights = _initial()
     (tmp_path / "base").mkdir()
     save_file(_flip_bytes(weights, seed=9), tmp_path / "base" / "model.safetensors")
-    protocol = _protocol(tmp_path, "gap-zstd", change_metrics=False)
+    protocol = _protocol(tmp_path, "gap-zstd", change_metrics=False, checksums=True)
     with pytest.raises(RuntimeError, match=r"3 exported tensors differ from --hf-checkpoint's values"):
         _sync(protocol, 0, weights)

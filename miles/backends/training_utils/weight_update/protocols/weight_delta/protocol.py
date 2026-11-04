@@ -130,10 +130,13 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
             self.args.weight_delta_codec,
             torch.device("cuda", torch.cuda.current_device()),
             self.args.update_weight_buffer_size,
+            checksums=self.args.check_weight_transfer_checksum,
             with_changed_bits=self._ever_changed is not None,
         )
         self._directory = version_dir(self._delta_dir, weight_version)
-        self._writer = OwnerWriter(self._directory, dist.get_rank())
+        self._writer = OwnerWriter(
+            self._directory, dist.get_rank(), checksums=self.args.check_weight_transfer_checksum
+        )
         return True
 
     def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
@@ -204,7 +207,7 @@ class UpdateWeightFromDelta(WeightTransferProtocol):
         self._stats["encode_s"] += time.monotonic() - started
         for name, dtype, shape, encoded in self._writes:
             if encoded is not None:
-                self._writer.add_xor(name, dtype, shape, encoded.frames, *next(compressed))
+                self._writer.add_xor(name, dtype, shape, encoded.frames, *next(compressed), encoded.checksum)
             elif name in self._changed_raw:
                 self._writer.add_raw(name, dtype, shape, memoryview(self._previous[name].numpy()))
 
