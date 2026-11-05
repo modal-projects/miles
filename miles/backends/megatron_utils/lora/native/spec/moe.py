@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ from miles.backends.megatron_utils.lora.native.modules.moe import (
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 
 
+@dataclass(frozen=True)
 class GroupedExpertsSpec:
     """Shared-outer routed experts (shared A / per-expert B for gate/up, the reverse for down).
 
@@ -23,6 +25,15 @@ class GroupedExpertsSpec:
     table entry. Shared experts stored as a list of sub-experts get one adapter over all of
     them here; a plain shared-expert MLP is adapted by the architecture's MLP spec instead.
     """
+
+    gate_up_leaves: tuple[str, str] = ("w1", "w3")
+    down_leaf: str = "w2"
+    packed_targets: bool = False
+    hf_block: str | None = None
+
+    @property
+    def supported_targets(self) -> tuple[str, ...]:
+        return ("gate_up_proj", "down_proj") if self.packed_targets else (*self.gate_up_leaves, self.down_leaf)
 
     def attach(self, mlp: nn.Module, layer: nn.Module, context: AttachContext) -> int:
         from megatron.core import parallel_state
@@ -41,18 +52,31 @@ class GroupedExpertsSpec:
             is_ep=parallel_state.get_expert_model_parallel_world_size() > 1,
         )
         count = 0
-        fc1_prefix = context.naming.block_prefix(layer, fc1.weight0, ["w1", "w3"])
-        # selectors address one expert ("experts.*.w1"); shared-outer adapters cover them all
-        if context.lora.selects(f"{fc1_prefix}0.w1") or context.lora.selects(f"{fc1_prefix}0.w3"):
+        fc1_prefix = context.naming.block_prefix(layer, fc1.weight0, list(self.gate_up_leaves))
+        # a selector names one expert ("experts.*.w1") or the packed module; shared-outer adapters cover them all
+        if self.packed_targets:
+            fc1_selectors = ["gate_up_proj"]
+        else:
+            fc1_selectors = [f"0.{leaf}" for leaf in self.gate_up_leaves]
+        if any(context.lora.selects(f"{fc1_prefix}{selector}") for selector in fc1_selectors):
             experts.lora_fc1_adapter = LoRAGroupedFC1(
-                hf_prefix=fc1_prefix, reference=fc1.weight0, width=fc1.weight0.shape[1], **common
+                hf_prefix=fc1_prefix,
+                leaves=self.gate_up_leaves,
+                reference=fc1.weight0,
+                width=fc1.weight0.shape[1],
+                **common,
             )
             attach_adapter_forward(fc1, experts.lora_fc1_adapter, context.lora.scale)
             count += 1
-        fc2_prefix = context.naming.block_prefix(layer, fc2.weight0, ["w2"])
-        if context.lora.selects(f"{fc2_prefix}0.w2"):
+        fc2_prefix = context.naming.block_prefix(layer, fc2.weight0, [self.down_leaf])
+        fc2_selector = "down_proj" if self.packed_targets else f"0.{self.down_leaf}"
+        if context.lora.selects(f"{fc2_prefix}{fc2_selector}"):
             experts.lora_fc2_adapter = LoRAGroupedFC2(
-                hf_prefix=fc2_prefix, reference=fc2.weight0, width=fc2.weight0.shape[0], **common
+                hf_prefix=fc2_prefix,
+                leaf=self.down_leaf,
+                reference=fc2.weight0,
+                width=fc2.weight0.shape[0],
+                **common,
             )
             attach_adapter_forward(fc2, experts.lora_fc2_adapter, context.lora.scale)
             count += 1
