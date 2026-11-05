@@ -108,10 +108,9 @@ def register_hf_config_aliases() -> None:
         if alias.model_type in _REGISTERED_ALIASES:
             continue
         if alias.model_type in CONFIG_MAPPING_NAMES and not alias.override_hf_native:
-            raise RuntimeError(
-                f"transformers now natively supports model_type={alias.model_type!r}; "
-                f"set override_hf_native=True to override."
-            )
+            # A fallback alias must yield when Transformers gains native support.
+            # Explicit overrides (e.g. DeepSeek config normalization) still win.
+            continue
         module = importlib.import_module(alias.base_module)
         base_config = getattr(module, alias.base_class)
         attrs = {"model_type": alias.model_type, "__module__": __name__}
