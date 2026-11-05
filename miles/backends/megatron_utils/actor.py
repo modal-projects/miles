@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 import shutil
+from collections.abc import Mapping
 from contextlib import ExitStack, nullcontext
 
 import torch
@@ -14,6 +15,7 @@ from miles.backends.megatron_utils.hf_export import save_hf_model
 from miles.backends.megatron_utils.lora.bridge_adapter_slots import BridgeAdapterSlots
 from miles.backends.megatron_utils.lora.checkpoint import build_adapter_slots
 from miles.backends.megatron_utils.lora.native.checkpoint import NativeAdapterSlots
+from miles.backends.megatron_utils.lora.native.merge import merge_lora_into_weights
 from miles.backends.megatron_utils.lora.utils import is_lora_enabled, lora_rollout_enabled
 from miles.backends.megatron_utils.megatron_config import has_megatron_checkpoint
 from miles.backends.megatron_utils.megatron_to_hf import converter_model_name
@@ -327,7 +329,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater = WeightUpdater(
                 args,
                 self.model,
-                weights_getter=self._get_actor_weights,
+                weights_getter=self._get_rollout_weights,
                 model_name=model_name,
                 quantization_config=quantization_config,
                 iterator_factory=get_hf_weight_iterator,
@@ -1026,6 +1028,10 @@ class MegatronTrainRayActor(TrainRayActor):
                 if include_model_companion or not ModelCompanionInstallationUtils.is_companion_parameter(name)
             }
         return dict(self._named_actor_weights(include_model_companion=include_model_companion))
+
+    def _get_rollout_weights(self) -> Mapping[str, torch.Tensor]:
+        weights = self._get_actor_weights()
+        return merge_lora_into_weights(self.model, weights) if self.args.lora_merge_for_rollout else weights
 
     def _get_actor_weight_version(self) -> int:
         return ModelCompanionWeightVersionUtils.from_params(

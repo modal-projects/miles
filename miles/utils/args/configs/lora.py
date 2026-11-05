@@ -99,6 +99,17 @@ class LoraConfig(BaseConfig):
             )
         ),
     ] = False
+    lora_merge_for_rollout: A[
+        bool,
+        Arg(
+            help=(
+                "Train LoRA adapters in Megatron and serve the rollout the base merged with them: each weight "
+                "sync sends W + (alpha / rank) * B @ A as ordinary weights, so the rollout engines run without "
+                "LoRA. Native LoRA (--megatron-to-hf-mode raw) on the live trainer weights: not with --colocate "
+                "or --offload-train."
+            )
+        ),
+    ] = False
     experts_shared_outer_loras: A[
         bool,
         Arg(
