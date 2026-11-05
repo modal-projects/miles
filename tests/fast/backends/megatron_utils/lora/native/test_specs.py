@@ -240,8 +240,8 @@ def _native_run_args(tmp_path, model_type, **overrides):
         hf_checkpoint=str(tmp_path),
         lora_rank=8,
         lora_train_only=False,
-        colocate=True,
         lora_merge_for_rollout=False,
+        colocate=True,
         overlap_param_gather=False,
         moe_shared_expert_overlap=False,
         overlap_grad_reduce=False,
@@ -279,12 +279,27 @@ def test_native_run_contract_accepts_its_validated_configs(tmp_path):
     validate_native_lora_args(_native_run_args(tmp_path, "qwen3_moe", expert_tensor_parallel_size=2), _HF_MODULES)
 
 
+def test_expert_tensor_parallelism_matters_only_once_the_targets_reach_the_routed_experts(tmp_path):
+    attention = ["model.language_model.layers.*.self_attn.q_proj"]
+    experts = [*attention, "model.language_model.layers.*.mlp.experts.gate_up_proj"]
+    validate_native_lora_args(
+        _native_run_args(tmp_path, "qwen3_6_moe", hf_lora_targets=attention, expert_tensor_parallel_size=2),
+        _HF_MODULES,
+    )
+    with pytest.raises(AssertionError, match="expert-tensor-parallel-size"):
+        validate_native_lora_args(
+            _native_run_args(tmp_path, "qwen3_6_moe", hf_lora_targets=experts, expert_tensor_parallel_size=2),
+            _HF_MODULES,
+        )
+
+
 @pytest.mark.parametrize(
     "override, message",
     [
         ({"enable_mtp_training": True}, "enable-mtp-training"),
         ({"save_hf": "/out/{rollout_id}"}, "tied lm_head adapter cannot be merged"),
         ({"eval_uses_snapshots": True, "eval_hf_dir": "/eval"}, "tied lm_head adapter cannot be merged"),
+        ({"lora_merge_for_rollout": True}, "tied lm_head adapter cannot be merged"),
         ({"vocab_size": None}, "--vocab-size"),
     ],
 )
@@ -315,7 +330,6 @@ def test_inkling_head_export_rows_follow_sglangs_served_vocab(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"text_config": {"vocab_size": 16, "unpadded_vocab_size": 12}}))
     assert _read_unpadded_vocab_size(str(tmp_path)) == 12
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 16}))
-        ({"lora_merge_for_rollout": True}, "tied lm_head adapter cannot be merged"),
     assert _read_unpadded_vocab_size(str(tmp_path)) is None
     with pytest.raises(FileNotFoundError):
         _read_unpadded_vocab_size(str(tmp_path / "missing"))
