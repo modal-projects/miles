@@ -28,7 +28,9 @@ def validate_gpu_delta_args(args):
     assert (
         args.train_backend == "megatron" and args.megatron_to_hf_mode != "bridge"
     ), "GPU delta requires the direct Megatron exporter"
-    assert args.lora_rank <= 0, "GPU delta does not support LoRA"
+    assert (
+        args.lora_rank <= 0 or args.lora_merge_for_rollout
+    ), "GPU delta carries a LoRA run only merged into the rollout weights (--lora-merge-for-rollout)"
     assert args.prefill_num_servers is None, "GPU delta does not support PD"
     # Rollout syncs pause through SGLang's scheduler, which has only these two modes; abort is a tokenizer-side abort.
     assert args.pause_generation_mode in (
