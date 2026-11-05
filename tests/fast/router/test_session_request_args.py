@@ -106,10 +106,11 @@ class TestServerOwnedFields:
             session_id = _create_session(env.url)
             assert _post_chat(env.url, session_id, {"messages": [USER]}).status_code == 200
             assert env.backend.request_log[-1]["lora_path"] == LORA_ADAPTER_NAME
-        with _serve_router({"lora_rank": 8, "lora_train_only": True}) as env:
-            session_id = _create_session(env.url)
-            assert _post_chat(env.url, session_id, {"messages": [USER]}).status_code == 200
-            assert "lora_path" not in env.backend.request_log[-1]
+        for rollout_without_adapter in ("lora_train_only", "lora_merge_for_rollout"):
+            with _serve_router({"lora_rank": 8, rollout_without_adapter: True}) as env:
+                session_id = _create_session(env.url)
+                assert _post_chat(env.url, session_id, {"messages": [USER]}).status_code == 200
+                assert "lora_path" not in env.backend.request_log[-1]
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
