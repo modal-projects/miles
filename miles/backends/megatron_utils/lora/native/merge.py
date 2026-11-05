@@ -27,7 +27,9 @@ class MergedWeights(Mapping[str, torch.Tensor]):
         delta = self._deltas.get(id(weight))
         if delta is None:
             return weight
-        return (weight.float() + delta()).to(weight.dtype)
+        update = delta()
+        # -0.0 + 0.0 is +0.0: where the adapter adds nothing, the export keeps the base's bytes.
+        return torch.where(update == 0, weight, (weight.float() + update).to(weight.dtype))
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._weights)
