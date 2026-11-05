@@ -45,9 +45,9 @@ GOLDEN_OWNER_FILE = (
 
 @pytest.mark.parametrize(
     "dtype, shape, raw",
-    [("F32", [4, 4], True), ("BF16", [8], True), ("F32", [], True), ("BF16", [4, 4], False), ("U8", [4, 2], False)],
+    [("F32", [4, 4], False), ("BF16", [8], True), ("F32", [], True), ("BF16", [4, 4], False), ("U8", [4, 2], False)],
 )
-def test_fp32_tensors_and_tensors_of_at_most_one_dimension_are_raw(dtype, shape, raw):
+def test_tensors_of_at_most_one_dimension_are_raw(dtype, shape, raw):
     assert publication.is_raw(dtype, shape) == raw
 
 

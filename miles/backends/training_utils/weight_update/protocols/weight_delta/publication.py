@@ -19,7 +19,7 @@ _SAFETENSORS_DTYPES = {np.dtype(np.int64): "I64", np.dtype(np.uint8): "U8", np.d
 
 
 def is_raw(dtype: str, shape: Sequence[int]) -> bool:
-    return dtype == "F32" or len(shape) <= 1
+    return len(shape) <= 1
 
 
 def version_dir(delta_dir: Path, version: int) -> Path:
