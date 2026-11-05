@@ -24,6 +24,8 @@ def validate_lora_args(args):
     if args.lora_type is None:
         args.lora_type = _default_lora_type(args)
     validate_multi_lora_args(args)
+    if args.lora_merge_for_rollout:
+        _validate_merge_for_rollout(args)
     if not is_lora_enabled(args):
         return
     assert args.train_backend in (
@@ -61,6 +63,21 @@ def validate_lora_args(args):
             "MoE-expert LoRA layout: %s (--experts-shared-outer-loras).",
             "shared-outer" if args.experts_shared_outer_loras else "per-expert",
         )
+
+
+def _validate_merge_for_rollout(args) -> None:
+    assert is_lora_enabled(args), "--lora-merge-for-rollout merges a LoRA adapter: it needs --lora-rank"
+    assert (
+        not args.lora_train_only
+    ), "--lora-merge-for-rollout and --lora-train-only each set what the rollout serves: pass one"
+    assert args.train_backend == "megatron" and args.megatron_to_hf_mode == "raw", (
+        "--lora-merge-for-rollout merges native LoRA into the weights Megatron's raw exporter converts: "
+        "it needs --megatron-to-hf-mode raw"
+    )
+    assert not (args.colocate or args.offload_train), (
+        "--lora-merge-for-rollout merges into the live trainer weights, and --colocate and --offload-train "
+        "sync from their host backup"
+    )
 
 
 def _default_lora_type(args) -> str:

@@ -53,6 +53,8 @@ from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
 from miles.utils.function_registry import function_registry
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
+from miles.utils.lora.arguments import validate_lora_args
+from miles.utils.lora.utils import lora_rollout_enabled
 from miles.utils.object_store_config import compute_mooncake_init_kwargs_vanilla
 from miles.utils.run_uuid import RUN_UUID_LENGTH, validate_run_uuid
 from miles.utils.workers.naming import DEPLOY_INSTANCE_ID_MAX_LENGTH
@@ -4019,6 +4021,57 @@ class TestMilesValidateArgsExternalRollout:
         miles_validate_args(args)
 
         assert args.rollout_external and not args.starts_inference_engines
+
+
+class TestLoRAMergeForRollout:
+    def _parse_lora(self, tmp_path, extra: list[str]) -> argparse.Namespace:
+        from transformers import Qwen3Config
+
+        Qwen3Config(num_hidden_layers=1).save_pretrained(tmp_path)
+        return _parse_megatron_args(
+            ["--lora-rank", "8", "--target-modules", "q_proj", "--hf-checkpoint", str(tmp_path), *extra]
+        )
+
+    def test_a_merged_lora_run_publishes_full_weights_over_weight_delta(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("miles.utils.nvcomp.nvcomp_distribution", lambda: None)
+        args = self._parse_lora(
+            tmp_path,
+            [
+                *_EXTERNAL_WEIGHT_DELTA_ARGS,
+                "--lora-merge-for-rollout",
+                *("--update-weight-disk-dir", str(tmp_path / "versions")),
+            ],
+        )
+
+        miles_validate_args(args)
+
+        assert not lora_rollout_enabled(args)
+
+    def test_weight_delta_refuses_a_lora_run_that_serves_its_adapter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("miles.utils.nvcomp.nvcomp_distribution", lambda: None)
+        args = self._parse_lora(
+            tmp_path, [*_EXTERNAL_WEIGHT_DELTA_ARGS, "--update-weight-disk-dir", str(tmp_path / "versions")]
+        )
+
+        with pytest.raises(AssertionError, match="passes --lora-merge-for-rollout"):
+            miles_validate_args(args)
+
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            ([], "it needs --lora-rank"),
+            (["--lora-rank", "8", "--lora-train-only"], "pass one"),
+            (["--lora-rank", "8", "--megatron-to-hf-mode", "bridge"], "it needs --megatron-to-hf-mode raw"),
+            (["--lora-rank", "8", "--colocate"], "sync from their host backup"),
+            (["--lora-rank", "8", "--offload-train"], "sync from their host backup"),
+        ],
+        ids=["no_lora", "train_only", "bridge", "colocate", "offload_train"],
+    )
+    def test_each_setup_a_merged_rollout_does_not_support_is_refused(self, extra, message):
+        args = _parse_megatron_args(["--lora-merge-for-rollout", *extra])
+
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            validate_lora_args(args)
 
 
 class TestWeightUpdateDeadlines:

@@ -23,12 +23,12 @@ def is_lora_enabled(args: Namespace) -> bool:
 
 
 def lora_rollout_enabled(args: Namespace) -> bool:
-    """LoRA enabled AND the rollout side participates; false under --lora-train-only.
+    """LoRA enabled AND the rollout serves the adapter (not under --lora-train-only or --lora-merge-for-rollout).
 
     Gates everything rollout-facing: SGLang's ``enable_lora``, the per-request
     ``lora_path``, and the adapter weight sync. Training-side LoRA is unaffected.
     """
-    return is_lora_enabled(args) and not args.lora_train_only
+    return is_lora_enabled(args) and not args.lora_train_only and not args.lora_merge_for_rollout
 
 
 def engine_loads_adapter_from_disk(args: Namespace) -> bool:
@@ -49,7 +49,7 @@ def lora_colocated_engine_keeps_base(args: Namespace) -> bool:
 
 def lora_sync_sends_base(args: Namespace) -> bool:
     """A colocated LoRA weight sync re-sends the frozen base unless the engines keep it; the
-    weight checker always rewrites every tensor, and --lora-train-only syncs as full weights."""
+    weight checker always rewrites every tensor, and a rollout without the adapter syncs full weights."""
     return (
         not lora_rollout_enabled(args) or args.check_weight_update_equal or not lora_colocated_engine_keeps_base(args)
     )

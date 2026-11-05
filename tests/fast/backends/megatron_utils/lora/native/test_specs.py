@@ -241,6 +241,7 @@ def _native_run_args(tmp_path, model_type, **overrides):
         lora_rank=8,
         lora_train_only=False,
         colocate=True,
+        lora_merge_for_rollout=False,
         overlap_param_gather=False,
         moe_shared_expert_overlap=False,
         overlap_grad_reduce=False,
@@ -314,6 +315,7 @@ def test_inkling_head_export_rows_follow_sglangs_served_vocab(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"text_config": {"vocab_size": 16, "unpadded_vocab_size": 12}}))
     assert _read_unpadded_vocab_size(str(tmp_path)) == 12
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 16}))
+        ({"lora_merge_for_rollout": True}, "tied lm_head adapter cannot be merged"),
     assert _read_unpadded_vocab_size(str(tmp_path)) is None
     with pytest.raises(FileNotFoundError):
         _read_unpadded_vocab_size(str(tmp_path / "missing"))

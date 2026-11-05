@@ -49,7 +49,7 @@ from miles.utils.function_registry import load_function
 from miles.utils.hf_utils.config import is_dsa, load_hf_config
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.lora.arguments import validate_lora_args, validate_lora_args_after_megatron
-from miles.utils.lora.utils import is_lora_enabled, lora_sync_sends_base
+from miles.utils.lora.utils import is_lora_enabled, lora_rollout_enabled, lora_sync_sends_base
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp
 from miles.utils.object_store_config import (
     MOONCAKE_MASTER_ADDRESS_KEY,
@@ -1496,7 +1496,10 @@ def miles_validate_args(args):
         assert (
             args.prefill_num_servers is None
         ), "Weight-delta weight transfer mode has not been tested when PD is enabled."
-        assert args.lora_rank <= 0, "LoRA weight sync is not supported for weight-delta weight transfer."
+        assert not lora_rollout_enabled(args), (
+            "Weight-delta weight transfer sends full weights, not adapters: a LoRA run passes "
+            "--lora-merge-for-rollout."
+        )
         assert not args.indep_dp, (
             "Weight-delta weight transfer does not support --indep-dp: the previous version lives in the "
             "trainer cell that published it, and a cell taking over the weight update has none."

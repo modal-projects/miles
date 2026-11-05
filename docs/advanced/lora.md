@@ -147,6 +147,7 @@ Ordinary LoRA also accepts specific HF targets mixed with group names, such as
 | `--lora-adapter-path` | none | Warm-start/resume path. Also provide the matching positive rank, alpha, and target modules. Bridge training resume currently requires miles' per-rank adapter shards and the same parallel topology; an HF PEFT-only adapter cannot yet be loaded directly into the Bridge model. Inkling native has its own HF adapter loader. |
 | `--lora-base-cpu-backup` | off | Colocated mode only: keep a CPU mirror of the frozen SGLang base and avoid re-sending base weights. This trades host RAM for faster and more reliable pause/resume. |
 | `--lora-train-only` | off | Train the adapter while keeping ordinary rollout engines on the frozen base policy. |
+| `--lora-merge-for-rollout` | off | Train the adapter and serve the rollout the base merged with it, synchronized as ordinary weights; the engines run without LoRA. Native LoRA only, not colocated. |
 | `--experts-shared-outer-loras` | off | Use shared outer factors for grouped MoE experts. This layout is not checkpoint-compatible with per-expert LoRA. |
 | `--check-lora-weight-equal` | off | Verify each synchronized adapter tensor with SHA-256. |
 | `--update-weights-interval` | `1` | Publish new weights every N rollout/train iterations. This is not LoRA-specific, but it controls when the live adapter is synchronized. |
@@ -264,6 +265,13 @@ attention DP: pinned adapters are never evicted.
 LoRA is not supported by the P2P/RDMA or disk-delta weight-transfer modes. A
 hybrid job with both colocated and additional remote rollout engines also cannot
 send LoRA weights to the remote engines today.
+
+With `--lora-merge-for-rollout`, each sync sends `W + (alpha / rank) * B @ A` as
+ordinary weights instead of the adapter. Native LoRA merges each adapter into its
+host weight in Megatron's layout before the base-weight conversion, as for
+`--save-hf`, so the rollout's quantization applies unchanged and `weight-delta`
+carries a LoRA run this way. `--save-hf` then writes the merged model in the
+rollout's format.
 
 The legacy `--lora-sync-from-tensor` flag is still accepted by the parser but is
 not consumed by the implementation. The topology selects the synchronization
