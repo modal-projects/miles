@@ -60,8 +60,8 @@ class TestLoadHfConfig:
             load_hf_config(str(tmp_path))
             load_hf_config(str(tmp_path))
 
-    def test_native_support_raises_without_override(self, tmp_path):
-        """If transformers ships native support for an alias, registration must fail loud."""
+    def test_native_support_is_preserved_without_override(self, tmp_path):
+        """Fallback aliases yield to native config support without importing the fallback."""
         from miles.utils.hf_utils import config as hf_config_module
 
         alias = hf_config_module._HFConfigAlias(
@@ -74,9 +74,14 @@ class TestLoadHfConfig:
             patch.object(hf_config_module, "_CONFIG_ALIASES", (alias,)),
             patch.object(hf_config_module, "_REGISTERED_ALIASES", set()),
             patch.object(hf_config_module, "CONFIG_MAPPING_NAMES", {"fake_native_type": "FakeConfig"}),
-            pytest.raises(RuntimeError, match="natively supports"),
+            patch("transformers.AutoConfig.register") as register,
+            patch("transformers.AutoConfig.from_pretrained", return_value=SimpleNamespace()) as load,
+            patch.object(hf_config_module.importlib, "import_module") as import_module,
         ):
             hf_config_module.load_hf_config(str(tmp_path))
+        register.assert_not_called()
+        import_module.assert_not_called()
+        load.assert_called_once()
 
     def test_native_support_overridden_when_flag_set(self, tmp_path):
         """override_hf_native=True must allow registration to win over native support."""
