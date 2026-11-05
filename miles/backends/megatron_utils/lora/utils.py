@@ -13,6 +13,7 @@ import torch.distributed as dist
 from miles.backends.megatron_utils.lora.native import load_lora_adapter_hf
 from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter
 from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
+from miles.backends.training_utils.model_companion import ModelCompanionWeightVersionUtils
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
 from miles.utils.lora.utils import (  # noqa: F401  (re-exported)
@@ -210,6 +211,8 @@ def save_lora_checkpoint(
             save_optimizer = not args.backend.no_save_optim
             training_state = {
                 "iteration": iteration,
+                # Kept by the model companion, which a full checkpoint saves with the model.
+                "weight_version": ModelCompanionWeightVersionUtils.weight_version(model),
                 "optimizer": optimizer.state_dict() if save_optimizer else None,
                 "parameter_state": (
                     [sub.get_parameter_state_dp_reshardable() for sub in _distributed_optimizers(optimizer)]
@@ -290,6 +293,8 @@ def restore_lora_adapter(
         return None
     if opt_param_scheduler is not None and training_state["opt_param_scheduler"] is not None:
         opt_param_scheduler.load_state_dict(training_state["opt_param_scheduler"])
+    # A checkpoint saved before Miles recorded it resumes at version 0, as it used to.
+    ModelCompanionWeightVersionUtils.set_weight_version(model, training_state.get("weight_version", 0))
     return training_state["iteration"]
 
 

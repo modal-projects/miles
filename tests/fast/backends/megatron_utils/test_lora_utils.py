@@ -10,6 +10,7 @@ from tests.fast.fixtures.args_fixtures import make_trainer_args
 import miles.backends.megatron_utils.lora.utils as lora_utils
 from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter
 from miles.backends.megatron_utils.lora.utils import adapter_named_parameters, is_lora_enabled, save_lora_checkpoint
+from miles.backends.training_utils.model_companion import ModelCompanion, ModelCompanionWeightVersionUtils
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, is_lora_weight_name
 
 # ---------------------------------------------------------------------------
@@ -123,6 +124,7 @@ class _AdapterModel(torch.nn.Module):
         super().__init__()
         self.base = torch.nn.Linear(2, 2)
         self.adapter = _NativeAdapter()
+        self.model_companion = ModelCompanion(pipeline_rank=0, chunk_index=0, replica_id=(0, 0, 0))
 
 
 def _single_rank(monkeypatch):
@@ -138,6 +140,7 @@ class TestSaveLoraCheckpointTrainingState:
         publisher = SimpleNamespace(write_adapter=lambda *_: None)
 
         model = [_AdapterModel()]
+        model[0].model_companion.weight_version.fill_(4)
         args = make_trainer_args(megatron_to_hf_mode="bridge", no_save_optim=no_save_optim)
         optimizer = SimpleNamespace(state_dict=lambda: {"step": 7})
         save_lora_checkpoint(
@@ -175,7 +178,7 @@ class TestSaveLoraCheckpointTrainingState:
         state = self._state(tmp_path)
         assert state["optimizer"] is None
         assert state["opt_param_scheduler"] == {"lr": 0.5}
-        assert state["iteration"] == 3
+        assert (state["iteration"], state["weight_version"]) == (3, 4)
 
 
 class TestDistributedOptimizerParameterState:
@@ -240,13 +243,26 @@ class TestRestoreLoraAdapter:
             state = {"iteration": 5, "optimizer": {"step": 7}, "opt_param_scheduler": {"lr": 0.5}} | training_state
             torch.save(state, tmp_path / "training_state_rank0.pt")
 
-    def _restore(self, tmp_path, calls, *, no_load_optim, scheduler=None, mode="raw"):
+    def _restore(self, tmp_path, calls, *, no_load_optim, scheduler=None, mode="raw", model=None):
         return lora_utils.restore_lora_adapter(
-            [_AdapterModel()],
+            model or [_AdapterModel()],
             self._args(tmp_path, no_load_optim=no_load_optim, mode=mode),
             optimizer=self._optimizer(calls),
             opt_param_scheduler=scheduler,
         )
+
+    @pytest.mark.parametrize("saved, restored", [({"weight_version": 5}, 5), ({}, 0)], ids=["recorded", "older"])
+    def test_a_resume_continues_the_weight_version_the_checkpoint_recorded(
+        self, tmp_path, monkeypatch, saved, restored
+    ):
+        """A full checkpoint restores it with the model; a LoRA one saves the adapter alone."""
+        _single_rank(monkeypatch)
+        self._write_native(tmp_path, **saved)
+        model = [_AdapterModel()]
+
+        self._restore(tmp_path, [], no_load_optim=True, model=model)
+
+        assert ModelCompanionWeightVersionUtils.weight_version(model) == restored
 
     def test_virtual_pipeline_chunks_round_trip_their_own_adapters(self, tmp_path, monkeypatch):
         _single_rank(monkeypatch)
