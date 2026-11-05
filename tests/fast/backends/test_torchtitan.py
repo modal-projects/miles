@@ -58,6 +58,7 @@ def _args(**overrides) -> Namespace:
         lora_dropout=0.0,
         lora_adapter_path=None,
         lora_train_only=False,
+        lora_merge_for_rollout=False,
         colocate_memory_peak_device="cpu",
         titan_fsdp_reduce_dtype="float32",
         # read by the padded-rows loss layout's startup check on a static-shape platform
@@ -379,6 +380,7 @@ def test_lora_targets_bypass_megatrons_native_spec(monkeypatch):
         lora_alpha=None,
         lora_adapter_path=None,
         lora_adapter_convert_save=None,
+        lora_merge_for_rollout=False,
         lora_type="lora",
         target_modules="q_proj",
         exclude_modules=None,

@@ -243,9 +243,11 @@ def validate_native_lora_args(args, hf_modules: list[str]) -> None:
             "native LoRA's lm_head adapter does not support --enable-mtp-training: the MTP heads reuse the output "
             "layer, so their loss would train the adapter"
         )
-        assert args.untie_embeddings_and_output_weights or not exports_hf_snapshots(args), (
+        assert args.untie_embeddings_and_output_weights or not (
+            exports_hf_snapshots(args) or args.lora_merge_for_rollout
+        ), (
             "a tied lm_head adapter cannot be merged into HF weights (it would change the input embedding); "
-            "drop --save-hf / eval snapshots or the unembed target"
+            "drop --save-hf / eval snapshots / --lora-merge-for-rollout or the unembed target"
         )
 
 

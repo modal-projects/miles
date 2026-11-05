@@ -60,6 +60,7 @@ from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
 from miles.utils.function_registry import function_registry
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
+from miles.utils.lora.arguments import validate_lora_args
 from miles.utils.object_store_config import compute_mooncake_init_kwargs_vanilla
 from miles.utils.run_uuid import RUN_UUID_LENGTH, validate_run_uuid
 from miles.utils.workers.naming import DEPLOY_INSTANCE_ID_MAX_LENGTH
@@ -4092,6 +4093,34 @@ class TestMilesValidateArgsHttpLora:
 
     def test_tensors_mode_accepts_check_lora_weight_equal(self, tmp_path):
         miles_validate_args(self._parse(tmp_path, ["--check-lora-weight-equal"]))
+
+
+class TestLoRAMergeForRollout:
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            ([], "it needs --lora-rank"),
+            (["--lora-rank", "8", "--lora-train-only"], "pass one"),
+            (["--lora-rank", "8", "--megatron-to-hf-mode", "bridge"], "it needs --megatron-to-hf-mode raw"),
+            (["--lora-rank", "8", "--colocate"], "sync from their host backup"),
+            (["--lora-rank", "8", "--offload-train"], "sync from their host backup"),
+        ],
+        ids=["no_lora", "train_only", "bridge", "colocate", "offload_train"],
+    )
+    def test_each_setup_a_merged_rollout_does_not_support_is_refused(self, extra, message):
+        args = _parse_megatron_args(["--lora-merge-for-rollout", *extra])
+
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            validate_lora_args(args)
+
+    def test_a_multi_lora_run_is_refused(self):
+        args = _parse_megatron_args(
+            ["--lora-merge-for-rollout", "--lora-rank", "8", "--multi-lora-n-adapters", "2", "--qkv-format", "thd"]
+        )
+        args.ft_components = []  # as miles_validate_args resolves it without fault tolerance
+
+        with pytest.raises(AssertionError, match="multi-LoRA trains several"):
+            validate_lora_args(args)
 
 
 class TestWeightUpdateDeadlines:
