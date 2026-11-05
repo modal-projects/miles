@@ -22,6 +22,7 @@ def _args(tmp_path, **overrides):
                 "train_backend": "megatron",
                 "megatron_to_hf_mode": "raw",
                 "lora_rank": 0,
+                "lora_merge_for_rollout": False,
                 "prefill_num_servers": None,
                 "pause_generation_mode": "retract",
                 "check_weight_update_equal": False,
@@ -54,6 +55,14 @@ def test_dummy_target_or_draft_cannot_establish_delta_baseline(tmp_path, field):
 def test_receiver_pause_modes_are_admitted_and_abort_is_rejected(tmp_path, mode, admitted):
     with nullcontext() if admitted else pytest.raises(AssertionError, match="retract or in_place"):
         validate_gpu_delta_args(_args(tmp_path, pause_generation_mode=mode))
+
+
+@pytest.mark.parametrize("merged,admitted", [(True, True), (False, False)])
+def test_a_lora_run_is_admitted_only_with_the_adapter_merged_into_the_rollout_weights(tmp_path, merged, admitted):
+    args = _args(tmp_path, lora_rank=8, lora_merge_for_rollout=merged)
+
+    with nullcontext() if admitted else pytest.raises(AssertionError, match="--lora-merge-for-rollout"):
+        validate_gpu_delta_args(args)
 
 
 def test_unsupported_launch_configuration_fails_before_startup(tmp_path, monkeypatch):
