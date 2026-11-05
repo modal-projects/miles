@@ -102,10 +102,23 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
         name=attention.name,
         attention=attention,
         mlp=SplitGateUpMLPSpec(),
-        # the checkpoint nests the text stack under model.language_model., which the raw converter drops
+        # HF GLM-5.3-Flash packs its routed experts in experts.gate_up_proj and experts.down_proj
+        experts=GroupedExpertsSpec(
+            gate_up_leaves=("gate_proj", "up_proj"),
+            down_leaf="down_proj",
+            packed_targets=True,
+            hf_block=r"mlp\.experts",
+        ),
+        # the HF model nests KDA's f_a/f_b projections under forget_gate., which the checkpoint's
+        # tensor names, and so the converter's, do not
         declared_naming=DeclaredNaming(
             "model.language_model.layers.",
-            {"self_attention.": "self_attn.", "mlp.": "mlp.", "mlp.shared_experts.": "mlp.shared_experts."},
+            {
+                "self_attention.": "self_attn.",
+                "mlp.": "mlp.",
+                "mlp.experts.": "mlp.experts.",
+                "mlp.shared_experts.": "mlp.shared_experts.",
+            },
         ),
     )
 
@@ -153,7 +166,12 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
         "deepseek_v3": mla,
         "deepseek_v32": mla,
         # its converter names the output head `head`, which no adapter here has been validated on
-        "deepseek_v41": _arch_spec(DeepSeekV41AttentionSpec(), mlp=DeepSeekV4SharedExpertSpec(), lm_head=None),
+        "deepseek_v41": _arch_spec(
+            DeepSeekV41AttentionSpec(),
+            mlp=DeepSeekV4SharedExpertSpec(),
+            lm_head=None,
+            experts=GroupedExpertsSpec(hf_block=r"ffn\.experts\.(?:\d+|\*)"),
+        ),
         "glm4_moe_lite": mla,
         "glm_moe_dsa": mla,
         "glm5_next": _glm5_next_arch_spec(),
