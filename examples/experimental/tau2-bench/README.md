@@ -86,6 +86,7 @@ which tau2 rejects; the episode scores 0.
 |---|---|
 | `TAU2_USER_LLM` / `TAU2_USER_API_BASE` | the rollout endpoint (policy model) |
 | `TAU2_JUDGE_LLM` / `TAU2_JUDGE_API_BASE` | the rollout endpoint (policy model) |
+| `TAU2_USER_LLM_ARGS` / `TAU2_JUDGE_LLM_ARGS` | an external model's litellm arguments as JSON: `{"temperature": 0.0}` |
 | `TAU2_COMMUNICATE_SCORER` | `substring` |
 | `TAU2_MAX_STEPS` | 100 |
 | `TAU2_EPISODE_TIMEOUT_S` | 1800 |
