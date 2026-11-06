@@ -92,6 +92,18 @@ def test_a_torchtitan_dir_reports_the_rollout_its_schedule_started_at(tmp_path):
     scheduler.load_state_dict.assert_not_called()
 
 
+@pytest.mark.parametrize("saved, restored", [({"weight_version": 5}, 5), ({}, 0)], ids=["recorded", "older"])
+def test_a_resume_continues_the_weight_version_the_save_recorded(tmp_path, saved, restored):
+    """A full checkpoint restores it with the model; a LoRA save records it in its training state."""
+    training_state = {"iteration": 4, "first_rollout": 0, "opt_param_scheduler": None} | saved
+    with (
+        patch(f"{_MODULE}.read_training_state", return_value=training_state),
+        patch(f"{_MODULE}.ModelCompanionWeightVersionUtils.set_weight_version") as set_weight_version,
+    ):
+        _restore(tmp_path)
+    set_weight_version.assert_called_once_with([], restored)
+
+
 def test_a_source_without_training_state_restarts_at_rollout_0(tmp_path):
     (iteration, _, _), scheduler, _ = _restore(tmp_path)
     assert iteration is None
