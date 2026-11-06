@@ -30,6 +30,9 @@ Env vars:
   TAU2_USER_API_BASE       user-simulator endpoint override
   TAU2_JUDGE_LLM           NL-assertion judge litellm model (default: the rollout endpoint)
   TAU2_JUDGE_API_BASE      judge endpoint override
+  TAU2_USER_LLM_ARGS / TAU2_JUDGE_LLM_ARGS
+                           an external model's litellm arguments as JSON (default:
+                           {"temperature": 0.0}); Claude Opus 5.5 takes no temperature
   TAU2_COMMUNICATE_SCORER  substring (default, tau2's original matcher) | semantic
                            (tau2 >= 2.0 default: an OpenAI judge, needs OPENAI_API_KEY)
   TAU2_MAX_STEPS           tau2 orchestrator step cap (default: 100)
@@ -37,6 +40,7 @@ Env vars:
 """
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -66,10 +70,10 @@ def is_empty_reply_rejection(exc: BaseException) -> bool:
 
 
 def _side_llm(
-    metadata: dict[str, Any], external_llm: str | None, api_base: str | None, **local_args
+    metadata: dict[str, Any], external_llm: str | None, api_base: str | None, external_args: str, **local_args
 ) -> tuple[str, dict[str, Any]]:
     if external_llm:
-        llm_args: dict[str, Any] = {"temperature": 0.0}
+        llm_args: dict[str, Any] = json.loads(os.getenv(external_args, '{"temperature": 0.0}'))
         if api_base:
             llm_args["api_base"] = api_base
         return external_llm, llm_args
@@ -131,11 +135,12 @@ async def run(
                 task_split,
                 task_id,
                 agent_llm_args,
-                _side_llm(metadata, os.getenv("TAU2_USER_LLM"), os.getenv("TAU2_USER_API_BASE")),
+                _side_llm(metadata, os.getenv("TAU2_USER_LLM"), os.getenv("TAU2_USER_API_BASE"), "TAU2_USER_LLM_ARGS"),
                 _side_llm(
                     metadata,
                     os.getenv("TAU2_JUDGE_LLM"),
                     os.getenv("TAU2_JUDGE_API_BASE"),
+                    "TAU2_JUDGE_LLM_ARGS",
                     response_format={"type": "json_object"},
                 ),
             ),
