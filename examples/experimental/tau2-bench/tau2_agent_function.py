@@ -20,15 +20,15 @@ assembly truncates it (see the README's "Episode outcomes").
 
 The user simulator and the NL-assertion judge (retail rewards are DB x
 NL_ASSERTION) are reached at ``metadata["tau2_user_api_base"]``, which
-``tau2_generate.generate`` fills with the rollout router: the policy model also
+``tau2_generate.generate`` fills with the rollout endpoint: the policy model also
 plays the user and the judge, with thinking off and without being traced. Set
 ``TAU2_USER_LLM`` / ``TAU2_JUDGE_LLM`` (a litellm model id such as ``gpt-4.1``) plus
 that provider's key to use an external model instead.
 
 Env vars:
-  TAU2_USER_LLM            user-simulator litellm model (default: the rollout router)
+  TAU2_USER_LLM            user-simulator litellm model (default: the rollout endpoint)
   TAU2_USER_API_BASE       user-simulator endpoint override
-  TAU2_JUDGE_LLM           NL-assertion judge litellm model (default: the rollout router)
+  TAU2_JUDGE_LLM           NL-assertion judge litellm model (default: the rollout endpoint)
   TAU2_JUDGE_API_BASE      judge endpoint override
   TAU2_COMMUNICATE_SCORER  substring (default, tau2's original matcher) | semantic
                            (tau2 >= 2.0 default: an OpenAI judge, needs OPENAI_API_KEY)
@@ -49,6 +49,7 @@ from tau2.evaluator.evaluator import EvaluationType
 from tau2.run import get_tasks, run_single_task
 
 from miles.rollout.agentic.session import openai_session_url
+from miles.utils.http_utils import rollout_external_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ def _side_llm(
         return external_llm, llm_args
     return _POLICY_MODEL, {
         "api_base": api_base or metadata["tau2_user_api_base"],
-        "api_key": "EMPTY",
+        "api_key": rollout_external_api_key() or "EMPTY",
         "temperature": 0.0,
         "extra_headers": {"X-SMG-Routing-Key": f"tau2-side-{uuid.uuid4().hex}"},
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},

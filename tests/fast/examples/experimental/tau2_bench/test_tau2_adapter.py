@@ -152,7 +152,7 @@ class TestGenerate:
             return output
 
         monkeypatch.setattr(agentic_tool_call, "generate", collect)
-        args = SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=30000)
+        args = SimpleNamespace(rollout_external_url=None, sglang_router_ip="10.0.0.1", sglang_router_port=30000)
         input = GenerateFnInput(
             state=SimpleNamespace(args=args), sample=Sample(prompt="retail/7"), sampling_params={}, evaluation=False
         )

@@ -14,7 +14,7 @@ tau-bench (`tau_bench` package, retail + airline only) and does not run tau2.
 | File | Role |
 |---|---|
 | `tau2_agent_function.py` | one tau2 simulation per sample (`--custom-agent-function-path`) |
-| `tau2_generate.py` | generate wrapper that hands the router URL to the user simulator and aborts the samples of a failed episode, plus the reward hook |
+| `tau2_generate.py` | generate wrapper that hands the rollout endpoint to the user simulator and aborts the samples of a failed episode, plus the reward hook |
 | `make_tau2_data.py` | writes `<domain>_<split>.jsonl` and `all_train.jsonl` (178 train tasks) |
 | `run_qwen3_6_35b_a3b_tau2.py` | full-parameter GRPO launcher, Qwen3.6-35B-A3B on 8x H200 |
 
@@ -27,7 +27,7 @@ Each sample is one unmodified tau2 text simulation (`tau2.run.run_single_task`):
 - tau2 owns the user simulator, the user-side tools (telecom), the stop conditions and
   the evaluator; the evaluator's reward is the sample reward.
 - **The user simulator and retail's NL-assertion judge default to the policy model
-  itself**, served untraced by the rollout router with thinking off. They therefore move
+  itself**, served untraced by the rollout endpoint with thinking off. They therefore move
   with training, and pass rates are not comparable to the leaderboard, which uses
   `gpt-4.1` as the user. Set `TAU2_USER_LLM` / `TAU2_JUDGE_LLM` (plus the provider key in
   the shell that starts ray) for fixed external models.
@@ -99,8 +99,8 @@ in the sample metadata whether the episode is valid and how tau2 ended it, and
 
 | Variable | Default |
 |---|---|
-| `TAU2_USER_LLM` / `TAU2_USER_API_BASE` | the rollout router (policy model) |
-| `TAU2_JUDGE_LLM` / `TAU2_JUDGE_API_BASE` | the rollout router (policy model) |
+| `TAU2_USER_LLM` / `TAU2_USER_API_BASE` | the rollout endpoint (policy model) |
+| `TAU2_JUDGE_LLM` / `TAU2_JUDGE_API_BASE` | the rollout endpoint (policy model) |
 | `TAU2_COMMUNICATE_SCORER` | `substring` |
 | `TAU2_MAX_STEPS` | 100 |
 | `TAU2_EPISODE_TIMEOUT_S` | 1800 |
