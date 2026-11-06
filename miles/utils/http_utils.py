@@ -346,8 +346,12 @@ async def _post_buffer(url: str, payload: dict) -> np.ndarray:
         raise httpx.ReadError(str(exc)) from exc
 
 
+def rollout_external_api_key() -> str | None:
+    return os.environ.get("MILES_ROLLOUT_EXTERNAL_API_KEY")
+
+
 def rollout_external_headers() -> dict[str, str]:
-    api_key = os.environ.get("MILES_ROLLOUT_EXTERNAL_API_KEY")
+    api_key = rollout_external_api_key()
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 

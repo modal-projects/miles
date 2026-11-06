@@ -74,10 +74,12 @@ class TestComputeRequestPayloadOutputStore:
             )
 
 
-def test_generation_goes_to_the_external_rollout_or_else_to_miles_own_router():
+def test_rollout_requests_go_to_the_external_rollout_or_else_to_miles_own_router():
     external = SimpleNamespace(rollout_external_url="https://rollout/", sglang_router_ip=None, sglang_router_port=None)
     own = SimpleNamespace(rollout_external_url=None, sglang_router_ip="10.0.0.1", sglang_router_port=3000)
 
+    assert generate_endpoint_utils.rollout_url(external) == "https://rollout"
+    assert generate_endpoint_utils.rollout_url(own) == "http://10.0.0.1:3000"
     assert generate_endpoint_utils.generation_url(external) == "https://rollout/generate"
     assert generate_endpoint_utils.generation_url(own) == "http://10.0.0.1:3000/generate"
 
