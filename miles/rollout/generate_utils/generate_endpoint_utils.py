@@ -56,9 +56,13 @@ def compute_prompt_ids_from_sample(state, sample, tools=None):
         return state.tokenizer.encode(prompt, add_special_tokens=False)
 
 
+def rollout_url(args) -> str:
+    """Where rollout requests go: the external rollout service, or Miles' own router."""
+    return (args.rollout_external_url or f"http://{args.sglang_router_ip}:{args.sglang_router_port}").rstrip("/")
+
+
 def generation_url(args) -> str:
-    base = args.rollout_external_url or f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
-    return f"{base.rstrip('/')}/generate"
+    return f"{rollout_url(args)}/generate"
 
 
 def router_routes_by_key(args) -> bool:
