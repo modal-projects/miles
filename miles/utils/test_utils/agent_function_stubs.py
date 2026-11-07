@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from miles.rollout.agentic.rollout_limits import current_scope, rollout_lock, rollout_semaphore
@@ -79,6 +80,20 @@ async def leave_cleanup_thread(*, marker: str, delay_s: float, **kwargs) -> int:
 
 async def leave_endless_thread(**kwargs) -> int:
     threading.Thread(target=time.sleep, args=(3600,), daemon=False).start()
+    return os.getpid()
+
+
+_MODULE_POOL = ThreadPoolExecutor(max_workers=4)
+
+
+async def leave_module_pool_work(*, marker: str, delay_s: float, **kwargs) -> int:
+    """Like an SDK that logs through a module-level pool, whose idle workers outlive the call."""
+
+    def _log() -> None:
+        time.sleep(delay_s)
+        Path(marker).touch()
+
+    _MODULE_POOL.submit(_log)
     return os.getpid()
 
 
