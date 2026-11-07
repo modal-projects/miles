@@ -10,6 +10,7 @@ It is a plain subprocess rather than a Ray task because
 """
 
 import asyncio
+import concurrent.futures.thread
 import contextlib
 import ctypes
 import logging
@@ -197,6 +198,9 @@ def _child_main(parent_pid: int) -> None:
     except BaseException:
         traceback.print_exc()
         _exit(1)
+    # As interpreter shutdown does before it joins threads: idle executor workers, such as a library's module-level
+    # pool, finish their queued work and exit instead of holding the process to the deadline.
+    concurrent.futures.thread._python_exit()
     # the deadline armed once the call was over bounds this wait
     for thread in set(threading.enumerate()) - threads_before:
         if not thread.daemon:
