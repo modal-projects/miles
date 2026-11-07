@@ -56,3 +56,16 @@ def test_empty_support_response():
     )
     (selected.sum() + entropy.sum()).backward()
     assert logits.grad.shape == logits.shape
+
+
+@pytest.mark.parametrize("sampling_support", [False, True])
+def test_no_rows_score_in_the_dtype_of_rows(sampling_support):
+    """A CP rank whose sequence piece holds no response all-reduces these rows with ranks that score some."""
+    ids = torch.tensor([[3, 5, 7, -1]])
+    some = selected_log_probs_and_entropy(
+        torch.randn(1, 31, dtype=torch.bfloat16), ids, sampling_support=sampling_support, with_entropy=True
+    )
+    none = selected_log_probs_and_entropy(
+        torch.empty(0, 31, dtype=torch.bfloat16), ids[:0], sampling_support=sampling_support, with_entropy=True
+    )
+    assert [t.dtype for t in none] == [t.dtype for t in some] == [torch.float32, torch.float32]
