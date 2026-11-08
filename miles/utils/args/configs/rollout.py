@@ -64,6 +64,17 @@ class RolloutRelatedConfig(BaseConfig):
             )
         ),
     ] = False
+    async_drain_during_weight_update: A[
+        bool,
+        Arg(
+            help=(
+                "In fully async mode, drain the next batch while the weights sync rather than once the new "
+                "version serves, so the drain and its conversion overlap the sync. Groups finishing during the "
+                "sync go to the following batch, and the batch's staleness is measured against the version "
+                "served when it is drained. Not with --max-weight-staleness."
+            )
+        ),
+    ] = False
     # Sampling values reach the engine per request only: the built-in generate path sends them
     # itself and the session server fills fields an agent omits from its session's defaults.
     # They are never engine launch arguments: an engine shared by rollout and eval has no single default.

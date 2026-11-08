@@ -21,6 +21,7 @@ from miles.ray import placement_group as placement_group_mod
 from miles.ray import wiring
 from miles.utils import object_store
 from miles.utils.async_utils import with_disposer
+from miles.utils.args.runtime import OrchestratorConfig
 from miles.utils.orchestration_utils import ArgvOrchestratorStartupInfo
 
 
@@ -224,6 +225,20 @@ class TestPipelinedGeneration:
         assert events.index("actor_train:1") < events.index("update_weights:1")
         assert events.index("update_weights:1") < events.index("generate_start:2")
         assert components.actor_model.trained == [0, 1, 2]
+
+    async def test_fully_async_drain_during_weight_update_starts_with_the_sync(self, monkeypatch: pytest.MonkeyPatch):
+        """The next drain starts once training ends, before the weights sync, and still trains every rollout."""
+        events: list[str] = []
+        args = _make_args(fully_async=True, num_rollout=2, update_weights_interval=1, async_drain_during_weight_update=True)
+        components = _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_async_driver.train, _startup_info(args))
+
+        assert events.index("actor_train:0") < events.index("generate_start:1") < events.index("update_weights:0")
+        assert events.count("generate_start:1") == 1
+        assert components.actor_model.trained == [0, 1]
+        # the driver reads the flag from its own config, not from the full argument namespace
+        assert "async_drain_during_weight_update" in OrchestratorConfig.model_fields
 
 
 class TestCriticValuesHandoff:

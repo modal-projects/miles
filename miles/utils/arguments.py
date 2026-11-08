@@ -1720,6 +1720,13 @@ def miles_validate_args(args):
             f"so one group already puts n_samples_per_prompt trajectories in flight"
         )
 
+    if args.async_drain_during_weight_update:
+        assert args.fully_async, "--async-drain-during-weight-update drains the fully-async buffer: it needs --fully-async"
+        assert args.max_weight_staleness is None, (
+            "--async-drain-during-weight-update measures a batch's staleness against the version still served "
+            "while the weights sync, so --max-weight-staleness would admit groups one version older"
+        )
+
     _resolve_rollout_functions(args)
 
     if args.namespaced_radix_cache is None:

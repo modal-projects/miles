@@ -151,6 +151,10 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
             await offload_train()
             if args.offload_rollout:
                 await inference_controller.onload_weights()
+        if defer_next_drain and args.async_drain_during_weight_update and not args.colocate:
+            # the drain and its conversion run while the weights sync
+            rollout_data_next_future = await eager_create_task(prepare_and_generate(rollout_id + 1))
+            defer_next_drain = False
         if weight_update_due:
             if not args.fully_async:
                 # sync generate before update weights to prevent update weight in the middle of generation
