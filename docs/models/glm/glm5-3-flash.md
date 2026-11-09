@@ -48,6 +48,11 @@ Miles carries no copy. The GLM provider registers a fallback config on this
 Transformers version. Transformers 5.16 collides with this release's SGLang
 `qwen3_asr` registration, so do not upgrade it independently.
 
+The dependency pins live in `docker/requirements-glm53.txt`. Consumers extending
+the same release image can install that file with `pip install --no-deps
+--no-build-isolation -r docker/requirements-glm53.txt` after checking out this
+fork revision, without duplicating the pins in their own image recipes.
+
 The Bridge pin is the unmerged
 [`radixark/Megatron-Bridge#35`](https://github.com/radixark/Megatron-Bridge/pull/35)
 branch, based on Bridge 0.5.0. It replaces the release's newer Bridge 0.7.0 only
