@@ -32,6 +32,49 @@ GLM5.2 flagships, not a smaller cut of them.
 
 ## 3. Environment Setup
 
+### Experimental Bridge multi-LoRA image
+
+For the Modal fork's Bridge multi-LoRA consumer, build the separate trainer image
+from the repository root:
+
+```bash
+docker build -f docker/Dockerfile.glm53 -t miles:glm53 .
+```
+
+This overlays the digest-pinned Miles v0.1.2 release with this fork's Miles code,
+Transformers 5.16 and TileLang 0.1.12. The GLM provider and kernels come directly
+from the unmerged
+[`radixark/Megatron-Bridge#35`](https://github.com/radixark/Megatron-Bridge/pull/35)
+commit `6527b18e8bb0db994a267e6dfd4db7dafc669df9`; Miles carries no copy.
+
+That branch is based on Bridge 0.5.0. **Do not install it over the release's
+Bridge 0.7.0 core.** Its multi-LoRA implementation mishandles replicated
+projections under sequence parallelism. Instead,
+`docker/install_glm53_provider.py` installs the pinned dependency with
+`--no-deps --target /opt/miles-glm53-bridge` and exposes only the `glm5` and
+`glm5_next` model packages through symlinks in `/opt/miles-glm53-models`.
+The Miles plugin adds that directory to Bridge's model search path. PEFT,
+conversion, other providers and the active distribution metadata retain the
+release revision (`8cd3466d14d2337c8492827b3712482c2b3e4866`). This also retains
+the consumer's existing multi-LoRA performance optimizations.
+
+The provider pin lives in `docker/requirements-glm53-provider.txt`, and the
+runtime pins in `docker/requirements-glm53.txt`. Consumers extending the same
+release image can install the runtime file and run the installer after checking
+out this fork revision, without duplicating dependency pins in their image
+recipes. The installer does not modify upstream source files. When Bridge
+merges the provider, upgrade the core dependency and remove this optional
+installation and registration after validation.
+
+Use Bridge mode and context parallelism 1. Native multi-LoRA in
+[`radixark/miles#4662`](https://github.com/radixark/miles/pull/4662) still rejects
+grouped expert adapters, so it does not cover this workload's routed/shared MoE
+targets. This trainer overlay does not update the sampler: the Spindle consumer
+uses the GLM-capable SGLang v0.5.23 fork separately, and applies its existing
+generic grouped-weight import cache memory bound.
+
+### Upstream full-finetuning recipe
+
 Use `docker.io/radixark/miles:glm53next` — the rolling `radixark/miles:dev` image with the
 three moving parts checked out at the versions this recipe was built against, multi-arch so
 the same tag serves GB300 and x86 nodes.

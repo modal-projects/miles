@@ -1,0 +1,3 @@
+# Runtime dependencies for the optional GLM provider.
+tilelang==0.1.12
+transformers==5.16.0

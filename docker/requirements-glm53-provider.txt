@@ -1,0 +1,2 @@
+# Install into an isolated target, never over the release Bridge core.
+megatron-bridge @ git+https://github.com/radixark/Megatron-Bridge.git@6527b18e8bb0db994a267e6dfd4db7dafc669df9
