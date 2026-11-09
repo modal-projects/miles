@@ -34,6 +34,9 @@ class DPSchedule(NamedTuple):
     micro_batch_indices: list[list[list[int]]]
     num_microbatches: list[int]  # (num_steps,): shared micro-batch counts for every rank
     num_rollouts: list[int]  # (num_steps,): distinct rollout counts
+    # (num_ranks, num_local_padding): positions in partitions[rank] holding a padding copy, a sample scheduled
+    # again so every rank runs the same micro-batch count; it trains nothing (its loss mask is zeroed)
+    padding: list[list[int]]
 
 
 @functools.cache
@@ -103,6 +106,7 @@ def build_dp_schedule(
     partitions: list[list[int]] = [[] for _ in range(dp_size)]
     micro_batch_indices: list[list[list[int]]] = [[] for _ in range(dp_size)]
     num_microbatches: list[int] = []
+    padding: list[list[int]] = [[] for _ in range(dp_size)]
 
     step_start = 0
     for step_i, step_num_rollouts in enumerate(num_rollouts):
@@ -118,6 +122,7 @@ def build_dp_schedule(
         balance_by_flops = args.balance_by_flops
         # Shared by FLOPs-balanced packing and FLOPs-balanced distribution below.
         workloads = _calculate_workloads(step_lengths, args) if balance_by_flops else None
+        num_padding = 0
         if args.use_dynamic_batch_size:
             # Pack under the token budget: first-fit, or FLOPs-balanced partitions under
             # --balance-by-flops (which does not enforce the token cap per micro-batch).
@@ -146,17 +151,15 @@ def build_dp_schedule(
             step_micro_batches = [
                 list(range(i, min(i + args.micro_batch_size, n))) for i in range(0, n, args.micro_batch_size)
             ]
-            if len(step_micro_batches) % align_to != 0:
-                raise AssertionError(
-                    f"static path: micro-batch count ({len(step_micro_batches)}) is not a multiple of "
-                    f"dp_size * mb_group ({align_to}); got "
-                    f"step_size={len(sample_indices)}, micro_batch_size={args.micro_batch_size}, "
-                    f"dp_size={dp_size}, mb_group={mb_group if vpp_size > 1 else 1}. "
-                    f"Splitting static micro-batches would break the fixed-size invariant; adjust the config "
-                    f"so step_size % (dp_size * micro_batch_size * mb_group) == 0."
-                )
+            # A step of whole rollouts has a data-dependent sample count, and splitting a fixed-size micro-batch
+            # would break the fixed size, so the count reaches a multiple of align_to with padding micro-batches:
+            # each runs the step's shortest sample again.
+            num_padding = -len(step_micro_batches) % align_to
+            shortest = min(range(n), key=step_lengths.__getitem__)
+            step_micro_batches += [[shortest] for _ in range(num_padding)]
 
         num_microbatches.append(len(step_micro_batches) // dp_size)
+        first_padding = len(step_micro_batches) - num_padding
 
         # Distribute the micro-batches across DP ranks, len(step_micro_batches) / dp_size each: strided
         # round-robin, or Karmarkar-Karp on micro-batch weights (tokens under --balance-data,
@@ -174,6 +177,8 @@ def build_dp_schedule(
             for k in micro_batch_ids:
                 micro_batch = step_micro_batches[k]
                 local_start = len(partitions[rank])
+                if k >= first_padding:
+                    padding[rank].append(local_start)
                 partitions[rank].extend(sample_indices[i] for i in micro_batch)
                 micro_batch_indices[rank].append(list(range(local_start, local_start + len(micro_batch))))
 
@@ -182,4 +187,5 @@ def build_dp_schedule(
         micro_batch_indices=micro_batch_indices,
         num_microbatches=num_microbatches,
         num_rollouts=num_rollouts,
+        padding=padding,
     )
