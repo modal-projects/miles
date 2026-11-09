@@ -108,6 +108,32 @@ class TestGetDataIteratorPrecomputedSchedule:
         assert sorted(i for shard in shards for i in shard["sample_indices"]) == list(range(256))
 
 
+class TestScheduledSplitPadding:
+    def test_a_padding_copy_trains_nothing_and_leaves_its_sample_intact(self) -> None:
+        """Two rollouts with three samples at dp_size 2 and one sample per micro-batch: the shortest sample runs
+        again so both ranks run two micro-batches, with its loss mask zeroed in that copy only."""
+        state = _parallel_state(dp_size=2)
+        args = Namespace(**{**vars(_scheduled_args()), "global_batch_size": 2, "use_dynamic_batch_size": False})
+        args.micro_batch_size = 1
+        raw = {
+            "tokens": [[0] * 5, [1] * 3, [2] * 4],
+            "loss_masks": [[1, 1], [1], [1, 1, 1]],
+            "sample_indices": [0, 1, 2],
+            "rollout_ids": [0, 0, 1],
+        }
+
+        shards = split_train_data_by_dp_scheduled_raw(
+            args, raw, train_parallel_config=state.train_parallel_config(supports_precomputed_schedule=True)
+        )
+
+        assert [shard["num_microbatches"] for shard in shards] == [[2], [2]]
+        rows = sorted(
+            (i, mask) for shard in shards for i, mask in zip(shard["sample_indices"], shard["loss_masks"], strict=True)
+        )
+        assert rows == [(0, [1, 1]), (1, [0]), (1, [1]), (2, [1, 1, 1])]
+        assert raw["loss_masks"] == [[1, 1], [1], [1, 1, 1]]
+
+
 class TestGetDataIteratorUnsupportedSchedule:
     def test_a_backend_without_schedule_support_falls_back_and_rejects_three_cells(
         self, monkeypatch: pytest.MonkeyPatch

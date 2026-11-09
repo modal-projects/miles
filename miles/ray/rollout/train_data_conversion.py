@@ -435,7 +435,7 @@ def split_train_data_by_dp_scheduled_raw(
     data["total_lengths"] = total_lengths
 
     global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
-    partitions, micro_batch_indices, num_microbatches, num_rollouts = build_dp_schedule(
+    partitions, micro_batch_indices, num_microbatches, num_rollouts, padding = build_dp_schedule(
         args,
         train_parallel_config,
         total_lengths,
@@ -447,11 +447,14 @@ def split_train_data_by_dp_scheduled_raw(
 
     logger.info(
         f"Rollout-side DP schedule: num_samples={len(total_lengths)}, "
-        f"num_rollouts={num_rollouts}, num_microbatches={num_microbatches}"
+        f"num_rollouts={num_rollouts}, num_microbatches={num_microbatches}, "
+        f"padding={sum(len(positions) for positions in padding)}"
     )
 
     shards = _package_shards(args, data, partitions)
     for rank, shard in enumerate(shards):
+        for position in padding[rank]:
+            shard["loss_masks"][position] = [0] * len(shard["loss_masks"][position])
         shard["num_microbatches"] = num_microbatches
         shard["micro_batch_indices"] = micro_batch_indices[rank]
         shard["num_rollouts"] = num_rollouts
