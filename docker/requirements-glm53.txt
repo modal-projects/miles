@@ -1,5 +1,3 @@
-# Keep this experimental GLM dependency separate from the shared Miles image.
-# radixark/Megatron-Bridge#35; --no-deps preserves the release training stack.
-megatron-bridge @ git+https://github.com/radixark/Megatron-Bridge.git@6527b18e8bb0db994a267e6dfd4db7dafc669df9
+# Runtime dependencies for the optional GLM provider.
 tilelang==0.1.12
-transformers==5.12.1
+transformers==5.16.0

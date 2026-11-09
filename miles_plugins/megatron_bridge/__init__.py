@@ -16,6 +16,8 @@ one model does not prevent other models from working.
 from __future__ import annotations
 
 import logging
+from importlib import import_module
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -81,3 +83,20 @@ try:
     from . import mimo_v2  # noqa: F401
 except Exception as _e:  # pragma: no cover - defensive
     logger.warning("miles mimo_v2 plugin failed to load: %s", _e)
+
+
+def _register_glm53_dependency() -> None:
+    models_path = Path("/opt/miles-glm53-models")
+    if not models_path.is_dir():
+        return
+    from megatron.bridge import models
+
+    if str(models_path) not in models.__path__:
+        models.__path__.append(str(models_path))
+    import_module("megatron.bridge.models.glm5_next")
+
+
+try:
+    _register_glm53_dependency()
+except Exception as _e:  # pragma: no cover - defensive; optional provider
+    logger.warning("miles GLM-5.3 dependency failed to load: %s", _e)

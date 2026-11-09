@@ -1,11 +1,11 @@
 # Build from the repository root:
 # docker build -f docker/Dockerfile.glm53 -t miles:glm53 .
-# Keep the experimental GLM Bridge pin separate from the shared Miles image.
+# Keep the optional GLM provider dependency separate from the release Bridge core.
 FROM radixark/miles:v0.1.2@sha256:c81d8ba7b91571aac8e0bb2be372c6a9664e1ff7b88f518a8891861bae83e3b7
 
-# --no-deps preserves the release's Megatron-LM, PyTorch and CUDA versions.
-COPY docker/requirements-glm53.txt /tmp/requirements-glm53.txt
-RUN pip install --no-deps --no-build-isolation -r /tmp/requirements-glm53.txt
+COPY docker/requirements-glm53*.txt docker/install_glm53_provider.py /tmp/glm53/
+RUN pip install -r /tmp/glm53/requirements-glm53.txt && \
+    python /tmp/glm53/install_glm53_provider.py
 
 # The release already installs Miles as editable from /root/miles.
 COPY miles /root/miles/miles

@@ -42,24 +42,29 @@ docker build -f docker/Dockerfile.glm53 -t miles:glm53 .
 ```
 
 This overlays the digest-pinned Miles v0.1.2 release with this fork's Miles code,
-Megatron-Bridge `6527b18e8bb0db994a267e6dfd4db7dafc669df9`, Transformers 5.12.1
-and TileLang 0.1.12. The provider and kernels are imported directly from Bridge;
-Miles carries no copy. The GLM provider registers a fallback config on this
-Transformers version. Transformers 5.16 collides with this release's SGLang
-`qwen3_asr` registration, so do not upgrade it independently.
-
-The dependency pins live in `docker/requirements-glm53.txt`. Consumers extending
-the same release image can install that file with `pip install --no-deps
---no-build-isolation -r docker/requirements-glm53.txt` after checking out this
-fork revision, without duplicating the pins in their own image recipes.
-
-The Bridge pin is the unmerged
+Transformers 5.16 and TileLang 0.1.12. The GLM provider and kernels come directly
+from the unmerged
 [`radixark/Megatron-Bridge#35`](https://github.com/radixark/Megatron-Bridge/pull/35)
-branch, based on Bridge 0.5.0. It replaces the release's newer Bridge 0.7.0 only
-in this GLM image. In particular, it lacks the newer MiMo provider; the shared
-Dockerfile retains its release Bridge pin. When the GLM provider lands upstream,
-update this dependency pin and validate the replacement before removing the
-overlay.
+commit `6527b18e8bb0db994a267e6dfd4db7dafc669df9`; Miles carries no copy.
+
+That branch is based on Bridge 0.5.0. **Do not install it over the release's
+Bridge 0.7.0 core.** Its multi-LoRA implementation mishandles replicated
+projections under sequence parallelism. Instead,
+`docker/install_glm53_provider.py` installs the pinned dependency with
+`--no-deps --target /opt/miles-glm53-bridge` and exposes only the `glm5` and
+`glm5_next` model packages through symlinks in `/opt/miles-glm53-models`.
+The Miles plugin adds that directory to Bridge's model search path. PEFT,
+conversion, other providers and the active distribution metadata retain the
+release revision (`8cd3466d14d2337c8492827b3712482c2b3e4866`). This also retains
+the consumer's existing multi-LoRA performance optimizations.
+
+The provider pin lives in `docker/requirements-glm53-provider.txt`, and the
+runtime pins in `docker/requirements-glm53.txt`. Consumers extending the same
+release image can install the runtime file and run the installer after checking
+out this fork revision, without duplicating dependency pins in their image
+recipes. The installer does not modify upstream source files. When Bridge
+merges the provider, upgrade the core dependency and remove this optional
+installation and registration after validation.
 
 Use Bridge mode and context parallelism 1. Native multi-LoRA in
 [`radixark/miles#4662`](https://github.com/radixark/miles/pull/4662) still rejects
