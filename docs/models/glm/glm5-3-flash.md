@@ -32,6 +32,39 @@ GLM5.2 flagships, not a smaller cut of them.
 
 ## 3. Environment Setup
 
+### Experimental Bridge multi-LoRA image
+
+For the Modal fork's Bridge multi-LoRA consumer, build the separate trainer image
+from the repository root:
+
+```bash
+docker build -f docker/Dockerfile.glm53 -t miles:glm53 .
+```
+
+This overlays the digest-pinned Miles v0.1.2 release with this fork's Miles code,
+Megatron-Bridge `6527b18e8bb0db994a267e6dfd4db7dafc669df9`, Transformers 5.12.1
+and TileLang 0.1.12. The provider and kernels are imported directly from Bridge;
+Miles carries no copy. The GLM provider registers a fallback config on this
+Transformers version. Transformers 5.16 collides with this release's SGLang
+`qwen3_asr` registration, so do not upgrade it independently.
+
+The Bridge pin is the unmerged
+[`radixark/Megatron-Bridge#35`](https://github.com/radixark/Megatron-Bridge/pull/35)
+branch, based on Bridge 0.5.0. It replaces the release's newer Bridge 0.7.0 only
+in this GLM image. In particular, it lacks the newer MiMo provider; the shared
+Dockerfile retains its release Bridge pin. When the GLM provider lands upstream,
+update this dependency pin and validate the replacement before removing the
+overlay.
+
+Use Bridge mode and context parallelism 1. Native multi-LoRA in
+[`radixark/miles#4662`](https://github.com/radixark/miles/pull/4662) still rejects
+grouped expert adapters, so it does not cover this workload's routed/shared MoE
+targets. This trainer overlay does not update the sampler: the Spindle consumer
+uses the GLM-capable SGLang v0.5.23 fork separately, and applies its existing
+generic grouped-weight import cache memory bound.
+
+### Upstream full-finetuning recipe
+
 Use `docker.io/radixark/miles:glm53next` — the rolling `radixark/miles:dev` image with the
 three moving parts checked out at the versions this recipe was built against, multi-arch so
 the same tag serves GB300 and x86 nodes.

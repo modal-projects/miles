@@ -81,10 +81,3 @@ try:
     from . import mimo_v2  # noqa: F401
 except Exception as _e:  # pragma: no cover - defensive
     logger.warning("miles mimo_v2 plugin failed to load: %s", _e)
-
-# Provider port from radixark/Megatron-Bridge 6527b18e. The v0.1.2 release
-# predates GLM-5.3 in Bridge; registering it here avoids modifying that install.
-try:
-    from . import glm5_next  # noqa: F401
-except Exception as _e:  # pragma: no cover - optional model dependencies
-    logger.warning("miles glm5_next plugin failed to load: %s", _e)

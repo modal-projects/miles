@@ -1,0 +1,14 @@
+# Build from the repository root:
+# docker build -f docker/Dockerfile.glm53 -t miles:glm53 .
+# Keep the experimental GLM Bridge pin separate from the shared Miles image.
+FROM radixark/miles:v0.1.2@sha256:c81d8ba7b91571aac8e0bb2be372c6a9664e1ff7b88f518a8891861bae83e3b7
+
+# radixark/Megatron-Bridge#35: GLM-5.3 KDA/DSA provider and Bridge LoRA.
+# --no-deps preserves the release's Megatron-LM, PyTorch and CUDA versions.
+RUN pip install --no-deps --no-build-isolation \
+    git+https://github.com/radixark/Megatron-Bridge.git@6527b18e8bb0db994a267e6dfd4db7dafc669df9
+RUN pip install transformers==5.12.1 tilelang==0.1.12
+
+# The release already installs Miles as editable from /root/miles.
+COPY miles /root/miles/miles
+COPY miles_plugins /root/miles/miles_plugins
