@@ -1,0 +1,13 @@
+### 0
+hf download reflection/Beam-1.0-501B-A23B
+  --local-dir /root/models/Beam
+
+### 1
+hf download
+  --repo-type dataset zhuzilin/dapo-math-17k
+  --local-dir <SANDBOX>/datasets/dapo-math-17k
+
+### 2
+hf download
+  --repo-type dataset zhuzilin/aime-2025
+  --local-dir <SANDBOX>/datasets/aime-2025

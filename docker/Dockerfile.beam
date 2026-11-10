@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+FROM radixark/miles:v0.1.2@sha256:c81d8ba7b91571aac8e0bb2be372c6a9664e1ff7b88f518a8891861bae83e3b7
+
+# Beam SGLang pinned to the last commit on torch 2.13 (#116, includes the streamed-LoRA
+# #107): from #118 on, that line requires torch 2.14.1 / sglang-kernel 0.4.9, which the
+# torch 2.13 Miles v0.1.2 image and its prebuilt extensions (TransformerEngine, flash-attn,
+# apex) cannot load. The pin is the tip of the public `beam-miles` branch.
+# --build-arg BEAM_SGLANG_REF=<commit or branch> overrides it.
+ARG BEAM_SGLANG_REF=9ac1c65bec3dc832766d03970e545da5bd6fcb6f
+ADD --keep-git-dir=true https://github.com/sgl-project/sglang.git#${BEAM_SGLANG_REF} /tmp/beam-sglang
+RUN cd /sgl-workspace/sglang && \
+    git fetch --update-shallow /tmp/beam-sglang HEAD && \
+    git checkout -f FETCH_HEAD && \
+    SGLANG_BUILD_RUST_EXTS=none pip install -e "python[all]" --no-deps && \
+    rm -rf /tmp/beam-sglang /root/miles
+
+COPY . /root/miles/
+RUN pip install -e /root/miles --no-deps --no-build-isolation
+WORKDIR /root/miles

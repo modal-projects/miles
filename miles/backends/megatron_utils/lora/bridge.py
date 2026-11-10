@@ -102,7 +102,10 @@ def _validate_multi_lora_moe_support(args: Namespace, provider) -> None:
         "desynchronizes the dispatched token order)."
     )
     # sglang only wraps a fused MoE layer when both expert projections are targeted.
-    served = {target.rsplit(".", 1)[-1] for target in args.hf_lora_targets}
+    # Beam's attention output gate (self_attn.gate_proj) is not an expert projection.
+    served = {
+        target.rsplit(".", 1)[-1] for target in args.hf_lora_targets if target.split(".")[-2:-1] != ["self_attn"]
+    }
     if "gate_up_proj" in served:
         served.update(("gate_proj", "up_proj"))
     expert_pair = {"gate_proj", "up_proj", "down_proj"}
@@ -144,6 +147,10 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
 
+    from ..model_provider import _apply_bridge_runtime_config
+
+    # Start from the full-model Bridge config so LoRA trains the same base model.
+    _apply_bridge_runtime_config(provider, args)
     provider.tensor_model_parallel_size = args.tensor_model_parallel_size
     provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size
     provider.expert_model_parallel_size = args.expert_model_parallel_size
@@ -218,13 +225,19 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
             hf_mapping=hf_mapping,
             canonical=args.lora_type == "canonical_lora",
         )
+        if any(".experts." in target for target in adapter_targets):
+            # Bridge's expert adapters miscompute under expert TP (NVIDIA-NeMo/Megatron-Bridge#5635).
+            assert (
+                provider.expert_tensor_parallel_size or 1
+            ) == 1, "LoRA on MoE experts requires --expert-tensor-parallel-size 1"
         lora = create_adapter(args, target_modules=adapter_targets)
         transformed = lora(model_chunks, training=True)
-        if is_multi_lora_enabled(args):
-            for chunk in transformed:
-                for module in chunk.modules():
-                    if isinstance(module, TopKRouter):
-                        module.frozen_expert_bias = True
+        # The router stays frozen under LoRA, and neither the adapter checkpoint nor the
+        # adapter weight sync carries expert_bias, so it must not move either.
+        for chunk in transformed:
+            for module in chunk.modules():
+                if isinstance(module, TopKRouter):
+                    module.frozen_expert_bias = True
         lora.set_params_to_save(transformed)
         return transformed
 
@@ -252,5 +265,9 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     if args.offload_train:
         patch_param_grad_buffer_for_colocate_mode_lora()
 
-    model = provider.provide_distributed_model(wrap_with_ddp=True, ddp_config=ddp_config)
+    model = provider.provide_distributed_model(
+        wrap_with_ddp=True,
+        ddp_config=ddp_config,
+        data_parallel_random_init=args.data_parallel_random_init,
+    )
     return model

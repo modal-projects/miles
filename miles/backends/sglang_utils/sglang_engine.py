@@ -30,6 +30,16 @@ def format_v6_uri(addr: str | None) -> str | None:
     return addr
 
 
+def _sglang_lora_target_modules(targets):
+    """Reflection SGLang's --lora-target-modules takes module names, not HF paths, and its
+    adapter loader reduces paths to the same names."""
+    if targets == "all-linear":
+        return ["all"]
+    # A bare gate_proj names the MLP gate; the attention output gate stays qualified.
+    names = ("self_attn.gate_proj" if t.endswith(".self_attn.gate_proj") else t.rsplit(".", 1)[-1] for t in targets)
+    return list(dict.fromkeys(names))
+
+
 def build_server_url(host: str, port: int) -> str:
     return f"http://{format_v6_uri(host)}:{port}"
 
@@ -150,16 +160,12 @@ def _compute_server_args(
         kwargs["enable_lora"] = True
         kwargs["max_loras_per_batch"] = args.multi_lora_n_adapters
         kwargs["max_lora_rank"] = max(getattr(args, "lora_rank", 0), 1)
-        kwargs["lora_target_modules"] = (
-            ["all"] if args.lora_adapter_targets == "all-linear" else args.lora_adapter_targets
-        )
+        kwargs["lora_target_modules"] = _sglang_lora_target_modules(args.lora_adapter_targets)
     elif lora_rollout_enabled(args):
         kwargs["enable_lora"] = True
         kwargs["max_loras_per_batch"] = 1
         kwargs["max_lora_rank"] = max(getattr(args, "lora_rank", 0), 1)
-        kwargs["lora_target_modules"] = (
-            ["all"] if args.lora_adapter_targets == "all-linear" else args.lora_adapter_targets
-        )
+        kwargs["lora_target_modules"] = _sglang_lora_target_modules(args.lora_adapter_targets)
 
         if engine_loads_adapter_from_disk(args):
             kwargs["lora_paths"] = [f"{LORA_ADAPTER_NAME}={args.lora_adapter_path}"]

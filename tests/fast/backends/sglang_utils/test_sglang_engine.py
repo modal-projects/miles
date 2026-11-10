@@ -114,6 +114,11 @@ class TestComputeEngineLaunchCmd:
         assert parsed.api_key == "secret"
 
 
+def _module_names(targets):
+    # SGLang names the attention output gate self_attn.gate_proj and every other module by its leaf.
+    return {"self_attn.gate_proj" if ".self_attn.gate_proj" in t else t.rsplit(".", 1)[-1] for t in targets}
+
+
 class TestLoraTargetModules:
     @pytest.mark.parametrize(
         "adapter_targets",
@@ -128,8 +133,13 @@ class TestLoraTargetModules:
                 "model.layers.*.linear_attn.out_proj",
             ],
             "all-linear",
+            [
+                "model.layers.*.self_attn.gate_proj",
+                "model.layers.0.mlp.gate_proj",
+                "model.layers.*.mlp.experts.*.gate_proj",
+            ],
         ],
-        ids=["qkv", "gdn", "gdn-output", "inkling"],
+        ids=["qkv", "gdn", "gdn-output", "inkling", "beam-gates"],
     )
     @pytest.mark.parametrize("multi_lora", [False, True], ids=["single", "multi"])
     def test_adapter_selection_reaches_engine_and_sync_config(self, adapter_targets, multi_lora):
@@ -143,7 +153,8 @@ class TestLoraTargetModules:
             multi_lora_n_adapters=4,
         )
         targets = parse_server_args_argv(shlex.split(_cmd(args=args))[3:]).lora_target_modules
-        assert set(targets) == ({"all"} if adapter_targets == "all-linear" else set(adapter_targets))
+        expected = {"all"} if adapter_targets == "all-linear" else _module_names(adapter_targets)
+        assert set(targets) == expected
         assert build_lora_config(args, target_modules=adapter_targets)["target_modules"] == adapter_targets
 
 

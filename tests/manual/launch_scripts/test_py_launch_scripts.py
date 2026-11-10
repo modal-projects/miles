@@ -54,7 +54,18 @@ def _nemotron_checkpoint(sandbox: Path) -> dict[str, object]:
     return {"model_dir": str(model_dir)}
 
 
+def _beam_datasets(sandbox: Path) -> dict[str, object]:
+    # prepare rewrites the downloaded AIME25 into the answer-format eval file
+    data_dir = sandbox / "datasets"
+    (data_dir / "aime-2025").mkdir(parents=True)
+    (data_dir / "aime-2025" / "aime-2025.jsonl").write_text(
+        json.dumps({"prompt": [{"role": "user", "content": "Find x."}], "label": "7"}) + "\n"
+    )
+    return {"data_dir": str(data_dir)}
+
+
 _SCRIPTS_WHOSE_DEFAULTS_ARE_UNSUPPORTED: dict[str, Callable[[Path], dict[str, object]]] = {
+    "scripts/run_beam.py": _beam_datasets,
     "scripts/run_deepseek_v4.py": lambda sandbox: {"model_name": "DeepSeek-V4-Flash-FP8-4layer"},
     "scripts/run_glm5_744b_a40b.py": lambda sandbox: _glm_checkpoint(sandbox, "GLM-5", 78),
     "scripts/run_glm5_2_744b_a40b.py": lambda sandbox: _glm_checkpoint(sandbox, "GLM-5.2", 78),
