@@ -96,3 +96,51 @@ def test_reject_dropout_before_execution():
     model.config.attention_dropout = 0.1
     with pytest.raises(ValueError, match="dropout"):
         enable_qwen_prefix_tree(model)
+
+
+def test_fp32_master_weights_cast_qk_norm_outputs_for_fused_attention():
+    model = _model(torch.float32)
+    enable_qwen_prefix_tree(model)
+    batch = TreeSFTBatch.from_plan(
+        build_prefix_tree([[1, 2, 3], [1, 2, 4]]), [[2, 3, -100], [2, 4, -100]], device="cpu"
+    )
+    calls = []
+
+    def fake_varlen(q, k, v, **kwargs):
+        assert q.dtype == k.dtype == v.dtype == torch.bfloat16
+        calls.append(q.dtype)
+        return q + k.repeat_interleave(2, 1)[: q.shape[0]] * 0 + v.repeat_interleave(2, 1)[: q.shape[0]] * 0
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        loss = batch.loss(model, varlen_func=fake_varlen)
+    loss.backward()
+    assert len(calls) == 2
+
+
+def test_long_non_aligned_prefix_fanout_and_adamw_update_in_fp64():
+    generator = torch.Generator().manual_seed(29)
+    prefix = torch.randint(0, 37, (129,), generator=generator).tolist()
+    sequences = [prefix + torch.randint(0, 37, (7 + branch,), generator=generator).tolist() for branch in range(8)]
+    targets = [[-100] * 128 + sequence[129:] + [-100] for sequence in sequences]
+    expanded = _model(torch.float64, fp64_norm=True)
+    compact = copy.deepcopy(expanded)
+    enable_qwen_prefix_tree(compact)
+    plan = build_prefix_tree(sequences)
+    assert len(plan.tokens) <= 129 + sum(len(sequence) - 129 for sequence in sequences)
+    batch = TreeSFTBatch.from_plan(plan, targets, device="cpu")
+    compact_loss = batch.loss(compact)
+    losses = []
+    for sequence, labels in zip(sequences, targets, strict=True):
+        logits = expanded(torch.tensor([sequence]), use_cache=False).logits[0]
+        losses.append(F.cross_entropy(logits, torch.tensor(labels), reduction="sum"))
+    denominator = sum(sum(label != -100 for label in labels) for labels in targets)
+    expanded_loss = torch.stack(losses).sum() / denominator
+    torch.testing.assert_close(compact_loss, expanded_loss, atol=1e-12, rtol=1e-12)
+    compact_loss.backward()
+    expanded_loss.backward()
+    for actual, expected in zip(compact.parameters(), expanded.parameters(), strict=True):
+        torch.testing.assert_close(actual.grad, expected.grad, atol=1e-12, rtol=1e-12)
+    for model in (compact, expanded):
+        torch.optim.AdamW(model.parameters(), lr=1e-3).step()
+    for actual, expected in zip(compact.parameters(), expanded.parameters(), strict=True):
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)

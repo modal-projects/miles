@@ -31,6 +31,12 @@ def _qwen_tree_attention(
         raise ValueError("Miles tree attention requires an explicit prefix_tree_layout")
     if query.shape[0] != 1 or dropout or sliding_window is not None or attention_mask is not None:
         raise ValueError("tree attention supports one compact row, full attention, and zero dropout")
+    # With FP32 master weights Qwen's Q/K norms promote their outputs to FP32,
+    # while the V projection remains BF16. Match HF's fused-attention autocast
+    # handling before calling a kernel that requires a single Q/K/V dtype.
+    if torch.is_autocast_enabled(query.device.type):
+        dtype = torch.get_autocast_dtype(query.device.type)
+        query, key, value = (tensor.to(dtype) for tensor in (query, key, value))
     output = tree_attention(
         query[0].transpose(0, 1),
         key[0].transpose(0, 1),

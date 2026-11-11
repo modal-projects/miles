@@ -62,6 +62,8 @@ PYTHONPATH=. python -m pytest tests/fast/prefix_tree
 
 The Qwen oracle runs original trajectories independently through ordinary
 causal attention. It compares loss, every parameter gradient and an SGD step.
+An eight-branch, 129-token shared-prefix case also checks an AdamW step at
+FP64 tolerance `1e-12`.
 Cases include nested/uneven forks, duplicate trajectories, an endpoint inside
 another trajectory, unrelated roots, differing labels and weights, ignored
 targets, and checkpoint recomputation. Planner tests check adapter/version
@@ -95,8 +97,8 @@ Expanded input tokens/sec counts the same original work for both layouts;
 it is not the number of physical tokens executed by the compact decoder.
 
 Optional probe dependencies are separate from Miles' core requirements:
-Torch 2.10.0, Transformers 5.12.1 (the existing Miles pin), kernels 0.18.2,
-einops, apache-tvm-ffi, nvidia-cutlass-dsl and compatible CUDA Python bindings.
+Torch 2.10.0, Transformers 5.12.1 (the existing Miles pin), kernels 0.14.0,
+einops, apache-tvm-ffi, nvidia-cutlass-dsl 4.8.1 and compatible CUDA Python bindings.
 The probe loads `kernels-community/flash-attn4` version 1. No default image or
 shared dependency pin is changed by this feature.
 
