@@ -186,6 +186,29 @@ class SlotOptimizer:
                 main_param.grad = None
 
 
+@contextmanager
+def accumulate_slot_gradients(model_chunks, *, enabled: bool):
+    """Reduce only this pass's gradients before adding previously finalized slot gradients."""
+    if not enabled:
+        yield
+        return
+
+    saved = [(param.main_grad, param.main_grad.clone()) for chunk in model_chunks for param in chunk.params_with_grad]
+    for grad, _previous in saved:
+        grad.zero_()
+    completed = False
+    try:
+        yield
+        completed = True
+    finally:
+        # Buckets mix slots: even inactive hooks and early overlap reductions must see fresh zeros.
+        for grad, previous in saved:
+            if completed:
+                grad.add_(previous)
+            else:
+                grad.copy_(previous)
+
+
 def reset_grad_metadata_keep_grads(model_chunks) -> None:
     """Reset DDP bookkeeping while retaining each slot's gradient accumulation window."""
     for model_chunk in model_chunks:
