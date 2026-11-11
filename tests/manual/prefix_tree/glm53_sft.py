@@ -6,11 +6,14 @@ width/depth. It is not a pretrained full-model convergence or throughput claim.
 Run in a Miles trainer image with the pinned GLM provider installed::
 
     torchrun --standalone --nproc-per-node=2 tests/manual/prefix_tree/glm53_sft.py --model /path/to/GLM --lora
-    torchrun --standalone --nproc-per-node=8 tests/manual/prefix_tree/glm53_sft.py --model /path/to/GLM --lora --full-width --precise-moe
+    torchrun --standalone --nproc-per-node=8 tests/manual/prefix_tree/glm53_sft.py --model /path/to/GLM --lora --full-width --pretrained
 
 For warmed reduced-model timings, add --prefix 4098 --suffix 514 --branches 8
 --repetitions 4, without GLM_TREE_TRACE=1. The full-width mode retains the real
 attention/MLP/expert widths, but uses three random layers and a small vocabulary.
+--pretrained instead loads the first five matching checkpoint layers and full
+vocabulary. The random full-width case exposes routing-sensitive BF16 differences
+that can exceed the checks; --precise-moe is an optional numerical diagnostic.
 """
 
 import argparse
@@ -377,8 +380,8 @@ def main():
         "gradient_tensors": len(expanded[2]),
     }
     print("GLM_TREE_SFT", json.dumps(report), flush=True)
-    assert report["logits_relative_l2"] < 0.03, report
-    assert report["gradient_relative_l2"] < 0.05, report
+    assert report["logits_relative_l2"] < 0.02, report
+    assert report["gradient_relative_l2"] < 0.02, report
     assert all(torch.isfinite(g).all() for g in tree[2].values())
     parameters = dict(model.named_parameters())
     shadows = {n: torch.nn.Parameter(parameters[n].detach().clone()) for n in expanded[2]}
@@ -393,7 +396,9 @@ def main():
     update_norm = sum(float((p.float() - initial[n]).square().sum()) for n, p in shadows.items())
     print("OPTIMIZER_UPDATE_RELATIVE_L2", (update_error / max(update_norm, 1e-30)) ** 0.5, flush=True)
     parameter_norm = sum(float(p.float().square().sum()) for p in shadows.values())
-    print("OPTIMIZER_PARAMETER_RELATIVE_L2", (update_error / max(parameter_norm, 1e-30)) ** 0.5, flush=True)
+    parameter_error = (update_error / max(parameter_norm, 1e-30)) ** 0.5
+    print("OPTIMIZER_PARAMETER_RELATIVE_L2", parameter_error, flush=True)
+    assert parameter_error < 0.002, parameter_error
     print("OPTIMIZER_STEP_PASSED", rank, flush=True)
     for repetition in range(args.repetitions - 1):
         a = evaluate(model, sequences, shared=False, lora=lora)

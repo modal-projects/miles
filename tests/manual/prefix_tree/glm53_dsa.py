@@ -74,7 +74,8 @@ def main():
         json.dumps({"outputs_qgrad_kgrad_relative_l2": errors, "selection_sets_exact": True}),
         flush=True,
     )
-    assert max(errors) < 0.02, errors
+    assert errors[0] == 0.0, errors
+    assert max(errors[1:]) < 0.01, errors
 
 
 if __name__ == "__main__":

@@ -69,8 +69,8 @@ def run_case(prefix):
         "gradients": [difference(a, b) for a, b in zip(expected_grads, actual_grads, strict=True)],
     }
     print(json.dumps(report), flush=True)
-    assert report["outputs"] < 0.03, report
-    assert max(report["gradients"]) < 0.04, report
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert max(report["gradients"]) < 0.01, report
     return report
 
 
