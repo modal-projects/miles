@@ -223,6 +223,8 @@ def evaluate(model, sequences, *, shared, lora=False):
                 ("input", inputs[0] if inputs else kwargs.get("hidden_states")),
                 ("output", output[0] if isinstance(output, tuple) else output),
             )
+            if name.endswith(".router") and isinstance(output, tuple):
+                values += (("routing", output[1]),)
             for kind, value in values:
                 if not isinstance(value, torch.Tensor) or value.ndim < 2:
                     continue
@@ -237,7 +239,7 @@ def evaluate(model, sequences, *, shared, lora=False):
 
     if os.environ.get("GLM_TREE_TRACE") == "1":
         for name, module in model.named_modules():
-            if name.endswith(("self_attention", ".mlp")) or name == "embedding":
+            if name.endswith(("self_attention", ".mlp", ".router")) or name == "embedding":
                 handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
     print("SFT_PHASE", "tree" if shared else "expanded", "begin", flush=True)
     torch.cuda.synchronize()
@@ -302,6 +304,12 @@ def main():
     tree = evaluate(model, sequences, shared=True, lora=lora)
     for name, ref in expanded[4].items():
         value = tree[4][name]
+        if name.endswith(".routing") and rank == 0:
+            print(
+                "ROUTING_TRACE "
+                + json.dumps({"name": name, "changed_rows": int((ref != value).any(-1).sum()), "rows": ref.shape[0]}),
+                flush=True,
+            )
         print(
             "FORWARD_TRACE",
             json.dumps(
@@ -344,6 +352,8 @@ def main():
     update_error = sum(float((parameters[n].float() - p.float()).square().sum()) for n, p in shadows.items())
     update_norm = sum(float((p.float() - initial[n]).square().sum()) for n, p in shadows.items())
     print("OPTIMIZER_UPDATE_RELATIVE_L2", (update_error / max(update_norm, 1e-30)) ** 0.5, flush=True)
+    parameter_norm = sum(float(p.float().square().sum()) for p in shadows.values())
+    print("OPTIMIZER_PARAMETER_RELATIVE_L2", (update_error / max(parameter_norm, 1e-30)) ** 0.5, flush=True)
     print("OPTIMIZER_STEP_PASSED", rank, flush=True)
     for repetition in range(args.repetitions - 1):
         a = evaluate(model, sequences, shared=False, lora=lora)
