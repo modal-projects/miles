@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from miles.backends.training_utils.prefix_tree.plan import PrefixTreePlan
+from miles.backends.training_utils.prefix_tree.reduction import OrderedRowGather
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,7 @@ class SFTLossLayout:
     rows: torch.Tensor
     targets: torch.Tensor
     weights: torch.Tensor
+    reduction: OrderedRowGather | None = None
 
     @classmethod
     def from_plan(
@@ -23,6 +25,7 @@ class SFTLossLayout:
         *,
         device,
         weights: Sequence[Sequence[float]] | None = None,
+        deterministic_reduction=False,
     ) -> "SFTLossLayout":
         if len(targets) != len(plan.sample_nodes) or any(
             len(target) != len(nodes) for target, nodes in zip(targets, plan.sample_nodes, strict=True)
@@ -48,6 +51,11 @@ class SFTLossLayout:
             rows=torch.tensor(rows, device=device, dtype=torch.long),
             targets=torch.tensor(labels, device=device, dtype=torch.long),
             weights=torch.tensor(values, device=device, dtype=torch.float64),
+            reduction=(
+                OrderedRowGather.from_indices(rows, len(plan.tokens), device=device)
+                if deterministic_reduction
+                else None
+            ),
         )
 
     def loss(self, logits: torch.Tensor) -> torch.Tensor:
@@ -56,7 +64,8 @@ class SFTLossLayout:
         Normalize over the original loss occurrences, never unique tree rows.
         Promote low-precision logits for CE, but retain float64 in the oracle.
         """
-        selected = logits.reshape(-1, logits.shape[-1]).index_select(0, self.rows)
+        flat = logits.reshape(-1, logits.shape[-1])
+        selected = self.reduction.gather(flat) if self.reduction else flat.index_select(0, self.rows)
         if selected.dtype in (torch.float16, torch.bfloat16):
             selected = selected.float()
         losses = F.cross_entropy(selected, self.targets, reduction="none")

@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from miles.backends.training_utils.prefix_tree.plan import PrefixTreePlan
+from miles.backends.training_utils.prefix_tree.reduction import OrderedRowGather
 
 
 @dataclass(frozen=True)
@@ -16,9 +17,10 @@ class TreeAttentionLayout:
     cu_kv: torch.Tensor
     max_q: int
     max_kv: int
+    kv_reduction: OrderedRowGather | None = None
 
     @classmethod
-    def from_plan(cls, plan: PrefixTreePlan, device) -> "TreeAttentionLayout":
+    def from_plan(cls, plan: PrefixTreePlan, device, *, deterministic_reduction=False) -> "TreeAttentionLayout":
         return cls(
             plan=plan,
             kv_indices=torch.tensor(plan.kv_indices, device=device, dtype=torch.long),
@@ -26,6 +28,11 @@ class TreeAttentionLayout:
             cu_kv=torch.tensor(plan.kv_offsets, device=device, dtype=torch.int32),
             max_q=max(b - a for a, b in zip(plan.segment_offsets[:-1], plan.segment_offsets[1:], strict=True)),
             max_kv=max(b - a for a, b in zip(plan.kv_offsets[:-1], plan.kv_offsets[1:], strict=True)),
+            kv_reduction=(
+                OrderedRowGather.from_indices(plan.kv_indices, len(plan.tokens), device=device)
+                if deterministic_reduction
+                else None
+            ),
         )
 
 
@@ -36,9 +43,13 @@ def tree_attention(query, key, value, layout: TreeAttentionLayout, *, scaling: f
     It must implement bottom-right causal alignment when Q is shorter than KV.
     Index-select autograd sums the gradients of repeated ancestor KV rows.
     """
-    gathered_k = key.index_select(0, layout.kv_indices)
-    gathered_v = value.index_select(0, layout.kv_indices)
+    gathered_k = layout.kv_reduction.gather(key) if layout.kv_reduction else key.index_select(0, layout.kv_indices)
+    gathered_v = layout.kv_reduction.gather(value) if layout.kv_reduction else value.index_select(0, layout.kv_indices)
     if varlen_func is not None:
+        # Custom FA kernels do not inherit PyTorch's global deterministic mode.
+        # Propagate the caller's requirement explicitly instead of silently
+        # using FA's default nondeterministic backward reductions.
+        options = {"deterministic": True} if torch.are_deterministic_algorithms_enabled() else {}
         output = varlen_func(
             query,
             gathered_k,
@@ -49,6 +60,7 @@ def tree_attention(query, key, value, layout: TreeAttentionLayout, *, scaling: f
             max_seqlen_k=layout.max_kv,
             softmax_scale=scaling,
             causal=True,
+            **options,
         )
         # FA2 returns a tensor by default; FA4 also returns auxiliary statistics.
         # Keep the output tensor attached to its original autograd function.

@@ -57,7 +57,10 @@ def _replace_norms_for_fp64_oracle(module):
     [(torch.float64, True, 1e-12, 1e-12), (torch.float64, False, 1e-7, 2e-6), (torch.float32, False, 2e-7, 2e-5)],
 )
 @pytest.mark.parametrize("checkpoint", [False, True])
-def test_qwen_sft_loss_every_gradient_and_optimizer_step(dtype, fp64_norm, atol, rtol, checkpoint):
+@pytest.mark.parametrize("deterministic_reduction", [False, True])
+def test_qwen_sft_loss_every_gradient_and_optimizer_step(
+    dtype, fp64_norm, atol, rtol, checkpoint, deterministic_reduction
+):
     sequences = [[1, 2, 3, 4, 5], [1, 2, 3, 7], [1, 2], [1, 2, 3, 4, 5], [8, 9, 10]]
     targets = [[2, 3, 4, 5, 6], [-100, -100, 7, 11], [2, 15], [2, -100, 4, 5, 12], [9, 10, -100]]
     weights = [[1.0 + sample / 4] * len(seq) for sample, seq in enumerate(sequences)]
@@ -67,7 +70,13 @@ def test_qwen_sft_loss_every_gradient_and_optimizer_step(dtype, fp64_norm, atol,
         compact.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         expanded.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     enable_qwen_prefix_tree(compact)
-    batch = TreeSFTBatch.from_plan(build_prefix_tree(sequences), targets, weights=weights, device="cpu")
+    batch = TreeSFTBatch.from_plan(
+        build_prefix_tree(sequences),
+        targets,
+        weights=weights,
+        device="cpu",
+        deterministic_reduction=deterministic_reduction,
+    )
     compact_loss = batch.loss(compact)
     terms, total_weight = [], 0.0
     for seq, labels, weight in zip(sequences, targets, weights, strict=True):

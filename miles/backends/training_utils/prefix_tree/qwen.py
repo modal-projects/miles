@@ -1,7 +1,7 @@
-"""Opt-in Qwen3 SFT execution using public Transformers attention registration.
+"""Opt-in Qwen3 dense/MoE SFT using public Transformers attention registration.
 
-This is a single-device correctness/performance entrypoint, not yet a distributed
-Megatron trainer feature. No model classes or upstream source are patched.
+This is a standalone correctness/performance entrypoint; distributed Miles actor
+integration remains separate. No model classes or upstream source are patched.
 """
 
 from dataclasses import dataclass
@@ -54,8 +54,8 @@ def enable_qwen_prefix_tree(model) -> None:
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
     config = model.config
-    if config.model_type != "qwen3":
-        raise ValueError("the initial tree SFT adapter supports dense Qwen3 only")
+    if config.model_type not in ("qwen3", "qwen3_moe"):
+        raise ValueError("the tree SFT adapter supports Qwen3 dense and MoE only")
     if config.attention_dropout or getattr(config, "use_sliding_window", False):
         raise ValueError("tree SFT currently requires zero dropout and full attention")
     rope = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
@@ -75,12 +75,20 @@ class TreeSFTBatch:
     supervision: SFTLossLayout
 
     @classmethod
-    def from_plan(cls, plan: PrefixTreePlan, targets, *, device, weights=None) -> "TreeSFTBatch":
+    def from_plan(
+        cls, plan: PrefixTreePlan, targets, *, device, weights=None, deterministic_reduction=False
+    ) -> "TreeSFTBatch":
         return cls(
             input_ids=torch.tensor([plan.tokens], device=device, dtype=torch.long),
             position_ids=torch.tensor([plan.positions], device=device, dtype=torch.long),
-            attention=TreeAttentionLayout.from_plan(plan, device),
-            supervision=SFTLossLayout.from_plan(plan, targets, device=device, weights=weights),
+            attention=TreeAttentionLayout.from_plan(plan, device, deterministic_reduction=deterministic_reduction),
+            supervision=SFTLossLayout.from_plan(
+                plan,
+                targets,
+                device=device,
+                weights=weights,
+                deterministic_reduction=deterministic_reduction,
+            ),
         )
 
     def loss(self, model, *, varlen_func=None) -> torch.Tensor:
