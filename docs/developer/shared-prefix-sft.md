@@ -91,6 +91,13 @@ forward/backward iterations; CUDA is synchronized at measurement boundaries.
 The same updated model weights are used for both performance measurements.
 Timing excludes loading, compilation, optimizer steps and planning.
 
+The probe also runs expanded trajectories as separate microbatches, with the
+same global loss normalization. This measures BF16 numerical changes caused
+by regrouping alone. It reports a separate strict pointwise SGD-weight check
+(`atol=5e-5`, `rtol=1e-4`). A failure is retained in the JSON and the CLI exits
+nonzero **after** writing the diagnostic throughput report. Performance numbers
+do not imply that the strict numerical gate passed.
+
 Report expanded input tokens/sec, supervised tokens/sec, peak allocated
 memory, raw iteration times, token compaction, loss and gradient errors.
 Expanded input tokens/sec counts the same original work for both layouts;
@@ -101,6 +108,46 @@ Torch 2.10.0, Transformers 5.12.1 (the existing Miles pin), kernels 0.14.0,
 einops, apache-tvm-ffi, nvidia-cutlass-dsl 4.8.1 and compatible CUDA Python bindings.
 The probe loads `kernels-community/flash-attn4` version 1. No default image or
 shared dependency pin is changed by this feature.
+
+## Initial results, 2026-11-11
+
+Seventeen isolated CPU checks pass with Torch 2.10 and Transformers 5.12.1.
+The normal Miles test runner additionally needs Ray and the other Miles test
+dependencies; the lightweight local run used `pytest --noconftest`.
+
+Pretrained Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`
+was measured on B200, using FP32 weights/gradients and BF16 autocast with TF32
+disabled. Eight independent single-GPU cases ran concurrently on one 8-GPU
+node, in separate processes with four CPU threads each. These are preliminary
+single-device SFT measurements, not distributed Miles or RL throughput.
+The Modal node used RDMA and excluded reserved capacity; it stopped with zero
+remaining containers after the run.
+
+| Shared prefix | Approx. suffix | Branches | Expanded input tok/s | Tree input tok/s | Speedup | Tree grad relative L2 | Expanded-only regrouping relative L2 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 129 | 33 | 2 | 4,348 | 4,243 | 0.98x | 0.580% | 0.502% |
+| 257 | 65 | 4 | 17,933 | 18,421 | 1.03x | 0.447% | 0.359% |
+| 513 | 129 | 8 | 56,256 | 69,174 | 1.23x | 0.389% | 0.242% |
+| 1,025 | 257 | 8 | 61,532 | 125,011 | 2.03x | 0.381% | 0.201% |
+| 2,049 | 257 | 8 | 63,723 | 185,217 | 2.91x | 0.388% | 0.201% |
+| 4,097 | 513 | 8 | 63,670 | 203,929 | 3.20x | 0.389% | 0.203% |
+| 8,193 | 513 | 4 | 59,740 | 159,511 | 2.67x | 0.348% | 0.226% |
+| 2,049 | 1,025 | 8 | 60,798 | 119,399 | 1.96x | 0.358% | 0.194% |
+
+Suffix length varies by up to two tokens between branches. The 4,097-token
+case reduced peak allocated GPU memory from 109.8 GB to 38.6 GB. Loss scalars
+matched in all eight cases. All passed the probe's relative-gradient checks
+(global 2%, per-parameter 5%) but **all failed the stricter pointwise optimizer
+check**. Maximum post-SGD weight differences were 0.000156 to 0.000352.
+The FP64 tests establish the mathematical gradient equivalence; these BF16
+results do not establish bitwise equivalence or justify a production enablement.
+The expanded-only control demonstrates that regrouping itself introduces
+rounding differences, but does not explain away the tree's additional error.
+
+The machine-readable summary is in
+[`shared-prefix-sft-results.csv`](shared-prefix-sft-results.csv). Before GLM
+or distributed integration, investigate FP32 accumulation for repeated KV/loss
+rows and agree a numerical criterion appropriate for low-precision training.
 
 ## Follow-up boundaries
 

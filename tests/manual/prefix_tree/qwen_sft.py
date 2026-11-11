@@ -10,6 +10,7 @@ import copy
 import importlib.metadata
 import json
 import statistics
+import sys
 import time
 from pathlib import Path
 
@@ -74,6 +75,22 @@ def _differences(actual, expected):
     }
 
 
+def _expanded_microbatch_control(reference, sequences, targets, varlen):
+    """Measure BF16 regrouping noise without sharing any decoder computation."""
+    control = copy.deepcopy(reference)
+    control.zero_grad(set_to_none=True)
+    total = sum(sum(label != -100 for label in labels) for labels in targets)
+    for sequence, labels in zip(sequences, targets, strict=True):
+        batch, _ = _batch([sequence], [labels], shared=False)
+        count = sum(label != -100 for label in labels)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            loss = batch.loss(control, varlen_func=varlen) * (count / total)
+        loss.backward()
+    differences = _differences(control, reference)
+    del control
+    return differences
+
+
 def _measure(model, batch, varlen, iterations):
     for _ in range(2):
         _backward(model, batch, varlen)
@@ -126,12 +143,18 @@ def run(model_name="Qwen/Qwen3-0.6B", revision="main", prefix=2049, suffix=257, 
     worst = max(p["relative_l2"] for p in differences["per_parameter"])
     if worst > 0.05:
         raise AssertionError(f"BF16 per-parameter gradient relative L2 too large: {worst}")
+    print("Measuring expanded-only BF16 microbatch regrouping control", flush=True)
+    regrouping_control = _expanded_microbatch_control(reference, sequences, targets, varlen)
     update_max_abs = 0.0
+    strict_optimizer_errors = []
     for trained in (model, reference):
         torch.optim.SGD(trained.parameters(), lr=0.01).step()
-    for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
+    for (name, actual), (_, expected) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
         update_max_abs = max(update_max_abs, (actual - expected).abs().max().item())
-        torch.testing.assert_close(actual, expected, atol=5e-5, rtol=1e-4)
+        try:
+            torch.testing.assert_close(actual, expected, atol=5e-5, rtol=1e-4)
+        except AssertionError:
+            strict_optimizer_errors.append(name)
     del reference
     model.zero_grad(set_to_none=True)
     torch.cuda.empty_cache()
@@ -156,7 +179,10 @@ def run(model_name="Qwen/Qwen3-0.6B", revision="main", prefix=2049, suffix=257, 
         "expanded_loss": expanded_loss.item(),
         "tree_loss": compact_loss.item(),
         "gradients": differences,
+        "expanded_microbatch_control_gradients": regrouping_control,
         "sgd_update_max_abs": update_max_abs,
+        "strict_optimizer_match": not strict_optimizer_errors,
+        "strict_optimizer_mismatched_parameters": strict_optimizer_errors,
         "planner_cpu_ms": {"expanded": expanded_cpu_ms, "tree": compact_cpu_ms},
         "expanded": baseline,
         "tree": tree,
@@ -183,4 +209,8 @@ if __name__ == "__main__":
         iterations=args.iterations,
     )
     args.output.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({key: value for key, value in report.items() if key != "gradients"}, indent=2))
+    print(json.dumps({key: value for key, value in report.items() if "gradients" not in key}, indent=2))
+    # Preserve a failed strict gate while retaining diagnostic performance and
+    # numerical-control evidence. Never turn a BF16 mismatch into an exact pass.
+    if not report["strict_optimizer_match"]:
+        sys.exit(1)

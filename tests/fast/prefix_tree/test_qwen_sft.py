@@ -98,7 +98,8 @@ def test_reject_dropout_before_execution():
         enable_qwen_prefix_tree(model)
 
 
-def test_fp32_master_weights_cast_qk_norm_outputs_for_fused_attention():
+@pytest.mark.parametrize("return_statistics", [False, True])
+def test_fp32_master_weights_cast_qk_norm_outputs_for_fused_attention(return_statistics):
     model = _model(torch.float32)
     enable_qwen_prefix_tree(model)
     batch = TreeSFTBatch.from_plan(
@@ -109,7 +110,8 @@ def test_fp32_master_weights_cast_qk_norm_outputs_for_fused_attention():
     def fake_varlen(q, k, v, **kwargs):
         assert q.dtype == k.dtype == v.dtype == torch.bfloat16
         calls.append(q.dtype)
-        return q + k.repeat_interleave(2, 1)[: q.shape[0]] * 0 + v.repeat_interleave(2, 1)[: q.shape[0]] * 0
+        output = q + k.repeat_interleave(2, 1)[: q.shape[0]] * 0 + v.repeat_interleave(2, 1)[: q.shape[0]] * 0
+        return (output, None) if return_statistics else output
 
     with torch.autocast("cpu", dtype=torch.bfloat16):
         loss = batch.loss(model, varlen_func=fake_varlen)

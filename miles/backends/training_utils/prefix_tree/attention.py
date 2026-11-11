@@ -39,7 +39,7 @@ def tree_attention(query, key, value, layout: TreeAttentionLayout, *, scaling: f
     gathered_k = key.index_select(0, layout.kv_indices)
     gathered_v = value.index_select(0, layout.kv_indices)
     if varlen_func is not None:
-        return varlen_func(
+        output = varlen_func(
             query,
             gathered_k,
             gathered_v,
@@ -50,6 +50,9 @@ def tree_attention(query, key, value, layout: TreeAttentionLayout, *, scaling: f
             softmax_scale=scaling,
             causal=True,
         )
+        # FA2 returns a tensor by default; FA4 also returns auxiliary statistics.
+        # Keep the output tensor attached to its original autograd function.
+        return output[0] if isinstance(output, tuple) else output
     return _reference_attention(query, gathered_k, gathered_v, layout, scaling=scaling)
 
 
