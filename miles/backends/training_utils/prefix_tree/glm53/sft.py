@@ -46,10 +46,11 @@ class GlmTreeSFTBatch:
     def logits(self, model):
         # Optional Megatron dependency; CPU planning does not import its GPU stack.
         from megatron.core.packed_seq_params import PackedSeqParams
+        from megatron.core.utils import get_attr_wrapped_model
 
         from miles.backends.training_utils.prefix_tree.glm53.bridge import glm53_tree_layer_spec
 
-        config = getattr(model, "config", None)
+        config = get_attr_wrapped_model(model, "config", allow_none=False)
         if getattr(config, "transformer_layer_spec", None) is not glm53_tree_layer_spec:
             raise ValueError("Build the GLM provider with transformer_layer_spec=glm53_tree_layer_spec")
         if any(manager.enabled and manager.stage != "fallthrough" for manager in all_replay_managers):
@@ -74,7 +75,7 @@ class GlmTreeSFTBatch:
 
             set_tokens_per_adapter_slot(model, self.slot_counts)
         logits = model(self.tokens, position_ids=self.position_ids, attention_mask=None, packed_seq_params=packed)
-        if getattr(model, "parallel_output", False):
+        if get_attr_wrapped_model(model, "parallel_output", allow_none=False):
             # Gather after the complete output-layer wrapper. Asking the base
             # linear to gather early leaves a native multi-LoRA delta sharded.
             from megatron.core.tensor_parallel.mappings import gather_from_tensor_model_parallel_region

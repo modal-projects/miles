@@ -26,17 +26,17 @@ def _convolution(x, weight, *, bias, initial_state, output_final_state, cu_seqle
 
 
 def _recurrence(q, k, v, *, g, beta, initial_state, cu_seqlens, **kwargs):
+    q, k = F.normalize(q, dim=-1), F.normalize(k, dim=-1)
     outputs, states = [], []
     for index, (start, end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True)):
         state = (
             initial_state[index] if initial_state is not None else q.new_zeros(q.shape[-2], q.shape[-1], v.shape[-1])
         )
         for t in range(int(start), int(end)):
-            state = (
-                g[0, t].exp()[..., None] * state
-                + beta[0, t, :, None, None] * k[0, t, :, :, None] * v[0, t, :, None, :]
-            )
-            outputs.append(torch.einsum("hd,hdv->hv", q[0, t], state))
+            state = g[0, t].exp()[..., None] * state
+            residual = v[0, t] - torch.einsum("hd,hdv->hv", k[0, t], state)
+            state = state + beta[0, t, :, None, None] * k[0, t, :, :, None] * residual[:, None, :]
+            outputs.append(torch.einsum("hd,hdv->hv", q[0, t], state) * q.shape[-1] ** -0.5)
         states.append(state)
     return torch.stack(outputs)[None], torch.stack(states)
 
@@ -84,3 +84,14 @@ def test_nested_parent_state_gradients_match_expansion(monkeypatch, prefix):
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
     for reference, grad in zip(reference_grads, actual_grads, strict=True):
         torch.testing.assert_close(grad, reference, rtol=1e-12, atol=1e-12)
+
+    reference_parameters = [torch.nn.Parameter(value.clone()) for value in values]
+    actual_parameters = [torch.nn.Parameter(value.clone()) for value in values]
+    for p, grad in zip(reference_parameters, reference_grads, strict=True):
+        p.grad = grad
+    for p, grad in zip(actual_parameters, actual_grads, strict=True):
+        p.grad = grad
+    torch.optim.AdamW(reference_parameters, lr=1e-4, foreach=False).step()
+    torch.optim.AdamW(actual_parameters, lr=1e-4, foreach=False).step()
+    for reference, actual in zip(reference_parameters, actual_parameters, strict=True):
+        torch.testing.assert_close(actual, reference, rtol=1e-12, atol=1e-12)

@@ -8,6 +8,7 @@ checkpoint mappings, LoRA wrappers or hyperconnection modules are replaced.
 from copy import deepcopy
 
 import torch
+from megatron.bridge.models.conversion.param_mapping import AutoMapping
 from megatron.bridge.models.glm5_next.dsa import Glm5NextDSAAttention
 from megatron.bridge.models.glm5_next.kda import Glm5NextKDAAttention, fused_kda_gate
 from megatron.bridge.models.glm5_next.layer_specs import glm5_next_layer_spec
@@ -22,6 +23,11 @@ def glm53_tree_layer_spec(config, vp_stage=None):
         raise ValueError("GLM prefix SFT currently requires context_parallel_size=1")
     if config.attention_dropout or config.hidden_dropout:
         raise ValueError("Shared-prefix SFT requires zero attention and hidden dropout")
+    if (
+        getattr(config, "moe_router_force_load_balancing", False)
+        or getattr(config, "moe_router_force_biased", None) is not None
+    ):
+        raise ValueError("Shared-prefix SFT does not support randomized benchmark routing")
     if getattr(config, "moe_router_jitter_eps", None):
         raise ValueError("Shared-prefix SFT does not support router input jitter")
     if getattr(config, "moe_expert_capacity_factor", None) is not None:
@@ -32,6 +38,10 @@ def glm53_tree_layer_spec(config, vp_stage=None):
         raise ValueError("GLM prefix SFT requires zero MoE auxiliary loss until occurrence weighting is implemented")
     if getattr(config, "moe_router_enable_expert_bias", False) and getattr(config, "moe_router_bias_update_rate", 0.0):
         raise ValueError("GLM prefix SFT requires fixed router expert bias")
+    # Bridge dispatches direct-attribute checkpoint mappings by exact class
+    # name. Preserve the provider's sharding rules for our execution subclasses.
+    AutoMapping.register_module_type("TreeKDAAttention", "column")
+    AutoMapping.register_module_type("TreeDSAAttention", "replicated")
     spec = deepcopy(glm5_next_layer_spec(config, vp_stage=vp_stage))
     for layer in spec.layer_specs:
         attention = deepcopy(layer.submodules.self_attention)

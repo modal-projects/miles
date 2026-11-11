@@ -2,6 +2,15 @@
 
 Uses the real pinned Bridge DSA/KDA/mHC/MoE implementation at reduced model
 width/depth. It is not a pretrained full-model convergence or throughput claim.
+
+Run in a Miles trainer image with the pinned GLM provider installed::
+
+    torchrun --standalone --nproc-per-node=2 tests/manual/prefix_tree/glm53_sft.py --model /path/to/GLM --lora
+    torchrun --standalone --nproc-per-node=8 tests/manual/prefix_tree/glm53_sft.py --model /path/to/GLM --lora --full-width --precise-moe
+
+For warmed reduced-model timings, add --prefix 4098 --suffix 514 --branches 8
+--repetitions 4, without GLM_TREE_TRACE=1. The full-width mode retains the real
+attention/MLP/expert widths, but uses three random layers and a small vocabulary.
 """
 
 import argparse
@@ -25,10 +34,9 @@ from miles.backends.training_utils.prefix_tree.plan import build_prefix_tree
 from miles.backends.training_utils.prefix_tree.sft import SFTLossLayout
 
 
-def make_model(checkpoint, *, lora=False, full_width=False):
-    provider = AutoBridge.from_hf_pretrained(checkpoint, trust_remote_code=True).to_megatron_provider(
-        load_weights=False
-    )
+def make_model(checkpoint, *, lora=False, full_width=False, precise_moe=False, pretrained=False):
+    bridge = AutoBridge.from_hf_pretrained(checkpoint, trust_remote_code=True)
+    provider = bridge.to_megatron_provider(load_weights=False)
     changes = dict(
         num_layers=3,
         hidden_size=512,
@@ -61,13 +69,14 @@ def make_model(checkpoint, *, lora=False, full_width=False):
         bf16=True,
         vocab_size=512,
         seq_length=1024,
-        max_sequence_length=1024,
         attention_dropout=0.0,
         hidden_dropout=0.0,
         gradient_accumulation_fusion=False,
         moe_aux_loss_coeff=0.0,
         moe_router_load_balancing_type="none",
         moe_router_bias_update_rate=0.0,
+        moe_router_force_load_balancing=False,
+        moe_router_force_biased=None,
         moe_permute_fusion=False,
         moe_grouped_gemm=True,
         moe_token_dispatcher_type="alltoall",
@@ -103,6 +112,19 @@ def make_model(checkpoint, *, lora=False, full_width=False):
         ):
             changes.pop(name)
         changes["expert_model_parallel_size"] = 8
+    if pretrained:
+        if not full_width:
+            raise ValueError("Pretrained validation requires --full-width")
+        changes.pop("vocab_size")
+        changes["num_layers"] = 5
+        changes["kda_layers"] = tuple(i for i in provider.kda_layers if i < 5)
+        changes["moe_layer_freq"] = provider.moe_layer_freq[:5]
+        changes["perform_initialization"] = False
+    if precise_moe:
+        for field in ("moe_router_use_torch_mm", "moe_activation_in_fp32", "moe_combine_in_fp32"):
+            if not hasattr(provider, field):
+                raise ValueError(f"Pinned Megatron runtime lacks {field}")
+            changes[field] = True
     for key, value in changes.items():
         if not hasattr(provider, key):
             print("ADDITIONAL_PROVIDER_FIELD", key, flush=True)
@@ -110,6 +132,11 @@ def make_model(checkpoint, *, lora=False, full_width=False):
     provider._pg_collection = ProcessGroupCollection.use_mpu_process_groups()
     provider.finalize()
     model = provider.provide().cuda().train()
+    if pretrained:
+        print("PRETRAINED_LOAD_BEGIN", flush=True)
+        bridge._model_bridge.hf_pretrained = bridge.hf_pretrained
+        bridge._model_bridge.load_weights_hf_to_megatron(bridge.hf_pretrained, [model])
+        print("PRETRAINED_LOAD_COMPLETE", flush=True)
     print("MODEL_READY", sum(p.numel() for p in model.parameters()), flush=True)
     return _apply_multilora(model) if lora else model
 
@@ -149,21 +176,26 @@ def _apply_multilora(model):
 
 
 def _check_replicated_weights(model):
-    # Random provider construction does not perform checkpoint loading or DDP's
-    # replica initialization. Prove equal TP replicas before comparing layouts.
-    group = parallel_state.get_tensor_model_parallel_group()
-    source = dist.get_global_rank(group, 0)
+    # Random provider construction skips checkpoint loading and DDP's replica
+    # broadcasts. Initialize both DP replicas and unsharded TP replicas.
     mismatches = []
     with torch.no_grad():
         for name, p in model.named_parameters():
-            if getattr(p, "tensor_model_parallel", False) or not getattr(p, "allreduce", True):
-                continue
-            reference = p.detach().clone()
-            dist.broadcast(reference, src=source, group=group)
-            if not torch.equal(p, reference):
-                mismatches.append(name)
-                p.copy_(reference)
-    print("INITIAL_REPLICA_MISMATCHES", json.dumps(mismatches), flush=True)
+            dense = getattr(p, "allreduce", True)
+            groups = [
+                parallel_state.get_data_parallel_group() if dense else parallel_state.get_expert_data_parallel_group()
+            ]
+            if dense and not getattr(p, "tensor_model_parallel", False):
+                groups.append(parallel_state.get_tensor_model_parallel_group())
+            for group in groups:
+                if dist.get_world_size(group) == 1:
+                    continue
+                reference = p.detach().clone()
+                dist.broadcast(reference, src=dist.get_global_rank(group, 0), group=group)
+                if not torch.equal(p, reference):
+                    mismatches.append(name)
+                    p.copy_(reference)
+    print("INITIAL_REPLICA_MISMATCHES " + json.dumps({"rank": dist.get_rank(), "parameters": mismatches}), flush=True)
 
 
 def _synchronize_gradients(model):
@@ -242,6 +274,7 @@ def evaluate(model, sequences, *, shared, lora=False):
             if name.endswith(("self_attention", ".mlp", ".router")) or name == "embedding":
                 handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
     print("SFT_PHASE", "tree" if shared else "expanded", "begin", flush=True)
+    dist.barrier()
     torch.cuda.synchronize()
     start = time.perf_counter()
     if shared:
@@ -276,6 +309,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="/assets/model")
     parser.add_argument("--full-width", action="store_true")
+    parser.add_argument("--precise-moe", action="store_true")
+    parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--lora", action="store_true")
     parser.add_argument("--prefix", type=int, default=129)
     parser.add_argument("--suffix", type=int, default=17)
@@ -294,13 +329,18 @@ def main():
     model_parallel_cuda_manual_seed(42)
     lora = args.lora or os.environ.get("GLM_TREE_LORA") == "1"
     args.branches = args.branches or (4 if lora else 3)
-    model = make_model(args.model, lora=lora, full_width=args.full_width)
+    model = make_model(
+        args.model, lora=lora, full_width=args.full_width, precise_moe=args.precise_moe, pretrained=args.pretrained
+    )
     _check_replicated_weights(model)
     sequences = [
         [1 + i % 128 for i in range(args.prefix)] + [200 + b] + [201 + (b + i) % 100 for i in range(args.suffix - 1)]
         for b in range(args.branches)
     ]
     expanded = evaluate(model, sequences, shared=False, lora=lora)
+    if args.pretrained:
+        repeated = evaluate(model, sequences, shared=False, lora=lora)
+        print("EXPANDED_REPEAT_LOGITS_RELATIVE_L2", rel(expanded[1], repeated[1]), flush=True)
     tree = evaluate(model, sequences, shared=True, lora=lora)
     for name, ref in expanded[4].items():
         value = tree[4][name]
