@@ -1,9 +1,11 @@
 # Shared-prefix SFT: initial implementation
 
-This is an opt-in, single-device Qwen3 implementation in Miles. It establishes
+This is an opt-in Qwen3 SFT implementation in Miles. It establishes
 packing, attention, loss and gradient correctness before integration with the
 distributed trainer. It does not enable a launch flag, change the default
 trainer, modify Spindle, or patch/vend Megatron-Bridge or FlashAttention.
+Standalone dense/MoE TP diagnostics and the deterministic-backward fix are
+described in [the equivalence investigation](shared-prefix-equivalence.md).
 
 ## Computation and loss identity
 
