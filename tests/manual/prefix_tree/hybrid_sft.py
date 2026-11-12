@@ -35,11 +35,11 @@ def _save(path, report):
 
 
 @contextmanager
-def _linear_policy(model, fixed):
+def _linear_policy(model, fixed, *, scope="all"):
     originals = []
     if fixed:
         for module in model.modules():
-            if isinstance(module, torch.nn.Linear):
+            if isinstance(module, torch.nn.Linear) and (scope == "all" or module.weight.requires_grad):
                 originals.append((module, module.forward))
 
                 def forward(value, owner=module):
@@ -249,6 +249,10 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--pairs", type=int, default=3)
     parser.add_argument("--layers", type=int)
+    parser.add_argument("--linear-scope", choices=["all", "trainable"], default="all")
+    parser.add_argument(
+        "--policies", nargs="+", choices=["native_linear", "fixed_linear"], default=["native_linear", "fixed_linear"]
+    )
     args = parser.parse_args()
     torch.manual_seed(42)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -271,6 +275,7 @@ def main():
         supervised_tokens=len(expanded.supervision.rows),
         lora="rank 16, alpha 16, BF16, all PEFT linear targets; seeded nonzero A and B, no optimizer updates",
         vocabulary_projection="only supervised occurrences, same optimization in both paths",
+        linear_scope=args.linear_scope,
         policies={},
     )
     _save(args.output, report)
@@ -283,8 +288,9 @@ def main():
         full_text_layers=model.config.num_hidden_layers,
     )
     _save(args.output, report)
-    for fixed in [False, True]:
-        with _linear_policy(model, fixed):
+    for policy in args.policies:
+        fixed = policy == "fixed_linear"
+        with _linear_policy(model, fixed, scope=args.linear_scope):
             _policy_run(
                 model,
                 expanded,
@@ -292,7 +298,11 @@ def main():
                 pairs=args.pairs,
                 output=args.output,
                 report=report,
-                policy="fixed_linear" if fixed else "native_linear",
+                policy=(
+                    ("fixed_trainable_linear" if args.linear_scope == "trainable" else "fixed_linear")
+                    if fixed
+                    else "native_linear"
+                ),
             )
     report["status"] = "complete"
     _save(args.output, report)
