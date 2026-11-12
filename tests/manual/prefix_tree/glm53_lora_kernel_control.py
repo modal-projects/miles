@@ -22,6 +22,36 @@ def grouped_rowwise(x, weights, offsets):
     return torch.cat([rowwise_linear(x[a:b], w.t()) for a, b, w in zip(starts, ends, weights, strict=True)])
 
 
+def frozen_expert_forward(module, x, splits):
+    """Control only local frozen GEMMs; dispatcher/slot routing stay native."""
+    sizes = [int(n) for n in splits]
+    weights = [getattr(module, f"weight{i}") for i in range(module.num_gemms)]
+    if len(sizes) != len(weights) or sum(sizes) != len(x):
+        raise ValueError("Frozen expert split inventory differs")
+    if module.use_bias or module.tp_size != 1 or any(w.requires_grad for w in weights):
+        raise ValueError("Frozen expert control requires bias-free frozen weights and ETP=1")
+    return torch.cat([rowwise_linear(part, w) for part, w in zip(x.split(sizes), weights, strict=True)]), None
+
+
+class FrozenExpertKernelControl:
+    def __init__(self, model):
+        self.originals = []
+        for name, module in model.named_modules():
+            if ".experts.linear_" in name and name.endswith(".to_wrap"):
+                self.originals.append((module, module.forward))
+
+                def forward(x, splits, owner=module):
+                    return frozen_expert_forward(owner, x, splits)
+
+                module.forward = forward
+        if not self.originals:
+            raise ValueError("No native expert linears found for fixed-kernel control")
+
+    def close(self):
+        for module, forward in self.originals:
+            module.forward = forward
+
+
 class LoraKernelControl:
     def __init__(self, model):
         from megatron.bridge.peft import multi_lora_layers

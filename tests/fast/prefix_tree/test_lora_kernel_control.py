@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,3 +26,21 @@ def test_grouped_reference_preserves_rows_and_every_gradient_with_an_empty_group
     torch.testing.assert_close(x.grad, a.grad, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(w.grad, b.grad, rtol=1e-12, atol=1e-12)
     assert not w.grad[1].any()
+
+
+def test_frozen_expert_control_preserves_input_adjoint_with_empty_group():
+    generator = torch.Generator().manual_seed(17)
+    x = torch.randn(5, 3, generator=generator, dtype=torch.float64, requires_grad=True)
+    reference = x.detach().clone().requires_grad_()
+    weights = [torch.randn(4, 3, generator=generator, dtype=torch.float64) for _ in range(3)]
+    module = SimpleNamespace(
+        num_gemms=3, use_bias=False, tp_size=1, **{f"weight{i}": w for i, w in enumerate(weights)}
+    )
+    actual, bias = _CONTROL.frozen_expert_forward(module, x, [2, 0, 3])
+    expected = torch.cat([part @ w.t() for part, w in zip(reference.split([2, 0, 3]), weights, strict=True)])
+    coefficients = torch.randn(5, 4, generator=generator, dtype=torch.float64)
+    (actual * coefficients).sum().backward()
+    (expected * coefficients).sum().backward()
+    assert bias is None
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(x.grad, reference.grad, rtol=1e-12, atol=1e-12)

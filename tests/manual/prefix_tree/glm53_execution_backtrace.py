@@ -19,7 +19,7 @@ from glm53_dapo_sft import _phase, _RowMath, _sum_dp
 from glm53_forward_trace import ForwardTrace, _load_adapters
 from glm53_full_sft import _emit, _gradient_error, _maximum, _prepared
 from glm53_fused_norm_control import unfuse_rmsnorm_linears
-from glm53_lora_kernel_control import LoraKernelControl
+from glm53_lora_kernel_control import FrozenExpertKernelControl, LoraKernelControl
 from glm53_sft import make_model
 from math_sft_optimizer import MasterOptimizer
 from megatron.core import parallel_state
@@ -171,11 +171,14 @@ def main():
     parser.add_argument("--expert-parallel", type=int, default=8)
     parser.add_argument("--data-dp-size", type=int)
     parser.add_argument("--rowwise-lora", action="store_true")
+    parser.add_argument("--fixed-experts", action="store_true")
     parser.add_argument("--controlled-only", action="store_true")
     parser.add_argument("--profile-layer", type=int, default=0)
     parser.add_argument("--forward-only", action="store_true")
     parser.add_argument("--pair-only", action="store_true")
     args = parser.parse_args()
+    if args.fixed_experts and not args.controlled_only:
+        parser.error("--fixed-experts requires --controlled-only")
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", device_id=torch.device("cuda", int(os.environ["LOCAL_RANK"])))
@@ -223,11 +226,13 @@ def main():
             seen.add(id(module.config))
             policy.operators.append((module.config, "moe_router_fusion", module.config.moe_router_fusion, False))
     lora_control = LoraKernelControl(model) if args.rowwise_lora else None
+    expert_control = FrozenExpertKernelControl(model) if args.fixed_experts else None
     report = {
         "status": "tracing",
         "saved_optimizer_steps": steps,
         "layers": args.layers,
         "rowwise_lora": args.rowwise_lora,
+        "fixed_experts": args.fixed_experts,
         "controlled_only": args.controlled_only,
         "forward_only": args.forward_only,
         "forward": [],
@@ -262,6 +267,8 @@ def main():
             model, data, arms, args.output_dir, report, policy, lora_control, controlled_only=args.controlled_only
         )
     report["status"] = "complete"
+    if expert_control is not None:
+        expert_control.close()
     _persist(args.output_dir, report)
     dist.destroy_process_group()
 
