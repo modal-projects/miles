@@ -23,6 +23,24 @@ MILES_PREFER_IPV6_ENV = "MILES_PREFER_IPV6"
 _CONNECT_ATTEMPT_TIMEOUT_SECONDS = 1.0
 _CONNECT_RETRY_INTERVAL_SECONDS = 0.5
 
+# A load balancer drops a connection that stays silent past its idle timeout, and a non-streaming
+# generation is silent until it ends: keepalive probes keep a long request's connection active.
+TCP_KEEPALIVE = (
+    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5),
+)
+
+
+def tcp_keepalive_socket(addr_info) -> socket.socket:
+    """aiohttp's socket_factory for TCP_KEEPALIVE."""
+    family, kind, proto, _, _ = addr_info
+    sock = socket.socket(family, kind, proto)
+    for option in TCP_KEEPALIVE:
+        sock.setsockopt(*option)
+    return sock
+
 
 def find_available_port(base_port: int):
     port = base_port + random.randint(100, 1000)
@@ -190,7 +208,10 @@ class GeneralHttpClientProvider:
         loop = asyncio.get_running_loop()
         client = cls._clients.get(loop)
         if client is None:
-            client = httpx.AsyncClient(timeout=cls._TIMEOUT, limits=cls._LIMITS)
+            client = httpx.AsyncClient(
+                timeout=cls._TIMEOUT,
+                transport=httpx.AsyncHTTPTransport(limits=cls._LIMITS, socket_options=TCP_KEEPALIVE),
+            )
             cls._clients[loop] = client
         return client
 

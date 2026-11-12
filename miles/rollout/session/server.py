@@ -21,7 +21,7 @@ from yarl import URL
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.core import ProxyRequest
 from miles.rollout.session.sessions import setup_session_routes
-from miles.utils.http_utils import rollout_external_headers
+from miles.utils.http_utils import rollout_external_headers, tcp_keepalive_socket
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.workers.argv_utils import parse_config_argv
 
@@ -77,7 +77,7 @@ class SessionServer:
     async def _lifespan(self, app: FastAPI):
         # Bind the client to uvicorn's running loop before accepting requests.
         async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(limit=1024, keepalive_timeout=5),
+            connector=aiohttp.TCPConnector(limit=1024, keepalive_timeout=5, socket_factory=tcp_keepalive_socket),
             timeout=self.timeout,
         ) as client:
             self.client = client
