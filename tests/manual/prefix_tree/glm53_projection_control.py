@@ -4,7 +4,7 @@ GLM and generic Megatron place epsilon differently. A diagnostic must delegate
 normalization to the original operator rather than assume either equation.
 """
 
-import torch
+from miles.backends.training_utils.prefix_tree.operators import rowwise_frozen_linear
 
 
 def projection_control(native, mode):
@@ -18,7 +18,7 @@ def projection_control(native, mode):
         # The unused native projection is intentional in this numerical oracle.
         _, reciprocal = native(x, weight, eps)
         if mode == "bmm":
-            projected = torch.bmm(x.unsqueeze(1), weight.t().unsqueeze(0).expand(len(x), -1, -1)).squeeze(1)
+            projected = rowwise_frozen_linear(x, weight)
         else:
             projected = (x.double() @ weight.double().t()).to(x.dtype)
         return projected, reciprocal

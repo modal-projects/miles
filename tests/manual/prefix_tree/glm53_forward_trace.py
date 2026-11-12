@@ -20,10 +20,12 @@ from glm53_dapo_sft import _phase, _RowMath, _sum_dp
 from glm53_full_sft import _emit, _expanded_loss, _gradient_error, _maximum, _prepared
 from glm53_sft import make_model
 from glm53_trace_values import first_tensor as _first_tensor
-from math_sft_data import _make_batch, math_microbatches
 from math_sft_optimizer import MasterOptimizer
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+
+from miles.backends.training_utils.prefix_tree.data import _make_batch
+from miles.backends.training_utils.prefix_tree.data import sft_microbatches as math_microbatches
 
 
 def _compare(actual, reference, positions, samples, shared):
