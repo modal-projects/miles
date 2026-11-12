@@ -303,6 +303,10 @@ def evaluate(model, sequences, *, shared, lora=False, targets=None):
         for name, module in model.named_modules():
             if name.endswith(("self_attention", ".mlp", ".router")) or name == "embedding":
                 handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
+            if os.environ.get("GLM_TREE_TRACE_LINEARS") == "1" and any(
+                name.startswith(f"decoder.layers.{i}.self_attention.linear_") for i in range(4)
+            ) and (name.rsplit(".", 1)[-1].startswith("linear_") or name.endswith(".to_wrap")):
+                handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
             if os.environ.get("GLM_TREE_TRACE_OPERATORS") == "1" and name.endswith(
                 ("input_layernorm", "pre_mlp_layernorm", "q_layernorm", "kv_layernorm")
             ):
