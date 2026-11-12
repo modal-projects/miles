@@ -2,6 +2,7 @@ import math
 import subprocess
 import sys
 from copy import deepcopy
+from itertools import product
 from types import SimpleNamespace
 
 import pytest
@@ -142,19 +143,31 @@ def test_residual_gradients_are_the_depth_scales():
 def test_residual_matches_sglang_fused_sandwich_kernel(is_attention):
     fused = pytest.importorskip("sglang.kernels.ops.layernorm.beam_fused").fused_sandwich_residual_rmsnorm
     module, branch, residual, scales = _residual_case(5, is_attention, device="cuda")
-    actual = module(training=False, fused=False)((branch, None), residual, 0.0)
-    _, combined = fused(branch, residual, None, None, 1e-6, *scales)
+    weight = torch.ones(branch.shape[-1], dtype=branch.dtype, device=branch.device)
+    normalized = (branch.float() * torch.rsqrt(branch.float().square().mean(-1, keepdim=True) + 1e-6)).to(branch.dtype)
+    actual = module(training=False, fused=False)((normalized, None), residual, 0.0)
+    _, combined = fused(branch, residual, weight, None, 1e-6, *scales)
     assert torch.equal(actual, combined)
 
 
-def test_lora_targets_cover_every_beam_projection(tmp_path):
-    from sglang.test.beam_fixture import make_beam_fixture
-
+def test_lora_targets_cover_every_beam_projection():
     from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
     from miles.utils.lora.utils import matches_lora_target
+    from miles_plugins.megatron_bridge.beam import BeamBridge
 
-    config, state = make_beam_fixture(tmp_path)
-    modules = [name.removesuffix(".weight") for name in state]
+    config = BeamConfig(num_hidden_layers=2, num_experts=2, mlp_layer_types=["dense", "sparse"])
+    bridge = BeamBridge.__new__(BeamBridge)
+    bridge.hf_config = config
+    modules = set()
+    # Derive the inventory from the real conversion registry, including dense and routed layers.
+    for mapping in bridge.mapping_registry().get_all_mappings():
+        names = [mapping.hf_param] if isinstance(mapping.hf_param, str) else mapping.hf_param.values()
+        for pattern in names:
+            for indices in product(range(2), repeat=pattern.count("*")):
+                name = pattern
+                for index in indices:
+                    name = name.replace("*", str(index), 1)
+                modules.add(name.removesuffix(".weight"))
     targets = resolve_hf_lora_targets(config.to_dict())
     adapted = {module for module in modules if any(matches_lora_target(module, target) for target in targets)}
     # Every linear projection, including the attention output gate and each routed expert; not the router.
