@@ -155,7 +155,14 @@ def test_lora_targets_cover_every_beam_projection():
     from miles.utils.lora.utils import matches_lora_target
     from miles_plugins.megatron_bridge.beam import BeamBridge
 
-    config = BeamConfig(num_hidden_layers=2, num_experts=2, mlp_layer_types=["dense", "sparse"])
+    config = BeamConfig(
+        num_hidden_layers=2,
+        num_experts=2,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=2,
+        mlp_layer_types=["dense", "sparse"],
+    )
     bridge = BeamBridge.__new__(BeamBridge)
     bridge.hf_config = config
     modules = set()
