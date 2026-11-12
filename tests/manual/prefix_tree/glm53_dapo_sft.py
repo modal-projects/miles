@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 from glm53_diagnose import _bmm_projection, _normalization_oracle
 from glm53_full_sft import _emit, _expanded_loss, _gradient_error, _maximum, _prepared
+from glm53_fused_norm_control import unfuse_rmsnorm_linears
 from glm53_sft import _check_replicated_weights, make_model
 from math_sft_data import global_token_scale, math_microbatches
 from math_sft_optimizer import MasterOptimizer
@@ -122,6 +123,15 @@ def _paired_optimizer_step(optimizer, reference_gradients):
     }
 
 
+@torch.no_grad()
+def _repeat_optimizer_comparison(optimizer, first_gradients, repeated_gradients):
+    first = optimizer.reference_step(first_gradients)
+    repeated = optimizer.reference_step(repeated_gradients)
+    error = sum(float((a - b).double().square().sum()) for a, b in zip(first, repeated, strict=True))
+    step = sum(float((a - b).double().square().sum()) for a, b in zip(first, optimizer.masters, strict=True))
+    return {"update_relative_l2_max": _maximum((error / max(step, 1e-30)) ** 0.5)}
+
+
 def _save(model, optimizer, output, report):
     output.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -155,6 +165,9 @@ def main():
     parser.add_argument("--pairs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--row-math", choices=("native", "fp32", "fp64"), default="fp32")
+    parser.add_argument("--unfused-norm", choices=("none", "fp32", "fp64"), default="none")
+    parser.add_argument("--strict-reductions", action="store_true")
+    parser.add_argument("--unfused-router", action="store_true", help="Disable router fusion in controlled phases")
     args = parser.parse_args()
     if args.steps < 2 or args.pairs < 2:
         parser.error("Use at least two optimizer updates and paired timings")
@@ -191,6 +204,16 @@ def main():
                     adapter.linear_out.weight.zero_()
     _check_replicated_weights(model)
     policy = _RowMath(model, args.row_math)
+    unfused = unfuse_rmsnorm_linears(model, args.unfused_norm) if args.unfused_norm != "none" else []
+    for _, module, native in unfused:
+        policy.operators.append((module, "forward", native, module.forward))
+    if args.unfused_router:
+        seen = set()
+        for name, module in model.named_modules():
+            if name.endswith(".router") and id(module.config) not in seen:
+                seen.add(id(module.config))
+                policy.operators.append((module.config, "moe_router_fusion", module.config.moe_router_fusion, False))
+    policy.activate(False)
     optimizer = MasterOptimizer(model, args.lr)
     data = math_microbatches(
         rollouts,
@@ -212,6 +235,7 @@ def main():
         "pairs": [],
         "native_baseline": [],
         "optimizer_master_dtype": "float32",
+        "unfused_norm_modules": [name for name, _, _ in unfused],
         "gradient_accumulation": "float32 from native backward gradients",
         "frozen_kv_up_adapter": True,
         "planning_s_max": _maximum(time.perf_counter() - preparation),
@@ -230,6 +254,8 @@ def main():
         _persist(args.output_dir, report)
     native_gradients = optimizer.snapshot()
     policy.activate(True)
+    if args.strict_reductions:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     stable_warm = _phase(model, optimizer, expanded, data, shared=False, supervised_global=supervised_global)
     report["operator_policy_gradient_difference_max"] = _maximum(
         _gradient_error(native_gradients, optimizer.snapshot())
@@ -261,6 +287,7 @@ def main():
         report["pairs"].append(row)
         _emit("DAPO_PAIRED_BENCHMARK", row)
         _persist(args.output_dir, report)
+    report["optimizer_repeat_comparison"] = _repeat_optimizer_comparison(optimizer, first_reference, reference)
     report["optimizer_comparison"] = _paired_optimizer_step(optimizer, reference)
     report["updates"].append({"step": 2, "execution": "tree", **tree})
     _emit("DAPO_SFT_UPDATE", report["updates"][-1] | report["optimizer_comparison"])
