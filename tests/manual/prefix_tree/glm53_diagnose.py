@@ -8,12 +8,12 @@ tests/manual/prefix_tree/glm53_diagnose.py --model /path/to/GLM --output /tmp/ch
 import argparse
 import gc
 import json
-import math
 import os
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from glm53_projection_control import projection_control
 from glm53_sft import _check_replicated_weights, evaluate, make_model
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -56,21 +56,12 @@ def _comparison(actual, expected):
     }
 
 
-def _fp64_projection(x, weight, eps):
-    # Test-only oracle for a shape-sensitive FP32 GEMM; not a provider change.
-    x = x.double()
-    return (x @ weight.double().t()).float(), (
-        x.norm(dim=-1, keepdim=True) / math.sqrt(x.shape[-1]) + eps
-    ).reciprocal().float()
+def _fp64_projection(native):
+    return projection_control(native, "fp64")
 
 
-def _bmm_projection(x, weight, eps):
-    if weight.requires_grad:
-        raise ValueError("The rowwise BMM control requires frozen projection weights")
-    # A fixed 1xK by KxN GEMM per token avoids changing the reduction algorithm
-    # with the tree's physical row count. expand() is a zero-stride weight view.
-    projected = torch.bmm(x.unsqueeze(1), weight.t().unsqueeze(0).expand(len(x), -1, -1)).squeeze(1)
-    return projected, (x.norm(dim=-1, keepdim=True) / math.sqrt(x.shape[-1]) + eps).reciprocal()
+def _bmm_projection(native):
+    return projection_control(native, "bmm")
 
 
 def _normalization_oracle(model, precision):
@@ -210,7 +201,9 @@ def main():
                     if hasattr(module, "_proj_rms_op"):
                         if module._proj_rms_compute_h_op is not None:
                             raise ValueError("The projection oracle requires unfused mHC")
-                        module._proj_rms_op = _bmm_projection if args.mhc_projection_bmm else _fp64_projection
+                        module._proj_rms_op = (_bmm_projection if args.mhc_projection_bmm else _fp64_projection)(
+                            module._proj_rms_op
+                        )
             routers = _record_routes(model) if args.fixed_routes else {}
             cold_expanded = evaluate(model, sequences, shared=False, lora=True, targets=targets)
             changed_routes = {}

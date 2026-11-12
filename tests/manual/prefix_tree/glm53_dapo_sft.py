@@ -42,7 +42,9 @@ class _RowMath:
             if mode != "native" and hasattr(module, "_proj_rms_op"):
                 if module._proj_rms_compute_h_op is not None:
                     raise ValueError("Rowwise projection currently requires native unfused mHC")
-                self.operators.append((module, "_proj_rms_op", module._proj_rms_op, _bmm_projection))
+                self.operators.append(
+                    (module, "_proj_rms_op", module._proj_rms_op, _bmm_projection(module._proj_rms_op))
+                )
         self.activate(False)
 
     def activate(self, stable):
