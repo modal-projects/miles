@@ -120,3 +120,45 @@ def test_canonical_selection_cannot_expand_across_layers():
             [f"decoder.layers.{layer}.self_attention.linear_qkv.weight" for layer in range(2)],
             canonical=True,
         )
+
+
+_BEAM_QKVG = _mapping(
+    "decoder.layers.*.self_attention.linear_qkv.weight",
+    *(f"model.layers.*.self_attn.{p}_proj.weight" for p in ("q", "gate", "k", "v")),
+)
+
+
+@pytest.mark.parametrize("target", ["q_proj", "k_proj", "v_proj", "model.layers.*.self_attn.gate_proj", "attn"])
+def test_beam_canonical_fused_attention_is_rejected_before_adapter_construction(target):
+    targets = resolve_hf_lora_targets(
+        {"model_type": "beam", "mlp_layer_types": ["dense", "sparse"]}, target_modules=[target]
+    )
+    with pytest.raises(ValueError, match="Beam fused QKVG.*canonical_lora.*Q/K/V"):
+        _resolve(targets, [_BEAM_QKVG], ["decoder.layers.0.self_attention.linear_qkv.weight"], canonical=True)
+
+
+def test_beam_ordinary_lora_keeps_the_complete_qkvg_projection():
+    targets = resolve_hf_lora_targets({"model_type": "beam", "mlp_layer_types": ["dense", "sparse"]})
+    assert _resolve(targets, [_BEAM_QKVG], ["decoder.layers.0.self_attention.linear_qkv.weight"]) == [
+        "decoder.layers.*.self_attention.linear_qkv"
+    ]
+
+
+def test_beam_canonical_independent_attention_and_mlp_targets_remain_supported():
+    output = _mapping("decoder.layers.*.self_attention.linear_proj.weight", "model.layers.*.self_attn.o_proj.weight")
+    mlp = _mapping(
+        "decoder.layers.*.mlp.linear_fc1.weight",
+        "model.layers.*.mlp.gate_proj.weight",
+        "model.layers.*.mlp.up_proj.weight",
+    )
+    selected = _resolve(
+        ["model.layers.*.self_attn.o_proj", "model.layers.*.mlp.gate_proj"],
+        [_BEAM_QKVG, output, mlp],
+        [
+            "decoder.layers.0.self_attention.linear_qkv.weight",
+            "decoder.layers.0.self_attention.linear_proj.weight",
+            "decoder.layers.0.mlp.linear_fc1.weight",
+        ],
+        canonical=True,
+    )
+    assert set(selected) == {"decoder.layers.*.self_attention.linear_proj", "decoder.layers.*.mlp.linear_fc1_gate"}
