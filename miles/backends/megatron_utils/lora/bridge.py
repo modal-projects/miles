@@ -118,7 +118,9 @@ def _validate_multi_lora_moe_support(args: TrainerConfig, provider) -> None:
         "desynchronizes the dispatched token order)."
     )
     # sglang only wraps a fused MoE layer when both expert projections are targeted.
-    served = {target.rsplit(".", 1)[-1] for target in args.hf_lora_targets}
+    served = {
+        target.rsplit(".", 1)[-1] for target in args.hf_lora_targets if target.split(".")[-2:-1] != ["self_attn"]
+    }
     if "gate_up_proj" in served:
         served.update(("gate_proj", "up_proj"))
     expert_pair = {"gate_proj", "up_proj", "down_proj"}
@@ -161,6 +163,10 @@ def _setup_lora_model_via_bridge(args: TrainerConfig) -> list:
     hf_config = load_hf_config(args.hf_checkpoint)
     bridge = load_auto_bridge(args.hf_checkpoint)
     provider = bridge.to_megatron_provider(load_weights=False)
+
+    from miles.backends.megatron_utils.model_provider import _apply_bridge_runtime_config
+
+    _apply_bridge_runtime_config(provider, args)
 
     provider.tensor_model_parallel_size = args.backend.tensor_model_parallel_size
     provider.pipeline_model_parallel_size = args.backend.pipeline_model_parallel_size
@@ -235,14 +241,17 @@ def _setup_lora_model_via_bridge(args: TrainerConfig) -> list:
             hf_mapping=hf_mapping,
             canonical=args.lora_type == "canonical_lora",
         )
+        if any(".experts." in target for target in adapter_targets):
+            assert (
+                provider.expert_tensor_parallel_size or 1
+            ) == 1, "LoRA on MoE experts requires --expert-tensor-parallel-size 1"
         lora = create_adapter(args, target_modules=adapter_targets)
         transformed = lora(model_chunks, training=True)
         enable_expert_parallel_grad_sync_in_finalize(transformed)
-        if is_multi_lora_enabled(args):
-            for chunk in transformed:
-                for module in chunk.modules():
-                    if isinstance(module, TopKRouter):
-                        module.frozen_expert_bias = True
+        for chunk in transformed:
+            for module in chunk.modules():
+                if isinstance(module, TopKRouter):
+                    module.frozen_expert_bias = True
         lora.set_params_to_save(transformed)
         return transformed
 
@@ -272,5 +281,9 @@ def _setup_lora_model_via_bridge(args: TrainerConfig) -> list:
     if args.offload_train:
         patch_param_grad_buffer_for_colocate_mode_lora()
 
-    model = provider.provide_distributed_model(wrap_with_ddp=True, ddp_config=ddp_config)
+    model = provider.provide_distributed_model(
+        wrap_with_ddp=True,
+        ddp_config=ddp_config,
+        data_parallel_random_init=args.backend.data_parallel_random_init,
+    )
     return model
