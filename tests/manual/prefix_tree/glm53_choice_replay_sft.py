@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -44,9 +45,14 @@ def main():
     parser.add_argument("--unfused-norm", choices=("none", "fp32", "fp64"), default="none")
     parser.add_argument("--microbatch-index", type=int, default=0)
     parser.add_argument("--lora-kernel-comparison", action="store_true")
+    parser.add_argument("--record-strict", action="store_true", help="Record choices with strict BF16 reductions too")
+    parser.add_argument("--unforked-native", action="store_true", help="Keep original sharing in the unreplayed phase")
+    parser.add_argument("--expanded-order-control", action="store_true")
     args = parser.parse_args()
     if args.lora_kernel_comparison and (args.trace or args.only_all):
         parser.error("Kernel comparison uses unreplayed phases; omit --trace and --only-all")
+    if args.lora_kernel_comparison and args.expanded_order_control:
+        parser.error("Order control must use the native kernel policy")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", device_id=torch.device("cuda", int(os.environ["LOCAL_RANK"])))
     parallel_state.initialize_model_parallel(
@@ -74,7 +80,11 @@ def main():
     unfused = unfuse_rmsnorm_linears(model, args.unfused_norm) if args.unfused_norm != "none" else []
     optimizer = MasterOptimizer(model, 1e-5)
     data = _data(rollouts, args.microbatch_index, None)
+    original_data = data
     original_expanded, _ = _prepared(data, shared=False)
+    original_compact = _prepared(data, shared=True)
+    if args.record_strict:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     replay = ChoiceReplay(model, original_expanded)
     _emit("CHOICE_RECORD_BEGIN", {})
     with torch.no_grad():
@@ -103,6 +113,8 @@ def main():
         "status": "diagnosing",
         "saved_optimizer_steps": steps,
         "microbatch_index": args.microbatch_index,
+        "record_strict": args.record_strict,
+        "unforked_native": args.unforked_native,
         "strict_reductions": args.strict_reductions,
         "moe_router_fusion": False,
         "row_math": "fp32",
@@ -154,11 +166,14 @@ def main():
         for iteration, shared in enumerate(cases):
             replay.enable("none" if kernels else mode, shared=shared)
             _emit("CHOICE_PHASE_BEGIN", {"mode": mode, "shared": shared, "iteration": iteration})
+            native_unforked = args.unforked_native and mode == "none"
+            phase_compact = original_compact if native_unforked else compact
+            phase_data = original_data if native_unforked else data
             stats = _phase(
                 model,
                 optimizer,
-                (compact if shared else expanded,),
-                (data,),
+                (phase_compact if shared else expanded,),
+                (phase_data,),
                 shared=shared,
                 supervised_global=supervised,
             )
@@ -209,6 +224,38 @@ def main():
             _persist(args.output_dir, report)
     if kernels:
         kernels.close()
+    if args.expanded_order_control:
+        order = tuple(
+            i
+            for slot in sorted(set(original_data.slots))
+            for i in reversed([j for j, value in enumerate(original_data.slots) if value == slot])
+        )
+        reordered = replace(
+            original_data,
+            **{
+                field: tuple(getattr(original_data, field)[i] for i in order)
+                for field in ("sequences", "targets", "weights", "slots", "computation_keys")
+            }
+        )
+        packed = _prepared(reordered, shared=False)
+        report["expanded_order_control"] = []
+        previous = None
+        for iteration in range(2):
+            replay.enable("none", shared=False)
+            stats = _phase(model, optimizer, (packed,), (reordered,), shared=False, supervised_global=supervised)
+            gradient = optimizer.snapshot()
+            row = {
+                "iteration": iteration,
+                "permutation": order,
+                **stats,
+                "original_expanded_gradient_relative_l2_max": _maximum(_gradient_error(native_reference, gradient)),
+            }
+            if previous is not None:
+                row["permuted_repeat_gradient_relative_l2_max"] = _maximum(_gradient_error(previous, gradient))
+            previous = gradient
+            report["expanded_order_control"].append(row)
+            _emit("EXPANDED_ORDER_CONTROL", row)
+            _persist(args.output_dir, report)
     report["status"] = "complete"
     _persist(args.output_dir, report)
     dist.destroy_process_group()
