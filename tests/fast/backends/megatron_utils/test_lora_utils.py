@@ -141,6 +141,13 @@ def test_load_lora_adapter_rejects_shards_saved_under_another_layout(tmp_path, m
 
 
 class TestSaveLoraCheckpointTrainingState:
+
+    @pytest.fixture(autouse=True)
+    def ordinary_optimizer_discovery(self, monkeypatch):
+        # These fakes model ordinary optimizers; distributed-state tests supply
+        # their own discovered optimizers below, without importing Megatron.
+        monkeypatch.setattr(lora_utils, "_distributed_optimizers", lambda _optimizer: [])
+
     def _save(self, tmp_path, *, no_save_optim, scheduler=None):
         publisher = SimpleNamespace(write_adapter=lambda *_: None)
 
@@ -187,6 +194,13 @@ class TestSaveLoraCheckpointTrainingState:
 
 
 class TestLoadTrainingState:
+
+    @pytest.fixture(autouse=True)
+    def ordinary_optimizer_discovery(self, monkeypatch):
+        # These fakes model ordinary optimizers; distributed-state tests supply
+        # their own discovered optimizers below, without importing Megatron.
+        monkeypatch.setattr(lora_utils, "_distributed_optimizers", lambda _optimizer: [])
+
     @staticmethod
     def _recorder():
         loaded = []
@@ -267,6 +281,12 @@ class TestLoadTrainingStateOptimizerGate:
 class TestLoadLoraAdapterRefreshesMasters:
     """The optimizer's fp32 masters are built before the adapter loads; unless the checkpoint's
     optimizer state replaces them, the first step() writes the initial adapter back."""
+
+    @pytest.fixture(autouse=True)
+    def ordinary_optimizer_discovery(self, monkeypatch):
+        # These fakes model ordinary optimizers; distributed-state tests supply
+        # their own discovered optimizers below, without importing Megatron.
+        monkeypatch.setattr(lora_utils, "_distributed_optimizers", lambda _optimizer: [])
 
     @staticmethod
     def _optimizer():

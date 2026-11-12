@@ -35,7 +35,7 @@ Args:
       responses, each used once (default: all of them, one step per rollout).
   --enable-eval / --no-enable-eval: AIME25 every five rollouts (default on).
   --async-training / --no-async-training: train_async.py overlap, or synchronous
-      train.py; ignored by `execute-colocate`.
+      train.py; ignored by `train --colocate`.
   --use-rollout-routing-replay: Enable rollout routing replay and the Miles router.
   --extra-args: Extra Miles/Megatron/SGLang flags, appended last so they override.
 
@@ -43,12 +43,12 @@ Examples:
   python scripts/run_beam.py prepare --data-dir /data/datasets
 
   MASTER_ADDR=10.0.0.1 RAY_ADDRESS=http://10.0.0.1:8265 \
-    python scripts/run_beam.py execute --num-rollout 100 \
+    python scripts/run_beam.py train --num-rollout 100 \
       --model-dir /root/models/Beam --data-dir /data/datasets \
       --output-dir /root/shared_data/beam-run
 
   MASTER_ADDR=10.0.0.1 RAY_ADDRESS=http://10.0.0.1:8265 \
-    python scripts/run_beam.py execute-colocate --num-rollout 100 \
+    python scripts/run_beam.py train --colocate --num-rollout 100 \
       --model-dir /root/models/Beam --data-dir /data/datasets \
       --output-dir /root/shared_data/beam-colocate-run
 """

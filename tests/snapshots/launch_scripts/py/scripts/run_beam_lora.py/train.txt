@@ -41,7 +41,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --lora-rank 16
   --lora-alpha 32
   --lora-dropout 0.0
-  --prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl
+  --prompt-data <SANDBOX>/datasets/dapo-math-17k/dapo-math-17k.jsonl
   --input-key prompt
   --label-key label
   --custom-rm-path examples.beam.reward.reward
@@ -60,7 +60,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --apply-chat-template
   --rollout-shuffle
   --balance-data
-  --eval-prompt-data aime25 /root/datasets/aime-2025/aime-2025-answer-format.jsonl
+  --eval-prompt-data aime25 <SANDBOX>/datasets/aime-2025/aime-2025-answer-format.jsonl
   --eval-interval 5
   --eval-input-key prompt
   --eval-label-key label

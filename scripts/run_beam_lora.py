@@ -54,7 +54,7 @@ Examples:
   python scripts/run_beam_lora.py prepare --data-dir /data/datasets
 
   MASTER_ADDR=10.0.0.1 RAY_ADDRESS=http://10.0.0.1:8265 \
-    python scripts/run_beam_lora.py execute --num-rollout 100 \
+    python scripts/run_beam_lora.py train --num-rollout 100 \
       --model-dir /root/models/Beam --data-dir /data/datasets \
       --output-dir /root/shared_data/beam-lora-run
 """
