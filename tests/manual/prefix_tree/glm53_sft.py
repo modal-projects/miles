@@ -47,6 +47,9 @@ def make_model(
     pretrained_layers=5,
     sequence_length=1024,
     recompute=False,
+    reduced_layers=3,
+    reduced_topk=2,
+    reduced_index_topk=64,
 ):
     bridge = AutoBridge.from_hf_pretrained(checkpoint, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
@@ -56,9 +59,9 @@ def make_model(
         ffn_hidden_size=1024,
         num_attention_heads=8,
         num_query_groups=8,
-        num_moe_experts=4,
+        num_moe_experts=max(4, reduced_topk * 2),
         moe_ffn_hidden_size=256,
-        moe_router_topk=2,
+        moe_router_topk=reduced_topk,
         moe_router_num_groups=1,
         moe_router_group_topk=1,
         moe_layer_freq=[0, 1, 1],
@@ -72,7 +75,7 @@ def make_model(
         kda_head_dim=128,
         dsa_indexer_n_heads=4,
         dsa_indexer_head_dim=128,
-        dsa_indexer_topk=64,
+        dsa_indexer_topk=reduced_index_topk,
         tensor_model_parallel_size=2,
         expert_tensor_parallel_size=1,
         expert_model_parallel_size=1,
@@ -101,6 +104,12 @@ def make_model(
     )
     if recompute:
         changes.update(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1)
+    if not full_width and reduced_layers != 3:
+        changes.update(
+            num_layers=reduced_layers,
+            kda_layers=tuple(i for i in range(reduced_layers) if i % 4 != 1),
+            moe_layer_freq=[0] + [1] * (reduced_layers - 1),
+        )
     if full_width:
         # Preserve real GLM attention/MLP/MoE widths and expert count. The slice
         # remains three layers with a small vocabulary, initialized randomly.
@@ -235,7 +244,7 @@ def _synchronize_gradients(model):
         p.grad.div_(parallel_state.get_data_parallel_world_size())
 
 
-def evaluate(model, sequences, *, shared, lora=False):
+def evaluate(model, sequences, *, shared, lora=False, targets=None):
     slots = [0] * (len(sequences) - 1) + [1] if lora else None
     plan = build_prefix_tree(sequences, share_prefixes=shared, sharing_keys=slots)
     if lora:
@@ -253,7 +262,8 @@ def evaluate(model, sequences, *, shared, lora=False):
     )
     tokens = torch.tensor(plan.tokens, device="cuda")[None]
     positions = torch.tensor(plan.positions, device="cuda")[None]
-    targets = [[(token + 1) % 512 for token in sequence] for sequence in sequences]
+    if targets is None:
+        targets = [[(token + 1) % 512 for token in sequence] for sequence in sequences]
     loss_layout = SFTLossLayout.from_plan(plan, targets, device="cuda")
     batch = (
         GlmTreeSFTBatch.from_plan(
@@ -265,6 +275,7 @@ def evaluate(model, sequences, *, shared, lora=False):
     model.zero_grad(set_to_none=True)
     traces = {}
     handles = []
+    operators = []
 
     def capture(name):
         def hook(module, inputs, kwargs, output):
@@ -272,6 +283,8 @@ def evaluate(model, sequences, *, shared, lora=False):
                 ("input", inputs[0] if inputs else kwargs.get("hidden_states")),
                 ("output", output[0] if isinstance(output, tuple) else output),
             )
+            if isinstance(output, tuple) and os.environ.get("GLM_TREE_TRACE_OPERATORS") == "1":
+                values += tuple((f"output{i}", value) for i, value in enumerate(output[1:], 1))
             if name.endswith(".router") and isinstance(output, tuple):
                 values += (("routing", output[1]),)
             for kind, value in values:
@@ -290,6 +303,23 @@ def evaluate(model, sequences, *, shared, lora=False):
         for name, module in model.named_modules():
             if name.endswith(("self_attention", ".mlp", ".router")) or name == "embedding":
                 handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
+            if os.environ.get("GLM_TREE_TRACE_OPERATORS") == "1" and name.endswith(
+                ("input_layernorm", "pre_mlp_layernorm", "q_layernorm", "kv_layernorm")
+            ):
+                handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
+            if os.environ.get("GLM_TREE_TRACE_OPERATORS") == "1" and name.endswith("hyper_connection"):
+                handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
+                if hasattr(module, "_proj_rms_op"):
+                    original = module._proj_rms_op
+                    projection_hook = capture(name + ".projection")
+
+                    def projection(*args, fn=original, hook=projection_hook, **kwargs):
+                        output = fn(*args, **kwargs)
+                        hook(None, args, kwargs, output)
+                        return output
+
+                    operators.append((module, original))
+                    module._proj_rms_op = projection
     print("SFT_PHASE", "tree" if shared else "expanded", "begin", flush=True)
     dist.barrier()
     torch.cuda.synchronize()
@@ -302,6 +332,8 @@ def evaluate(model, sequences, *, shared, lora=False):
             logits = gather_from_tensor_model_parallel_region(logits)
     for handle in handles:
         handle.remove()
+    for module, original in operators:
+        module._proj_rms_op = original
     loss = loss_layout.loss(logits)
     loss.backward()
     _synchronize_gradients(model)
