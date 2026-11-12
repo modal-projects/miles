@@ -161,16 +161,25 @@ class ForwardTrace:
                     )
                 continue
             leaf = name.rsplit(".", 1)[-1]
-            if name == "embedding" or name.endswith((".self_attention", ".mlp", ".router")):
+            if name == "embedding" or name.endswith((".self_attention", ".mlp", ".router", ".shared_experts")):
                 handles.append(
                     module.register_forward_hook(
-                        self.module_hook(name, routes=name.endswith(".router")), with_kwargs=True
+                        self.module_hook(
+                            name, inputs=name.endswith(".shared_experts"), routes=name.endswith(".router")
+                        ),
+                        with_kwargs=True,
                     )
                 )
             elif name.startswith("decoder.layers.") and name.count(".") == 2 and leaf.isdigit():
                 handles.append(module.register_forward_hook(self.module_hook(name), with_kwargs=True))
-            elif (name.rsplit(".", 1)[0].endswith((".self_attention", ".mlp")) and leaf.startswith("linear_")) or (
-                name.endswith(".to_wrap") and any(part in name for part in (".self_attention.linear_", ".mlp.linear_"))
+            elif (
+                name.rsplit(".", 1)[0].endswith((".self_attention", ".mlp", ".shared_experts"))
+                and leaf.startswith("linear_")
+            ) or (
+                name.endswith(".to_wrap")
+                and any(
+                    part in name for part in (".self_attention.linear_", ".mlp.linear_", ".shared_experts.linear_")
+                )
             ):
                 handles.append(module.register_forward_hook(self.module_hook(name, inputs=True), with_kwargs=True))
             elif leaf.endswith(("layernorm", "hyper_connection", "o_norm")):

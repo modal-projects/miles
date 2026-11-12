@@ -22,6 +22,10 @@ def measured(fn):
     ) as profile:
         output = fn()
     kernels = sorted({kernel.name for event in profile.events() for kernel in event.kernels})
+    kernels = sorted(
+        set(kernels)
+        | {event.name for event in profile.events() if event.device_type == torch.autograd.DeviceType.CUDA}
+    )
     return output, kernels
 
 
@@ -35,6 +39,7 @@ def main():
     parser.add_argument("--rowwise", action="store_true")
     parser.add_argument("--trainable", action="store_true")
     parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
+    parser.add_argument("--gradient-check", action="store_true")
     parser.add_argument("--compare-policies", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -101,11 +106,27 @@ def main():
     unique, compact_kernels = measured(lambda: project(compact))
     actual = unique.index_select(0, rows)
     delta = reference.double() - actual.double()
+    gradient_checks = None
+    if args.gradient_check:
+        x = compact.detach().clone().requires_grad_()
+        w = weights.detach().clone().requires_grad_()
+        a, b = x.detach().clone().requires_grad_(), w.detach().clone().requires_grad_()
+        actual_output = rowwise_linear(x, w)
+        expected_output = torch.nn.functional.linear(a, b)
+        torch.testing.assert_close(actual_output, expected_output, atol=0.02, rtol=0.02)
+        upstream = torch.randn_like(actual_output)
+        (actual_output.float() * upstream.float()).sum().backward()
+        (expected_output.float() * upstream.float()).sum().backward()
+        gradient_checks = [
+            float((got.float() - expected.float()).norm() / expected.float().norm().clamp_min(1e-30))
+            for got, expected in [(x.grad, a.grad), (w.grad, b.grad)]
+        ]
     print(
         json.dumps(
             {
                 "settings": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                 "workspace": os.environ.get("CUBLASLT_WORKSPACE_SIZE"),
+                "gradient_relative_l2": gradient_checks,
                 "bitwise_equal": torch.equal(reference, actual),
                 "relative_l2": float(delta.norm() / reference.double().norm()),
                 "max_abs": float(delta.abs().max()),

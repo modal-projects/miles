@@ -62,11 +62,11 @@ def _sources(output):
 class LayerKernelTrace:
     """Profile the first block's actual CPU dispatch and CUDA kernels."""
 
-    def __init__(self, model, output, label):
+    def __init__(self, model, output, label, *, layer=0):
         self.output, self.label, self.profile = output, label, None
         self.handles = [
-            model.decoder.layers[0].register_forward_pre_hook(self._begin),
-            model.decoder.layers[0].register_forward_hook(self._end),
+            model.decoder.layers[layer].register_forward_pre_hook(self._begin),
+            model.decoder.layers[layer].register_forward_hook(self._end),
         ]
 
     def _begin(self, module, inputs):
@@ -89,18 +89,31 @@ class LayerKernelTrace:
                 for event in self.profile.events()
                 if event.kernels
             ]
+            rows.append(
+                {
+                    "operator": "CUDA kernels (all threads)",
+                    "input_shapes": [],
+                    "kernels": sorted(
+                        {
+                            event.name
+                            for event in self.profile.events()
+                            if event.device_type == torch.autograd.DeviceType.CUDA
+                        }
+                    ),
+                }
+            )
             (self.output / f"kernels-{self.label}.json").write_text(json.dumps(rows, indent=2))
         for handle in self.handles:
             handle.remove()
 
 
-def _forward(model, plan, batch, trace, *, label, attach, replace, output):
+def _forward(model, plan, batch, trace, *, label, attach, replace, output, profile_layer=0):
     trace.begin(label, plan, replace)
     handles, originals = trace.install(model)
     attention_handles, attention_originals = install_attention_trace(model, trace, attach=attach)
     handles.extend(attention_handles)
     originals.extend(attention_originals)
-    kernel_trace = LayerKernelTrace(model, output, label)
+    kernel_trace = LayerKernelTrace(model, output, label, layer=profile_layer)
     try:
         with torch.no_grad():
             loss = batch.loss(model, shared=attach)
@@ -120,10 +133,10 @@ def _forward(model, plan, batch, trace, *, label, attach, replace, output):
     return row
 
 
-def _gradients(model, data, arms, output, report, policy, lora_control=None):
+def _gradients(model, data, arms, output, report, policy, lora_control=None, *, controlled_only=False):
     optimizer = MasterOptimizer(model, 1e-5)
     total = _sum_dp(data.supervised_tokens)
-    for controlled in (False, True):
+    for controlled in (True,) if controlled_only else (False, True):
         policy.activate(controlled)
         if lora_control is not None:
             lora_control.activate("rowwise_all" if controlled else "native")
@@ -158,6 +171,10 @@ def main():
     parser.add_argument("--expert-parallel", type=int, default=8)
     parser.add_argument("--data-dp-size", type=int)
     parser.add_argument("--rowwise-lora", action="store_true")
+    parser.add_argument("--controlled-only", action="store_true")
+    parser.add_argument("--profile-layer", type=int, default=0)
+    parser.add_argument("--forward-only", action="store_true")
+    parser.add_argument("--pair-only", action="store_true")
     args = parser.parse_args()
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
@@ -193,6 +210,8 @@ def main():
         ("tree_without_sharing", *expanded, True),
         ("compact_tree", *compact, True),
     ]
+    if args.pair_only:
+        arms = [arms[0], arms[-1]]
     trace = ForwardTrace(data, expanded[0], compact[0], map(int, args.trace_layers.split(",")))
     policy = _RowMath(model, "fp32")
     unfused = unfuse_rmsnorm_linears(model, "fp32")
@@ -209,10 +228,12 @@ def main():
         "saved_optimizer_steps": steps,
         "layers": args.layers,
         "rowwise_lora": args.rowwise_lora,
+        "controlled_only": args.controlled_only,
+        "forward_only": args.forward_only,
         "forward": [],
     }
     _persist(args.output_dir, report)
-    for controlled in (False, True):
+    for controlled in (True,) if args.controlled_only else (False, True):
         policy.activate(controlled)
         if lora_control is not None:
             lora_control.activate("rowwise_all" if controlled else "native")
@@ -221,14 +242,25 @@ def main():
             label = ("controlled_" if controlled else "native_") + name
             _emit("EXECUTION_FORWARD_BEGIN", {"phase": label})
             row = _forward(
-                model, plan, batch, trace, label=label, attach=attach, replace=index == 0, output=args.output_dir
+                model,
+                plan,
+                batch,
+                trace,
+                label=label,
+                attach=attach,
+                replace=index == 0,
+                output=args.output_dir,
+                profile_layer=args.profile_layer,
             )
             report["forward"].append(row)
             _persist(args.output_dir, report)
             _emit("EXECUTION_FORWARD_END", {k: v for k, v in row.items() if k != "modules"})
     del trace
     gc.collect()
-    _gradients(model, data, arms, args.output_dir, report, policy, lora_control)
+    if not args.forward_only:
+        _gradients(
+            model, data, arms, args.output_dir, report, policy, lora_control, controlled_only=args.controlled_only
+        )
     report["status"] = "complete"
     _persist(args.output_dir, report)
     dist.destroy_process_group()
