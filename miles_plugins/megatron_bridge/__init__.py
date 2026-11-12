@@ -83,3 +83,9 @@ try:
     from . import mimo_v2  # noqa: F401
 except Exception as _e:  # pragma: no cover - defensive
     logger.warning("miles mimo_v2 plugin failed to load: %s", _e)
+
+
+try:
+    from . import beam  # noqa: F401
+except Exception as _e:  # pragma: no cover - defensive
+    logger.warning("miles beam plugin failed to load: %s", _e)

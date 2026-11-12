@@ -118,6 +118,13 @@ def register_hf_config_aliases() -> None:
     except ImportError:
         pass
 
+    try:
+        from sglang.srt.configs.beam import BeamConfig
+    except ImportError:
+        pass
+    else:
+        AutoConfig.register("beam", BeamConfig, exist_ok=True)
+
 
 def load_hf_config(
     checkpoint_path: str,
