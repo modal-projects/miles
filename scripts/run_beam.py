@@ -8,7 +8,7 @@ generates the next rollout while the current one trains, so responses are one
 policy update stale; TIS and the clip bound the mismatch. Rollout Routing Replay
 (R3) is disabled by default; enable it with --use-rollout-routing-replay.
 
-`execute-colocate` instead runs on 8 x 8 H200: all 64 GPUs train and also host
+`train --colocate` instead runs on 8 x 8 H200: all 64 GPUs train and also host
 four TP16 SGLang engines, which receive the weights over CUDA IPC. The paused
 trainer spills to node-local NVMe while the engines generate, and training runs
 synchronously (train.py), since train_async.py does not support colocation.
@@ -17,7 +17,7 @@ AIME25 eval prompts carry the training prompts' answer-format instruction
 (Answer: \\boxed{...}, see `prepare`): the grader requires \\boxed{}, and on bare
 AIME problems the policy drops it as its final message gets shorter.
 
-Requires an existing 12-node (8-node for `execute-colocate`) Ray cluster built
+Requires an existing 12-node (8-node for `train --colocate`) Ray cluster built
 from docker/Dockerfile.beam, a Beam HF checkpoint and the datasets on
 storage shared by every node (downloaded by `prepare`).
 
