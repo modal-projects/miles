@@ -70,6 +70,29 @@ def test_provider_rejects_unsupported_config_before_build(overrides, message):
     assert vars(provider) == before
 
 
+def test_provider_restores_beam_router_settings_after_cli_overrides(monkeypatch):
+    from megatron.bridge.models.gpt_provider import GPTModelProvider
+
+    provider = AutoBridge.from_hf_config(BeamConfig()).to_megatron_provider(load_weights=False)
+    # Reproduce the shared LoRA setup overwriting the checkpoint provider's defaults.
+    provider.moe_router_dtype = "bf16"
+    provider.moe_router_use_torch_mm = False
+    provider.apply_rope_fusion = True
+    provider.bias_activation_fusion = True
+    model = torch.nn.Module()
+    model.post_process = False
+
+    def build(self, **kwargs):
+        assert self.moe_router_dtype == "fp32"
+        assert self.moe_router_use_torch_mm is True
+        assert self.apply_rope_fusion is False
+        assert self.bias_activation_fusion is False
+        return model
+
+    monkeypatch.setattr(GPTModelProvider, "provide", build)
+    assert provider.provide() is model
+
+
 def _softcap_head(cap):
     from megatron.bridge.models.gemma.modules import extend_instance
 

@@ -36,6 +36,10 @@ class BeamModelProvider(GPTModelProvider):
         # which would change the base model's numerics.
         self.apply_rope_fusion = False
         self.bias_activation_fusion = False
+        # Beam's FP32 router requires torch matmul with BF16 activations. These model
+        # requirements override the CLI router flags copied by the LoRA setup path.
+        self.moe_router_dtype = "fp32"
+        self.moe_router_use_torch_mm = True
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
         routers = [module for module in model.modules() if isinstance(module, TopKRouter)]
         assert all(isinstance(router, BeamTopKRouter) for router in routers), "Beam routers must keep FP32 weights"
