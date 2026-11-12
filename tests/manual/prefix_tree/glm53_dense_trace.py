@@ -16,6 +16,7 @@ import torch.distributed as dist
 from glm53_dapo_sft import _persist, _RowMath
 from glm53_forward_trace import ForwardTrace, _load_adapters
 from glm53_full_sft import _emit, _expanded_loss, _prepared
+from glm53_fused_norm_control import unfuse_rmsnorm_linears
 from glm53_sft import make_model
 from glm53_trace_values import map_tensors
 from math_sft_data import math_microbatches
@@ -30,6 +31,8 @@ def main():
     parser.add_argument("--adapter-state", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--fp32-base", choices=("none", "up", "down", "both"), default="none")
+    parser.add_argument("--unfused-norm", choices=("none", "fp32", "fp64"), default="none")
+    parser.add_argument("--gradient-check", action="store_true")
     args = parser.parse_args()
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", device_id=torch.device("cuda", int(os.environ["LOCAL_RANK"])))
@@ -51,6 +54,7 @@ def main():
     steps = _load_adapters(model, args.adapter_state, allow_deeper_layers=True)
     policy = _RowMath(model, "fp32")
     policy.activate(True)
+    unfused = unfuse_rmsnorm_linears(model, args.unfused_norm) if args.unfused_norm != "none" else []
     controlled = []
     choices = {"none": (), "up": ("linear_fc1",), "down": ("linear_fc2",), "both": ("linear_fc1", "linear_fc2")}
     for name in choices[args.fp32_base]:
@@ -75,6 +79,8 @@ def main():
         "status": "tracing",
         "saved_optimizer_steps": steps,
         "fp32_base": controlled,
+        "unfused_norm": args.unfused_norm,
+        "unfused_modules": [name for name, _, _ in unfused],
         "precision_scope": "Frozen dense base weight/input (including any fused norm) promoted to FP32; nested outputs return to BF16. Native TP/SP communication retained.",
         "phases": [],
         "scope": "First pretrained dense block, original real DP-zero microbatch, TP2/SP/EP1",
@@ -97,6 +103,37 @@ def main():
             report["phases"].append({"phase": name, "local_loss": float(loss), **trace.report()})
             _emit("DENSE_TRACE_END", report["phases"][-1])
         _persist(args.output_dir, report)
+    del trace
+    if args.gradient_check:
+        from glm53_dapo_sft import _phase, _sum_dp
+        from glm53_full_sft import _gradient_error, _maximum
+        from math_sft_optimizer import MasterOptimizer
+
+        optimizer = MasterOptimizer(model, 1e-5)
+        report["gradient_checks"] = []
+        reference, tree_reference = None, None
+        for shared in (False, False, True, True):
+            stats = _phase(
+                model,
+                optimizer,
+                (compact if shared else expanded,),
+                (data,),
+                shared=shared,
+                supervised_global=_sum_dp(data.supervised_tokens),
+            )
+            gradients = optimizer.snapshot()
+            row = {"shared": shared, **stats}
+            if reference is None:
+                reference = gradients
+            else:
+                row["expanded_reference_gradient_relative_l2_max"] = _maximum(_gradient_error(reference, gradients))
+            if shared:
+                if tree_reference is not None:
+                    row["tree_repeat_gradient_relative_l2_max"] = _maximum(_gradient_error(tree_reference, gradients))
+                tree_reference = gradients
+            report["gradient_checks"].append(row)
+            _emit("DENSE_GRADIENT_CHECK", row)
+            _persist(args.output_dir, report)
     report["status"] = "complete"
     _persist(args.output_dir, report)
     dist.destroy_process_group()

@@ -18,6 +18,7 @@ from glm53_choice_replay import ChoiceReplay, compatible_data
 from glm53_dapo_sft import _persist, _phase, _RowMath, _sum_dp
 from glm53_forward_trace import ForwardTrace, _data, _load_adapters
 from glm53_full_sft import _emit, _expanded_loss, _gradient_error, _maximum, _prepared
+from glm53_fused_norm_control import unfuse_rmsnorm_linears
 from glm53_sft import make_model
 from math_sft_optimizer import MasterOptimizer
 from megatron.core import parallel_state
@@ -39,6 +40,7 @@ def main():
     parser.add_argument(
         "--trace", action="store_true", help="Trace fixed-choice expanded/tree forwards before backward"
     )
+    parser.add_argument("--unfused-norm", choices=("none", "fp32", "fp64"), default="none")
     args = parser.parse_args()
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", device_id=torch.device("cuda", int(os.environ["LOCAL_RANK"])))
@@ -64,6 +66,7 @@ def main():
     steps = _load_adapters(model, args.adapter_state)
     policy = _RowMath(model, "fp32")
     policy.activate(True)
+    unfused = unfuse_rmsnorm_linears(model, args.unfused_norm) if args.unfused_norm != "none" else []
     optimizer = MasterOptimizer(model, 1e-5)
     data = _data(rollouts, 0, None)
     original_expanded, _ = _prepared(data, shared=False)
@@ -88,6 +91,8 @@ def main():
         "strict_reductions": args.strict_reductions,
         "moe_router_fusion": False,
         "row_math": "fp32",
+        "unfused_norm": args.unfused_norm,
+        "unfused_modules": [name for name, _, _ in unfused],
         "eligibility": inventories,
         "recorded_local_loss": recorded_loss,
         "phases": [],
