@@ -19,6 +19,7 @@ from glm53_dapo_sft import _persist, _phase, _RowMath, _sum_dp
 from glm53_forward_trace import ForwardTrace, _data, _load_adapters
 from glm53_full_sft import _emit, _expanded_loss, _gradient_error, _maximum, _prepared
 from glm53_fused_norm_control import unfuse_rmsnorm_linears
+from glm53_lora_kernel_control import LoraKernelControl
 from glm53_sft import make_model
 from math_sft_optimizer import MasterOptimizer
 from megatron.core import parallel_state
@@ -41,7 +42,11 @@ def main():
         "--trace", action="store_true", help="Trace fixed-choice expanded/tree forwards before backward"
     )
     parser.add_argument("--unfused-norm", choices=("none", "fp32", "fp64"), default="none")
+    parser.add_argument("--microbatch-index", type=int, default=0)
+    parser.add_argument("--lora-kernel-comparison", action="store_true")
     args = parser.parse_args()
+    if args.lora_kernel_comparison and (args.trace or args.only_all):
+        parser.error("Kernel comparison uses unreplayed phases; omit --trace and --only-all")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", device_id=torch.device("cuda", int(os.environ["LOCAL_RANK"])))
     parallel_state.initialize_model_parallel(
@@ -68,7 +73,7 @@ def main():
     policy.activate(True)
     unfused = unfuse_rmsnorm_linears(model, args.unfused_norm) if args.unfused_norm != "none" else []
     optimizer = MasterOptimizer(model, 1e-5)
-    data = _data(rollouts, 0, None)
+    data = _data(rollouts, args.microbatch_index, None)
     original_expanded, _ = _prepared(data, shared=False)
     replay = ChoiceReplay(model, original_expanded)
     _emit("CHOICE_RECORD_BEGIN", {})
@@ -76,18 +81,28 @@ def main():
         _, batch = _prepared(data, shared=False)
         recorded_loss = float(_expanded_loss(model, original_expanded, batch))
     choices = replay.finish_record()
-    data, eligibility = compatible_data(data, choices)
+    if args.lora_kernel_comparison:
+        eligibility = {"scope": "Unreplayed SFT; no choice-based eligibility forks"}
+    else:
+        data, eligibility = compatible_data(data, choices)
     del choices
     expanded, compact = _prepared(data, shared=False), _prepared(data, shared=True)
     if expanded[0].tokens != original_expanded.tokens or expanded[0].positions != original_expanded.positions:
         raise ValueError("Replay eligibility changed expanded reference tokens or positions")
-    replay.prepare_compact(expanded[0], compact[0])
+    if args.lora_kernel_comparison:
+        replay.key_values.clear()
+        replay.key_logical.clear()
+        replay.expert_values.clear()
+        replay.compact_keys = {}
+    else:
+        replay.prepare_compact(expanded[0], compact[0])
     supervised = _sum_dp(data.supervised_tokens)
     inventories = [None] * dist.get_world_size()
     dist.all_gather_object(inventories, {"rank": dist.get_rank(), **eligibility})
     report = {
         "status": "diagnosing",
         "saved_optimizer_steps": steps,
+        "microbatch_index": args.microbatch_index,
         "strict_reductions": args.strict_reductions,
         "moe_router_fusion": False,
         "row_math": "fp32",
@@ -96,7 +111,7 @@ def main():
         "eligibility": inventories,
         "recorded_local_loss": recorded_loss,
         "phases": [],
-        "scope": "Fixed-weight first real DAPO microbatch, full 45 layers; conditional replay diagnostic",
+        "scope": "Fixed-weight recorded real DAPO microbatch, full 45 layers; conditional replay diagnostic",
     }
     _persist(args.output_dir, report)
     # Keep recorded choices independent of the reduction-precision experiment.
@@ -124,12 +139,20 @@ def main():
                 _emit("CHOICE_FORWARD_TRACE", report["forward_trace"][-1])
             _persist(args.output_dir, report)
         del trace
+    kernels = LoraKernelControl(model) if args.lora_kernel_comparison else None
+    modes = (
+        ("native", "dense_per_slot", "all_per_group", "all_per_group_precise")
+        if kernels
+        else (("all",) if args.only_all else ("none", "experts", "all"))
+    )
     native_reference = None
-    for mode in ("all",) if args.only_all else ("none", "experts", "all"):
+    for mode in modes:
+        if kernels:
+            kernels.activate(mode)
         reference, tree_reference = None, None
-        cases = (False, False, True, True) if mode == "all" else (False, False, True)
+        cases = (False, False, True, True) if kernels or mode == "all" else (False, False, True)
         for iteration, shared in enumerate(cases):
-            replay.enable(mode, shared=shared)
+            replay.enable("none" if kernels else mode, shared=shared)
             _emit("CHOICE_PHASE_BEGIN", {"mode": mode, "shared": shared, "iteration": iteration})
             stats = _phase(
                 model,
@@ -140,7 +163,13 @@ def main():
                 supervised_global=supervised,
             )
             gradients = optimizer.snapshot()
-            row = {"mode": mode, "shared": shared, "iteration": iteration, **stats}
+            row = {
+                "mode": mode,
+                "shared": shared,
+                "iteration": iteration,
+                "reference_grouped_calls": kernels.calls if kernels else 0,
+                **stats,
+            }
             if reference is None:
                 reference = gradients
                 if native_reference is None:
@@ -178,6 +207,8 @@ def main():
             report["phases"].append(row)
             _emit("CHOICE_PHASE_END", row)
             _persist(args.output_dir, report)
+    if kernels:
+        kernels.close()
     report["status"] = "complete"
     _persist(args.output_dir, report)
     dist.destroy_process_group()
