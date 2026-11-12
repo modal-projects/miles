@@ -16,28 +16,13 @@ from megatron.core import parallel_state
 
 from miles.backends.training_utils.prefix_tree.glm53.dsa import tree_kpool_select
 from miles.backends.training_utils.prefix_tree.glm53.kda import tree_kda
+from miles.backends.training_utils.prefix_tree.megatron import validate_megatron_tree_config
 
 
 def glm53_tree_layer_spec(config, vp_stage=None):
     if config.context_parallel_size != 1:
         raise ValueError("GLM prefix SFT currently requires context_parallel_size=1")
-    if config.attention_dropout or config.hidden_dropout:
-        raise ValueError("Shared-prefix SFT requires zero attention and hidden dropout")
-    if (
-        getattr(config, "moe_router_force_load_balancing", False)
-        or getattr(config, "moe_router_force_biased", None) is not None
-    ):
-        raise ValueError("Shared-prefix SFT does not support randomized benchmark routing")
-    if getattr(config, "moe_router_jitter_eps", None):
-        raise ValueError("Shared-prefix SFT does not support router input jitter")
-    if getattr(config, "moe_expert_capacity_factor", None) is not None:
-        raise ValueError("Shared-prefix SFT does not support capacity-based token dropping")
-    coefficient = getattr(config, "moe_aux_loss_coeff", 0.0)
-    coefficients = coefficient if isinstance(coefficient, (list, tuple)) else (coefficient,)
-    if any(coefficients):
-        raise ValueError("GLM prefix SFT requires zero MoE auxiliary loss until occurrence weighting is implemented")
-    if getattr(config, "moe_router_enable_expert_bias", False) and getattr(config, "moe_router_bias_update_rate", 0.0):
-        raise ValueError("GLM prefix SFT requires fixed router expert bias")
+    validate_megatron_tree_config(config)
     # Bridge dispatches direct-attribute checkpoint mappings by exact class
     # name. Preserve the provider's sharding rules for our execution subclasses.
     AutoMapping.register_module_type("TreeKDAAttention", "column")

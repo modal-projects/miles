@@ -9,6 +9,29 @@ from miles.backends.training_utils.prefix_tree.plan import PrefixTreePlan
 from miles.backends.training_utils.prefix_tree.sft import SFTLossLayout
 
 
+def validate_megatron_tree_config(config) -> None:
+    """Common sharing eligibility; architecture adapters add operator constraints."""
+    if getattr(config, "attention_dropout", 0.0) or getattr(config, "hidden_dropout", 0.0):
+        raise ValueError("Shared-prefix SFT requires zero attention and hidden dropout")
+    if (
+        getattr(config, "moe_router_force_load_balancing", False)
+        or getattr(config, "moe_router_force_biased", None) is not None
+    ):
+        raise ValueError("Shared-prefix SFT does not support randomized benchmark routing")
+    if getattr(config, "moe_router_jitter_eps", None):
+        raise ValueError("Shared-prefix SFT does not support router input jitter")
+    if getattr(config, "moe_expert_capacity_factor", None) is not None:
+        raise ValueError("Shared-prefix SFT does not support capacity-based token dropping")
+    coefficient = getattr(config, "moe_aux_loss_coeff", 0.0)
+    coefficients = coefficient if isinstance(coefficient, (list, tuple)) else (coefficient,)
+    if any(coefficients):
+        raise ValueError(
+            "Shared-prefix SFT requires zero MoE auxiliary loss until occurrence weighting is implemented"
+        )
+    if getattr(config, "moe_router_enable_expert_bias", False) and getattr(config, "moe_router_bias_update_rate", 0.0):
+        raise ValueError("Shared-prefix SFT requires fixed router expert bias")
+
+
 class TreeExecutionLayout(Protocol):
     plan: PrefixTreePlan
 
@@ -86,6 +109,7 @@ class MegatronTreeSFTBatch:
             cu_seqlens_q=cu, cu_seqlens_kv=cu, qkv_format="thd", max_seqlen_q=maximum, max_seqlen_kv=maximum
         )
         if shared:
+            validate_megatron_tree_config(config)
             self.layout.prepare_packed(model, packed)
         if self.slot_counts is not None:
             from megatron.bridge.peft.multi_lora_layers import set_tokens_per_adapter_slot

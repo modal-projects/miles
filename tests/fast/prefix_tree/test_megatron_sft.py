@@ -74,3 +74,34 @@ def test_layout_must_match_supervision_plan():
     plan = build_prefix_tree([[1, 2]])
     with pytest.raises(ValueError, match="same plan"):
         MegatronTreeSFTBatch.from_plan(plan, [[2, 3]], device="cpu", layout=_Layout(build_prefix_tree([[1, 2]])))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("attention_dropout", 0.1),
+        ("hidden_dropout", 0.1),
+        ("moe_router_force_load_balancing", True),
+        ("moe_router_force_biased", 0),
+        ("moe_router_jitter_eps", 0.01),
+        ("moe_expert_capacity_factor", 1.0),
+        ("moe_aux_loss_coeff", [0.0, 0.1]),
+    ],
+)
+def test_common_megatron_sharing_eligibility_rejects_unsupported_semantics(field, value):
+    from miles.backends.training_utils.prefix_tree.megatron import validate_megatron_tree_config
+
+    with pytest.raises(ValueError):
+        validate_megatron_tree_config(SimpleNamespace(**{field: value}))
+
+
+def test_common_megatron_router_bias_must_be_fixed():
+    from miles.backends.training_utils.prefix_tree.megatron import validate_megatron_tree_config
+
+    validate_megatron_tree_config(
+        SimpleNamespace(moe_aux_loss_coeff=[0.0], moe_router_enable_expert_bias=True, moe_router_bias_update_rate=0.0)
+    )
+    with pytest.raises(ValueError, match="fixed router expert bias"):
+        validate_megatron_tree_config(
+            SimpleNamespace(moe_router_enable_expert_bias=True, moe_router_bias_update_rate=0.01)
+        )
