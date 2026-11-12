@@ -10,6 +10,7 @@ import torch
 
 from miles.backends.training_utils.prefix_tree.attention import TreeAttentionLayout, tree_attention
 from miles.backends.training_utils.prefix_tree.plan import PrefixTreePlan
+from miles.backends.training_utils.prefix_tree.recurrent import RecurrentTreeLayout
 from miles.backends.training_utils.prefix_tree.sft import SFTLossLayout
 
 
@@ -55,7 +56,7 @@ def _transformers_tree_attention(
     return output.unsqueeze(0), None
 
 
-def enable_transformers_prefix_tree(model) -> None:
+def enable_transformers_prefix_tree(model, *, recurrent_adapter=None) -> None:
     """Enable full causal attention by capability, without a model-name allowlist.
 
     The model must use Transformers' public attention interface, forward custom
@@ -66,13 +67,19 @@ def enable_transformers_prefix_tree(model) -> None:
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
     config = model.config
-    if not getattr(model, "_supports_attention_backend", False):
+    supports_backend = getattr(model, "_supports_attention_backend", False)
+    if recurrent_adapter is not None and not supports_backend:
+        # Some hybrid providers omit the legacy flag but implement the public
+        # interface. An explicit adapter can use Transformers' own capability check.
+        supports_backend = model._can_set_attn_implementation()
+    if not supports_backend:
         raise ValueError("model must support Transformers' public attention backend interface")
     if getattr(config, "is_encoder_decoder", False) or model.get_output_embeddings() is None:
         raise ValueError("tree SFT requires a decoder-only causal language model")
     if getattr(config, "sliding_window", None) is not None or getattr(config, "use_sliding_window", False):
         raise ValueError("tree SFT currently requires full attention, without a sliding window")
-    if any(kind != "full_attention" for kind in (getattr(config, "layer_types", None) or ())):
+    hybrid = any(kind != "full_attention" for kind in (getattr(config, "layer_types", None) or ()))
+    if hybrid and recurrent_adapter is None:
         raise ValueError("hybrid/recurrent/local layers require their own tree execution adapter")
     if any(isinstance(module, torch.nn.Dropout) and module.p for module in model.modules()) or any(
         getattr(config, field, 0.0)
@@ -94,6 +101,8 @@ def enable_transformers_prefix_tree(model) -> None:
         "rope",
     ):
         raise ValueError("position-dependent attention biases require their own tree execution adapter")
+    if hybrid:
+        recurrent_adapter(model)
     ALL_ATTENTION_FUNCTIONS.register("miles_prefix_tree", _transformers_tree_attention)
     model.set_attn_implementation("miles_prefix_tree")
 
@@ -114,10 +123,20 @@ class TreeSFTBatch:
     position_ids: torch.Tensor
     attention: TreeAttentionLayout
     supervision: SFTLossLayout
+    recurrent: RecurrentTreeLayout | None = None
+    sequence_ids: torch.Tensor | None = None
 
     @classmethod
     def from_plan(
-        cls, plan: PrefixTreePlan, targets, *, device, weights=None, deterministic_reduction=False
+        cls,
+        plan: PrefixTreePlan,
+        targets,
+        *,
+        device,
+        weights=None,
+        deterministic_reduction=False,
+        recurrent_chunk_size=None,
+        convolution_kernel_size=None,
     ) -> "TreeSFTBatch":
         return cls(
             input_ids=torch.tensor([plan.tokens], device=device, dtype=torch.long),
@@ -130,9 +149,42 @@ class TreeSFTBatch:
                 weights=weights,
                 deterministic_reduction=deterministic_reduction,
             ),
+            recurrent=(
+                RecurrentTreeLayout.from_plan(
+                    plan,
+                    device=device,
+                    chunk_size=recurrent_chunk_size,
+                    convolution_kernel_size=convolution_kernel_size,
+                )
+                if recurrent_chunk_size is not None
+                else None
+            ),
+            sequence_ids=(
+                torch.repeat_interleave(
+                    torch.arange(len(plan.segment_parents), device=device, dtype=torch.int32),
+                    torch.tensor(
+                        [b - a for a, b in zip(plan.segment_offsets[:-1], plan.segment_offsets[1:], strict=True)],
+                        device=device,
+                    ),
+                ).unsqueeze(0)
+                if recurrent_chunk_size is not None
+                else None
+            ),
         )
 
-    def loss(self, model, *, varlen_func=None) -> torch.Tensor:
+    def loss(self, model, *, varlen_func=None, shared=True) -> torch.Tensor:
+        if not shared and len(self.attention.plan.tokens) != self.attention.plan.expanded_tokens:
+            raise ValueError("Native packed execution requires a plan without shared rows")
+        recurrent = (
+            {}
+            if self.recurrent is None
+            else dict(
+                prefix_tree_recurrent=self.recurrent,
+                prefix_tree_shared=shared,
+                seq_idx=self.sequence_ids,
+                cu_seq_lens_q=self.attention.cu_q,
+            )
+        )
         output = model(
             input_ids=self.input_ids,
             position_ids=self.position_ids,
@@ -142,5 +194,6 @@ class TreeSFTBatch:
             use_cache=False,
             prefix_tree_layout=self.attention,
             prefix_tree_varlen=varlen_func,
+            **recurrent,
         )
         return self.supervision.loss(output.logits)
