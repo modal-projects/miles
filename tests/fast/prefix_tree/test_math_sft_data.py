@@ -113,3 +113,42 @@ def test_packing_is_global_and_preserves_every_trajectory():
             for batch in batches:
                 assert list(batch.slots) == sorted(batch.slots)
                 assert len(batch.sequences) == 4 * len(batch.prompt_indices)
+
+
+def test_document_prefix_with_distinct_question_prompts_preserves_loss_and_token_budget():
+    source = _rollouts()
+    for sample in source["samples"]:
+        prefix = source["prompts"][sample["prompt_index"]]["prompt_ids"]
+        sample["prompt_ids"] = prefix + [11 + sample["member"]] * 9
+    parts = [math_microbatches(source, dp_rank=r, dp_size=4, max_microbatch_tokens=100) for r in range(4)]
+    assert {len(batches) for batches in parts} == {2}
+    for batches in parts:
+        for batch in batches:
+            assert batch.real_input_tokens == sum(
+                len(s["prompt_ids"]) + len(s["completion_ids"]) - 1
+                for s in source["samples"]
+                if s["prompt_index"] in batch.prompt_indices
+            )
+            for sequence, target, weight in zip(batch.sequences, batch.targets, batch.weights, strict=True):
+                supervised = [label for label, w in zip(target, weight, strict=True) if w]
+                assert supervised
+                assert all(w == 0 for w in weight[: len(sequence) - len(supervised) - batch.padding_tokens])
+            for shared in (True, False):
+                plan = build_prefix_tree(
+                    batch.sequences,
+                    sharing_keys=batch.slots,
+                    computation_keys=batch.computation_keys,
+                    share_prefixes=shared,
+                )
+                assert len(plan.tokens) % 2 == 0
+                for path, sequence in zip(plan.sample_nodes, batch.sequences, strict=True):
+                    assert tuple(plan.tokens[i] for i in path) == sequence
+                loss = SFTLossLayout.from_plan(plan, batch.targets, weights=batch.weights, device="cpu")
+                assert len(loss.rows) == batch.supervised_tokens
+
+
+def test_mismatched_document_and_question_prefix_is_rejected():
+    source = _rollouts()
+    source["samples"][0]["prompt_ids"] = [99]
+    with pytest.raises(ValueError, match="shared prompt"):
+        math_microbatches(source, dp_rank=0, dp_size=1)

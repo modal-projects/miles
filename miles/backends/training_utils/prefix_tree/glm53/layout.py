@@ -28,6 +28,20 @@ class GlmTreeLayout:
     recurrent_levels: tuple[TreeLevel, ...]
     recurrent_restore_rows: torch.Tensor
 
+    def prepare_packed(self, model, packed) -> None:
+        # Bridge/Megatron and replay are optional GPU dependencies.
+        from megatron.core.utils import get_attr_wrapped_model
+
+        from miles.backends.training_utils.prefix_tree.glm53.bridge import glm53_tree_layer_spec
+        from miles.utils.replay_base import all_replay_managers
+
+        config = get_attr_wrapped_model(model, "config", allow_none=False)
+        if getattr(config, "transformer_layer_spec", None) is not glm53_tree_layer_spec:
+            raise ValueError("Build the GLM provider with transformer_layer_spec=glm53_tree_layer_spec")
+        if any(manager.enabled and manager.stage != "fallthrough" for manager in all_replay_managers):
+            raise ValueError("GLM tree SFT does not yet map router/indexer replay occurrence streams")
+        packed.glm_tree_layout = self
+
     @classmethod
     def from_plan(cls, plan: PrefixTreePlan, *, device):
         segments = tuple(

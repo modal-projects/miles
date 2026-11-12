@@ -1,7 +1,8 @@
-"""Full pretrained GLM SFT on recorded DAPO prompts and sampled completions.
+"""Full pretrained GLM SFT on any recorded grouped-prompt dataset.
 
 Run with torchrun on eight GPUs in the pinned GLM trainer image. The input JSON
-comes from real sampling, never padded prompts or invented reference solutions.
+contains real samples or human reference answers, never padded prompts or
+invented reference solutions.
 One ordinary expanded optimizer update precedes three paired fixed-weight
 forward/backward timings, then four compact updates. FP32 master weights,
 optimizer states and microbatch-gradient accumulation match mixed-precision
@@ -182,8 +183,8 @@ def main():
     torch.manual_seed(42)
     model_parallel_cuda_manual_seed(42)
     rollouts = json.loads(args.rollouts.read_text())
-    if "summary" not in rollouts or len(rollouts["samples"]) != 128:
-        raise ValueError("Require all 128 recorded real trajectories before training")
+    if "summary" not in rollouts or len(rollouts["samples"]) != rollouts["summary"]["trajectories"]:
+        raise ValueError("Require the complete recorded dataset before training")
     if rollouts["config_sha256"] != hashlib.sha256(Path(args.model, "config.json").read_bytes()).hexdigest():
         raise ValueError("Sampler and trainer checkpoint configs differ")
     model = make_model(

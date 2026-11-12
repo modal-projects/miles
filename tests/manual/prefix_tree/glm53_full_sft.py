@@ -18,7 +18,6 @@ import torch
 import torch.distributed as dist
 from glm53_sft import _check_replicated_weights, _synchronize_gradients, make_model
 from megatron.core import parallel_state
-from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from transformers import AutoTokenizer
 
@@ -99,16 +98,7 @@ def _prepared(data, *, shared):
 
 
 def _expanded_loss(model, plan, batch):
-    from megatron.bridge.peft.multi_lora_layers import set_tokens_per_adapter_slot
-
-    set_tokens_per_adapter_slot(model, batch.slot_counts)
-    cu = torch.tensor(plan.segment_offsets, device="cuda", dtype=torch.int32)
-    length = max(b - a for a, b in zip(plan.segment_offsets[:-1], plan.segment_offsets[1:], strict=True))
-    packed = PackedSeqParams(
-        cu_seqlens_q=cu, cu_seqlens_kv=cu, qkv_format="thd", max_seqlen_q=length, max_seqlen_kv=length
-    )
-    logits = model(batch.tokens, position_ids=batch.position_ids, attention_mask=None, packed_seq_params=packed)
-    return batch.losses.vocab_parallel_loss(logits)
+    return batch.loss(model, shared=False)
 
 
 def _maximum(value):
