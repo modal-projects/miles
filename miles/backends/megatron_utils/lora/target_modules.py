@@ -45,6 +45,17 @@ def _select_checkpoint_parameters(checkpoint_parameters, targets, *, hf_mapping,
 def _resolve_adapter_targets(megatron_module, checkpoint_parameters, selected, *, canonical):
     if (
         canonical
+        and megatron_module.endswith(".self_attention.linear_qkv")
+        and {name.rsplit(".", 2)[-2] for name in checkpoint_parameters} == {"q_proj", "k_proj", "v_proj", "gate_proj"}
+    ):
+        # Even a Q-only canonical selection wraps the whole fused linear. Bridge's
+        # split wrapper emits Q/K/V rows, omitting Beam's attention gate rows.
+        raise ValueError(
+            "Beam fused QKVG attention does not support canonical_lora: the Bridge wrapper emits only Q/K/V rows. "
+            "Use --lora-type lora with all fused attention targets, or select independent projections such as o_proj."
+        )
+    if (
+        canonical
         and len(checkpoint_parameters) > 1
         and ".experts." not in megatron_module
         and megatron_module.rsplit(".", 1)[-1] in ("linear_qkv", "linear_fc1")

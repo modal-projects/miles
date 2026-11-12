@@ -20,6 +20,15 @@ def test_attention_only_targets_do_not():
     assert not targets_expert_leaves(["q_proj", "k_proj", "v_proj", "o_proj"])
 
 
+def test_attention_output_gate_is_not_an_expert_leaf():
+    # Beam's attention output gate shares the MLP leaf name gate_proj.
+    beam_attention = [
+        f"model.layers.*.self_attn.{name}" for name in ("q_proj", "k_proj", "v_proj", "gate_proj", "o_proj")
+    ]
+    assert not targets_expert_leaves(beam_attention)
+    assert targets_expert_leaves([*beam_attention, "model.layers.*.mlp.experts.*.gate_proj"])
+
+
 def test_bulk_aliases_target_experts():
     # "all" is only resolved by the later target-module conversion, so the alias itself counts.
     for alias in ("all", "all-linear", "all_linear", "ALL"):

@@ -116,5 +116,8 @@ def targets_expert_leaves(target_modules: Any) -> bool:
     entries = [str(tm).strip().lower() for tm in (target_modules or [])]
     if any(entry in _ALL_MODULE_ALIASES for entry in entries):
         return True
-    # Map each entry (possibly a dotted or wildcard path) to its leaf module name.
-    return any(entry.split(".")[-1] in _EXPERT_LEAF_NAMES for entry in entries)
+    # Map each entry (possibly a dotted or wildcard path) to its leaf module name. Beam's
+    # attention output gate (self_attn.gate_proj) shares an MLP leaf name but is no expert.
+    return any(
+        entry.split(".")[-1] in _EXPERT_LEAF_NAMES and entry.split(".")[-2:-1] != ["self_attn"] for entry in entries
+    )

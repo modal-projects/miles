@@ -100,6 +100,7 @@ def _small_config(model_type, overrides):
 def test_native_model_coverage():
     # These entries use custom code, a Miles alias, or a version newer than the pinned Transformers.
     non_native = {
+        "beam",
         "deepseek_v32",
         "deepseek_v41",
         "kimi_k2",

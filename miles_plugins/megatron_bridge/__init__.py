@@ -100,3 +100,8 @@ try:
     _register_glm53_dependency()
 except Exception as _e:  # pragma: no cover - defensive; optional provider
     logger.warning("miles GLM-5.3 dependency failed to load: %s", _e)
+
+try:
+    from miles_plugins.megatron_bridge import beam as beam  # noqa: F401
+except ImportError as _e:
+    logger.warning("miles beam plugin failed to load: %s", _e)
