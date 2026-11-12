@@ -50,6 +50,7 @@ def make_model(
     reduced_layers=3,
     reduced_topk=2,
     reduced_index_topk=64,
+    full_width_expert_parallel_size=8,
 ):
     bridge = AutoBridge.from_hf_pretrained(checkpoint, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
@@ -135,7 +136,7 @@ def make_model(
             "dsa_indexer_topk",
         ):
             changes.pop(name)
-        changes["expert_model_parallel_size"] = 8
+        changes["expert_model_parallel_size"] = full_width_expert_parallel_size
     if pretrained:
         if not full_width:
             raise ValueError("Pretrained validation requires --full-width")
@@ -303,9 +304,11 @@ def evaluate(model, sequences, *, shared, lora=False, targets=None):
         for name, module in model.named_modules():
             if name.endswith(("self_attention", ".mlp", ".router")) or name == "embedding":
                 handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
-            if os.environ.get("GLM_TREE_TRACE_LINEARS") == "1" and any(
-                name.startswith(f"decoder.layers.{i}.self_attention.linear_") for i in range(4)
-            ) and (name.rsplit(".", 1)[-1].startswith("linear_") or name.endswith(".to_wrap")):
+            if (
+                os.environ.get("GLM_TREE_TRACE_LINEARS") == "1"
+                and any(name.startswith(f"decoder.layers.{i}.self_attention.linear_") for i in range(4))
+                and (name.rsplit(".", 1)[-1].startswith("linear_") or name.endswith(".to_wrap"))
+            ):
                 handles.append(module.register_forward_hook(capture(name), with_kwargs=True))
             if os.environ.get("GLM_TREE_TRACE_OPERATORS") == "1" and name.endswith(
                 ("input_layernorm", "pre_mlp_layernorm", "q_layernorm", "kv_layernorm")

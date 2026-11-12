@@ -19,18 +19,11 @@ import torch.distributed as dist
 from glm53_dapo_sft import _phase, _RowMath, _sum_dp
 from glm53_full_sft import _emit, _expanded_loss, _gradient_error, _maximum, _prepared
 from glm53_sft import make_model
+from glm53_trace_values import first_tensor as _first_tensor
 from math_sft_data import _make_batch, math_microbatches
 from math_sft_optimizer import MasterOptimizer
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-
-
-def _first_tensor(value):
-    if isinstance(value, torch.Tensor):
-        return value
-    if isinstance(value, (tuple, list)):
-        return next((item for item in value if isinstance(item, torch.Tensor)), None)
-    return None
 
 
 def _compare(actual, reference, positions, samples, shared):
@@ -137,6 +130,14 @@ class ForwardTrace:
             if inputs and name.endswith(".o_norm"):
                 for index, value in enumerate(args[1:], 1):
                     self.capture(name + f".input{index}", value)
+            # AdapterWrapper supports ((projection, normalized_input), bias)
+            # as well as (projection, bias, normalized_input). Inspect the norm
+            # before its consumer projection rather than silently skipping it.
+            if name.endswith(".to_wrap") and isinstance(output, tuple):
+                if len(output) == 2 and isinstance(output[0], tuple) and len(output[0]) == 2:
+                    self.capture(name + ".normalized_output", output[0][1])
+                elif len(output) == 3:
+                    self.capture(name + ".normalized_output", output[2])
             self.capture(name + ".output", _first_tensor(output), fingerprint=fingerprint)
             if name.endswith("hyper_connection") and isinstance(output, tuple):
                 for index, value in enumerate(output[1:], 1):
@@ -166,8 +167,8 @@ class ForwardTrace:
                 )
             elif name.startswith("decoder.layers.") and name.count(".") == 2 and leaf.isdigit():
                 handles.append(module.register_forward_hook(self.module_hook(name), with_kwargs=True))
-            elif (name.rsplit(".", 1)[0].endswith(".self_attention") and leaf.startswith("linear_")) or (
-                name.endswith(".to_wrap") and ".self_attention.linear_" in name
+            elif (name.rsplit(".", 1)[0].endswith((".self_attention", ".mlp")) and leaf.startswith("linear_")) or (
+                name.endswith(".to_wrap") and any(part in name for part in (".self_attention.linear_", ".mlp.linear_"))
             ):
                 handles.append(module.register_forward_hook(self.module_hook(name, inputs=True), with_kwargs=True))
             elif leaf.endswith(("layernorm", "hyper_connection", "o_norm")):
@@ -224,10 +225,17 @@ def _data(rollouts, index, completion_cap):
     return _make_batch(prompts, groups, [(i, slots[i]) for i in data.prompt_indices], sp_multiple=2, pad_id=0)
 
 
-def _load_adapters(model, directory):
-    state = torch.load(directory / f"state-rank-{dist.get_rank()}.pt", map_location="cpu", weights_only=True)
+def _load_adapters(model, directory, *, allow_deeper_layers=False):
+    state = torch.load(
+        directory / f"state-rank-{dist.get_rank()}.pt", map_location="cpu", weights_only=True, mmap=True
+    )
     trainable = {name: p for name, p in model.named_parameters() if p.requires_grad}
-    if trainable.keys() != state["parameters"].keys():
+    saved = state["parameters"]
+    extras = saved.keys() - trainable.keys()
+    permitted = allow_deeper_layers and all(
+        name.startswith("decoder.layers.") and int(name.split(".")[2]) >= len(model.decoder.layers) for name in extras
+    )
+    if not trainable.keys() <= saved.keys() or (extras and not permitted):
         raise ValueError("Saved adapter inventory differs from the trace model")
     with torch.no_grad():
         for name, parameter in trainable.items():
