@@ -71,3 +71,16 @@ class SFTLossLayout:
         losses = F.cross_entropy(selected, self.targets, reduction="none")
         weights = self.weights.to(losses.dtype)
         return (losses * weights).sum() / weights.sum()
+
+    def vocab_parallel_loss(self, logits: torch.Tensor, *, tp_group=None) -> torch.Tensor:
+        """Original-occurrence weighted CE without gathering vocabulary shards."""
+        # Megatron is optional for CPU planning and the ordinary SFT oracle.
+        from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
+
+        flat = logits.reshape(-1, logits.shape[-1])
+        selected = self.reduction.gather(flat) if self.reduction else flat.index_select(0, self.rows)
+        losses = vocab_parallel_cross_entropy(
+            selected.unsqueeze(1), self.targets.unsqueeze(1), tp_group=tp_group
+        ).squeeze(1)
+        weights = self.weights.to(losses.dtype)
+        return (losses * weights).sum() / weights.sum()

@@ -37,7 +37,17 @@ from miles.backends.training_utils.prefix_tree.plan import build_prefix_tree
 from miles.backends.training_utils.prefix_tree.sft import SFTLossLayout
 
 
-def make_model(checkpoint, *, lora=False, full_width=False, precise_moe=False, pretrained=False):
+def make_model(
+    checkpoint,
+    *,
+    lora=False,
+    full_width=False,
+    precise_moe=False,
+    pretrained=False,
+    pretrained_layers=5,
+    sequence_length=1024,
+    recompute=False,
+):
     bridge = AutoBridge.from_hf_pretrained(checkpoint, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
     changes = dict(
@@ -71,7 +81,7 @@ def make_model(checkpoint, *, lora=False, full_width=False, precise_moe=False, p
         params_dtype=torch.bfloat16,
         bf16=True,
         vocab_size=512,
-        seq_length=1024,
+        seq_length=sequence_length,
         attention_dropout=0.0,
         hidden_dropout=0.0,
         gradient_accumulation_fusion=False,
@@ -89,6 +99,8 @@ def make_model(checkpoint, *, lora=False, full_width=False, precise_moe=False, p
         parallel_output=True,
         transformer_layer_spec=glm53_tree_layer_spec,
     )
+    if recompute:
+        changes.update(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1)
     if full_width:
         # Preserve real GLM attention/MLP/MoE widths and expert count. The slice
         # remains three layers with a small vocabulary, initialized randomly.
@@ -119,9 +131,11 @@ def make_model(checkpoint, *, lora=False, full_width=False, precise_moe=False, p
         if not full_width:
             raise ValueError("Pretrained validation requires --full-width")
         changes.pop("vocab_size")
-        changes["num_layers"] = 5
-        changes["kda_layers"] = tuple(i for i in provider.kda_layers if i < 5)
-        changes["moe_layer_freq"] = provider.moe_layer_freq[:5]
+        if not 1 <= pretrained_layers <= provider.num_layers:
+            raise ValueError("Requested pretrained depth is outside the checkpoint")
+        changes["num_layers"] = pretrained_layers
+        changes["kda_layers"] = tuple(i for i in provider.kda_layers if i < pretrained_layers)
+        changes["moe_layer_freq"] = provider.moe_layer_freq[:pretrained_layers]
         changes["perform_initialization"] = False
     if precise_moe:
         for field in ("moe_router_use_torch_mm", "moe_activation_in_fp32", "moe_combine_in_fp32"):

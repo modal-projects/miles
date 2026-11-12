@@ -41,9 +41,19 @@ class GlmTreeSFTBatch:
         )
 
     def loss(self, model):
-        return self.losses.loss(self.logits(model))
+        # Keep the large vocabulary sharded during training; .logits remains
+        # the gathered-output interface for numerical diagnostics.
+        from megatron.core.utils import get_attr_wrapped_model
+
+        logits = self._forward_logits(model, gather_vocab=False)
+        if get_attr_wrapped_model(model, "parallel_output", allow_none=False):
+            return self.losses.vocab_parallel_loss(logits)
+        return self.losses.loss(logits)
 
     def logits(self, model):
+        return self._forward_logits(model, gather_vocab=True)
+
+    def _forward_logits(self, model, *, gather_vocab):
         # Optional Megatron dependency; CPU planning does not import its GPU stack.
         from megatron.core.packed_seq_params import PackedSeqParams
         from megatron.core.utils import get_attr_wrapped_model
@@ -75,7 +85,7 @@ class GlmTreeSFTBatch:
 
             set_tokens_per_adapter_slot(model, self.slot_counts)
         logits = model(self.tokens, position_ids=self.position_ids, attention_mask=None, packed_seq_params=packed)
-        if get_attr_wrapped_model(model, "parallel_output", allow_none=False):
+        if gather_vocab and get_attr_wrapped_model(model, "parallel_output", allow_none=False):
             # Gather after the complete output-layer wrapper. Asking the base
             # linear to gather early leaves a native multi-LoRA delta sharded.
             from megatron.core.tensor_parallel.mappings import gather_from_tensor_model_parallel_region
