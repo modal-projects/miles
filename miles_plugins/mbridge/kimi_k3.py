@@ -1,3 +1,6 @@
+import contextlib
+import os
+
 import torch
 from megatron.core.transformer import MLATransformerConfig
 from megatron.core.transformer.enums import AttnBackend
@@ -5,6 +8,7 @@ from megatron.core.transformer.enums import AttnBackend
 from mbridge.core import register_model
 from mbridge.core.safetensor_io import SafeTensorIO
 from mbridge.models import DeepseekV3Bridge
+from safetensors import safe_open
 from miles.utils.mxfp4 import MXFP4_GROUP_SIZE, pack_mxfp4_rows
 from miles_plugins.mbridge.linear_attn import LinearAttentionBridgeMixin
 from miles_plugins.models.kimi_k3.model import build_kimi_k3_spec
@@ -219,8 +223,18 @@ class KimiK3Bridge(LinearAttentionBridgeMixin, DeepseekV3Bridge):
         self.has_vp_stage = True
         return build_kimi_k3_spec(self.config, vp_stage=vp_stage)
 
+    def load_weights(self, models, weights_path, memory_efficient=False):
+        # mbridge rebuilds the model's state_dict for every parameter it loads, which is quadratic in K3's
+        # tens of thousands of expert weights per rank
+        try:
+            with _state_dicts_cached(models):
+                super().load_weights(models, weights_path, memory_efficient=memory_efficient)
+        finally:
+            if self.safetensor_io is not None:
+                self.safetensor_io.close()
+
     def _get_safetensor_io(self, weights_path: str):
-        safetensor_io = SafeTensorIO(self._get_actual_hf_path(weights_path))
+        safetensor_io = _OpenShardsSafeTensorIO(self._get_actual_hf_path(weights_path))
         self._experts_packed = any(name.endswith(".weight_packed") for name in safetensor_io.index)
         return safetensor_io
 
@@ -270,3 +284,39 @@ class KimiK3Bridge(LinearAttentionBridgeMixin, DeepseekV3Bridge):
                 torch.cat(hf_weights[:half], dim=0), torch.cat(hf_weights[half:], dim=0), MXFP4_GROUP_SIZE
             )
         return super()._weight_to_mcore_format(mcore_weights_name, hf_weights)
+
+
+@contextlib.contextmanager
+def _state_dicts_cached(models):
+    patched = []
+    try:
+        for model in models:
+            state = model.state_dict()
+            model.state_dict = lambda *args, _state=state, **kwargs: _state
+            patched.append(model)
+        yield
+    finally:
+        for model in patched:
+            del model.state_dict
+
+
+class _OpenShardsSafeTensorIO(SafeTensorIO):
+    """mbridge reopens a shard, header included, for every tensor it reads; a K3 shard holds thousands of expert
+    tensors, so keep each shard open for the load."""
+
+    def __init__(self, hf_dir):
+        super().__init__(hf_dir)
+        self._shards = {}
+
+    def load_some_hf_weight(self, hf_weight_names):
+        if not self.index:
+            return super().load_some_hf_weight(hf_weight_names)
+        return {name: self._shard(self.index[name]).get_tensor(name) for name in hf_weight_names}
+
+    def _shard(self, filename):
+        if filename not in self._shards:
+            self._shards[filename] = safe_open(os.path.join(self.hf_dir, filename), framework="pt", device="cpu")
+        return self._shards[filename]
+
+    def close(self):
+        self._shards.clear()
