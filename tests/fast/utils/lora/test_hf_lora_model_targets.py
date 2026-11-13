@@ -123,6 +123,7 @@ def test_native_model_coverage():
         "kimi_k2",
         "kimi_k25",
         "kimi_k3",
+        "muse_spark",
         "mimo",
         "mimo_v2",
         "joyai_llm_flash",
