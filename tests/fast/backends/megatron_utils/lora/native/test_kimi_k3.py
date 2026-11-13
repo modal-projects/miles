@@ -117,9 +117,8 @@ def _single_rank_comms(monkeypatch):
     monkeypatch.setattr(parallel_state, "get_expert_model_parallel_world_size", lambda: 2)
 
 
-def _model(*, include_fc2=True, routed_experts=True, sequence_parallel=False, num_slots=None):
+def _model(*, leaves=("w1", "w3", "w2"), sequence_parallel=False, num_slots=None):
     """Layer 3: MLA attention + dense MLP. Layer 4: KDA attention + routed and shared experts."""
-    leaves = (("w1", "w3", "w2") if include_fc2 else ("w1", "w3")) if routed_experts else ()
     targets = [f"{PREFIX}*.block_sparse_moe.experts.*.{leaf}" for leaf in leaves]
     targets += [f"{PREFIX}*.{block}.{leaf}" for block, leaf in _NON_EXPERT_TARGETS]
     context = _context(tuple(targets), sequence_parallel=sequence_parallel, num_slots=num_slots)
@@ -167,7 +166,7 @@ def test_export_names_and_shapes_match_sglang(include_fc2):
     targets = resolve_hf_lora_targets(_k3_hf_config())
     if not include_fc2:
         targets = [target for target in targets if not target.endswith(".experts.*.w2")]
-    exported = dict(export_lora_hf_named(iter_adapters([_model(include_fc2=include_fc2)])))
+    exported = dict(export_lora_hf_named(iter_adapters([_model(leaves=("w1", "w3", "w2") if include_fc2 else ("w1", "w3"))])))
 
     served = _resolve(targets)
     for module in get_adapter_target_modules(exported):
@@ -360,6 +359,12 @@ def test_the_routed_experts_are_optional():
     assert f"{PREFIX}*.block_sparse_moe.shared_experts.gate_proj" in served
 
 
+@pytest.mark.parametrize("leaf", ["w1", "w3"])
+def test_routed_expert_gate_and_up_are_adapted_together(leaf):
+    with pytest.raises(AssertionError, match="w1 and w3 together"):
+        _model(leaves=(leaf,))
+
+
 def test_grouped_linear_uses_expert_token_boundaries():
     """Wrong boundaries apply expert i's adapter to expert j's tokens without any error."""
     inputs = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
@@ -429,4 +434,4 @@ def test_slots_wrap_every_dense_host_and_leave_the_grouped_experts_outside():
     assert {"mla", "dense", "moe.shared_experts"} <= blocks, blocks
     with pytest.raises(AssertionError, match="sit outside the slots"):
         assert_every_adapter_slotted([model])
-    assert_every_adapter_slotted([_model(routed_experts=False, num_slots=3)])
+    assert_every_adapter_slotted([_model(leaves=(), num_slots=3)])

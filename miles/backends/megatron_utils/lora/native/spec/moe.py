@@ -45,7 +45,9 @@ class GroupedExpertsSpec:
         reference = torch.empty((), dtype=fc1.params_dtype, device=fc1.weight0.device)
         fc1_prefix = context.naming.block_prefix(layer, fc1.weight0, ["w1", "w3"])
         # selectors address one expert ("experts.*.w1"); shared-outer adapters cover them all
-        if context.lora.selects(f"{fc1_prefix}0.w1") or context.lora.selects(f"{fc1_prefix}0.w3"):
+        selects_w1, selects_w3 = (context.lora.selects(f"{fc1_prefix}0.{leaf}") for leaf in ("w1", "w3"))
+        assert selects_w1 == selects_w3, f"{fc1_prefix}*: the routed-expert gate/up adapter trains w1 and w3 together"
+        if selects_w1:
             experts.lora_fc1_adapter = LoRAGroupedFC1(
                 hf_prefix=fc1_prefix, reference=reference, width=fc1.in_features, **common
             )

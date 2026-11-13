@@ -5,7 +5,8 @@ from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-from miles.utils.lora.utils import is_lora_enabled
+from miles.backends.megatron_utils.megatron_config import has_hf_checkpoint
+from miles.utils.lora.utils import exports_hf_snapshots, is_lora_enabled
 
 from .layers import KimiK3Attention, KimiK3KDAAttention, KimiK3TransformerLayer
 from .mxfp4_experts import (
@@ -74,12 +75,18 @@ def build_kimi_k3_spec(config, vp_stage=None, *, mxfp4_experts: bool = False):
 
 
 def frozen_experts_are_mxfp4(args) -> bool:
-    """The trainer keeps the routed experts as the checkpoint's MXFP4 bytes when it loads a compressed-tensors
+    """The trainer keeps the routed experts as the checkpoint's MXFP4 bytes when its base is a compressed-tensors
     MXFP4 checkpoint. Only a LoRA run can: the frozen experts have no BF16 master to update."""
-    mxfp4 = hf_checkpoint_has_mxfp4_experts(args.backend.load)
+    # the bridge loads --load when it is an HF checkpoint; a resume or a peer recovery points it elsewhere, and
+    # --ref-load still names the base
+    base = args.backend.load if has_hf_checkpoint(args.backend.load) else args.ref_load
+    mxfp4 = hf_checkpoint_has_mxfp4_experts(base)
     assert not mxfp4 or is_lora_enabled(args), (
-        f"{args.backend.load} keeps its routed experts as MXFP4, which only a LoRA run (frozen experts) trains from; "
+        f"{base} keeps its routed experts as MXFP4, which only a LoRA run (frozen experts) trains from; "
         "convert it with tools/convert_mxfp4_to_bf16.py for full-parameter training"
+    )
+    assert not mxfp4 or not exports_hf_snapshots(args), (
+        "MXFP4 routed experts cannot be written as HF weights; drop --save-hf / eval snapshots and export the adapter"
     )
     return mxfp4
 
