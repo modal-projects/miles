@@ -1,5 +1,6 @@
 """Adapter HF names come from the converter that names the base weights — no GPU."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -156,3 +157,43 @@ def test_qwen3_5_gdn_hosts_name_the_linear_attn_block(tmp_path):
     assert naming.block_prefix(layer, qkv, ["in_proj_qkv"]) == "model.language_model.layers.1.linear_attn."
     out_proj = _weight(layer, "self_attention__linear_attn__out_proj__weight")
     assert naming.block_prefix(layer, out_proj, ["out_proj"]) == "model.language_model.layers.1.linear_attn."
+
+
+def test_muse_spark_declares_the_names_its_converter_gives(tmp_path):
+    """The checkpoint stacks experts the converter names one at a time, so the spec declares the converter's names."""
+    pytest.importorskip("sglang.srt.configs.muse_spark")
+    from tests.fast.backends.megatron_utils.test_muse_spark_checkpoint import checkpoint_config
+
+    from miles.backends.megatron_utils.megatron_to_hf.muse_spark import _checkpoint_layout
+
+    config = checkpoint_config()
+    config["text_config"]["mlp_layer_types"] = ["dense", "sparse", "sparse", "sparse"]
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    _checkpoint_layout.cache_clear()
+    # hidden 16, 4 query heads, 2 KV groups, head_dim 4; experts: latent 8, intermediate 12; dense: intermediate 32
+    dense = _layer(1, mlp__linear_fc1__weight=((64, 16), 0, False), mlp__linear_fc2__weight=((16, 32), 1, False))
+    moe = _layer(
+        2,
+        self_attention__linear_qkv__weight=((48, 16), 0, False),
+        self_attention__linear_proj__weight=((16, 16), 1, False),
+        mlp__experts__linear_fc1__weight0=((24, 8), None, True),
+        mlp__experts__linear_fc2__weight0=((8, 12), None, True),
+    )
+    for layer in (dense, moe):
+        for weight in layer.parameters():
+            weight.data = weight.data.to(torch.bfloat16)
+    converter = ConverterNaming(
+        SimpleNamespace(hf_checkpoint=str(tmp_path)), "musesparkconfig", tp_size=1, is_hf_name=_ANY
+    )
+    declared = MODEL_SPECS["muse_spark"].declared_naming
+
+    for layer, path, leaves in [
+        (dense, "mlp__linear_fc1__weight", ["gate_proj", "up_proj"]),
+        (dense, "mlp__linear_fc2__weight", ["down_proj"]),
+        (moe, "self_attention__linear_qkv__weight", ["q_proj", "gate_proj", "k_proj", "v_proj"]),
+        (moe, "self_attention__linear_proj__weight", ["o_proj"]),
+        (moe, "mlp__experts__linear_fc1__weight0", ["gate_proj", "up_proj"]),
+        (moe, "mlp__experts__linear_fc2__weight0", ["down_proj"]),
+    ]:
+        weight = _weight(layer, path)
+        assert declared.block_prefix(layer, weight, leaves) == converter.block_prefix(layer, weight, leaves), path

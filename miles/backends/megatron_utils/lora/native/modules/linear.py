@@ -473,6 +473,42 @@ class LoRASplitQKV(LoRASplitAdapter):
         return delta.index_select(-1, self.out_perm)
 
 
+class LoRASplitQGKV(LoRASplitAdapter):
+    """Independent Q/gate/K/V adapters of a fused QKV whose output gate is its own HF projection.
+
+    The B rows follow the HF checkpoint, which keeps each q/k head's two rotary halves
+    consecutive (Muse Spark); the packed delta lands in MCore's interleaved rotary pairs.
+    """
+
+    def __init__(
+        self,
+        *,
+        hf_prefix: str,
+        reference: torch.Tensor,
+        context: AttachContext,
+        projections: Sequence[ProjectionSpec],
+        num_q: int,
+        num_kv: int,
+        head_dim: int,
+    ):
+        q_rows, kv_rows = num_q * head_dim, num_kv * head_dim
+        super().__init__(
+            hf_prefix=hf_prefix,
+            reference=reference,
+            context=context,
+            projections=projections,
+            rows_by_param_prefix={"q": q_rows, "g": q_rows, "k": kv_rows, "v": kv_rows},
+        )
+        self.register_buffer(
+            "out_perm",
+            build_qgkv_rotary_pair_permutation(num_q, num_kv, head_dim, reference.device),
+            persistent=False,
+        )
+
+    def _pack(self, delta: torch.Tensor) -> torch.Tensor:
+        return delta.index_select(-1, self.out_perm)
+
+
 class LoRASplitFC1(LoRASplitAdapter):
     """Independent gate/up adapters whose delta is packed into one fused FC1 output."""
 
@@ -699,6 +735,26 @@ def build_qkv_permutation(
                 start = ((group * q_per_group + head) * q_slices + slice_index) * head_dim
                 index.extend(range(start, start + head_dim))
         index.extend(range(k_base + group * head_dim, k_base + (group + 1) * head_dim))
+        index.extend(range(v_base + group * head_dim, v_base + (group + 1) * head_dim))
+    return torch.tensor(index, dtype=torch.long, device=device)
+
+
+def build_qgkv_rotary_pair_permutation(num_q_heads: int, num_groups: int, head_dim: int, device) -> torch.Tensor:
+    """Map plain ``[q; g; k; v]`` rows, with each q/k head's rotary halves consecutive, into MCore's
+    per-query-group ``[q; g; k; v]`` layout with each q/k head's rotary pairs interleaved."""
+    q_per_group = num_q_heads // num_groups
+    half = head_dim // 2
+    # kernel row 2 * i + p of a head is checkpoint row p * half + i
+    rotary = [pair * half + i for i in range(half) for pair in range(2)]
+    g_base = num_q_heads * head_dim
+    k_base = 2 * g_base
+    v_base = k_base + num_groups * head_dim
+    index: list[int] = []
+    for group in range(num_groups):
+        heads = range(group * q_per_group, (group + 1) * q_per_group)
+        index.extend(head * head_dim + row for head in heads for row in rotary)
+        index.extend(g_base + head * head_dim + row for head in heads for row in range(head_dim))
+        index.extend(k_base + group * head_dim + row for row in rotary)
         index.extend(range(v_base + group * head_dim, v_base + (group + 1) * head_dim))
     return torch.tensor(index, dtype=torch.long, device=device)
 

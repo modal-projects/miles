@@ -17,6 +17,7 @@ from miles.backends.megatron_utils.lora.native.spec.attention import (
     InklingAttentionSpec,
     KimiK3AttentionSpec,
     MLAAttentionSpec,
+    MuseSparkAttentionSpec,
 )
 from miles.backends.megatron_utils.lora.native.spec.base import FixedTargets, LoRAArchSpec
 from miles.backends.megatron_utils.lora.native.spec.gdn import Qwen35GDNSpec
@@ -123,6 +124,23 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
     )
 
 
+def _muse_spark_arch_spec() -> LoRAArchSpec:
+    attention = MuseSparkAttentionSpec()
+    return LoRAArchSpec(
+        name=attention.name,
+        attention=attention,
+        mlp=SplitGateUpMLPSpec(),
+        experts=GroupedExpertsSpec(
+            gate_up_leaves=("gate_proj", "up_proj"), down_leaf="down_proj", hf_block=r"mlp\.experts\.(?:\d+|\*)"
+        ),
+        # the converter names experts one at a time, which the checkpoint stacks, so they are outside its namespace
+        declared_naming=DeclaredNaming(
+            "model.language_model.layers.",
+            {"self_attention.": "self_attn.", "mlp.experts.": "mlp.experts.", "mlp.": "mlp."},
+        ),
+    )
+
+
 def _shared_outer_serving_targets(targets: list[str]) -> list[str]:
     """Shared-outer export stores the expert dimension in each tensor, not in its name."""
     return [target.replace(".experts.*.", ".experts.") for target in targets]
@@ -179,6 +197,7 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
         "kimi_k25": mla,
         "joyai_llm_flash": mla,
         "kimi_k3": _kimi_k3_arch_spec(),
+        "muse_spark": _muse_spark_arch_spec(),
         "inkling_text": inkling,
         "inkling_model": inkling,
         "inkling_mm_model": inkling,
