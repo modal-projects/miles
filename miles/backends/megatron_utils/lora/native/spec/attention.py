@@ -1,4 +1,4 @@
-"""Native-LoRA attention specs for fused GQA, gated GQA, MLA, GLM-5.3-Flash, and Inkling."""
+"""Native-LoRA attention specs for fused GQA, gated GQA, Muse Spark, MLA, GLM-5.3-Flash, and Inkling."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from miles.backends.megatron_utils.lora.native.modules.linear import (
     LoRAGroupedColumnLinear,
     LoRAReplicatedPlainLinear,
     LoRASplitAdapter,
+    LoRASplitQGKV,
     LoRASplitQKV,
     LoRAUnreducedRowLinear,
     attach_adapter_forward,
@@ -37,6 +38,23 @@ def _build_split_qkv(
     active: tuple[ProjectionSpec, ...],
 ) -> LoRASplitQKV:
     return LoRASplitQKV(
+        hf_prefix=hf_prefix,
+        reference=attention.linear_qkv.weight,
+        context=context,
+        projections=active,
+        num_q=attention.num_attention_heads_per_partition,
+        num_kv=attention.num_query_groups_per_partition,
+        head_dim=attention.hidden_size_per_attention_head,
+    )
+
+
+def _build_split_qgkv(
+    attention: nn.Module,
+    hf_prefix: str,
+    context: AttachContext,
+    active: tuple[ProjectionSpec, ...],
+) -> LoRASplitQGKV:
+    return LoRASplitQGKV(
         hf_prefix=hf_prefix,
         reference=attention.linear_qkv.weight,
         context=context,
@@ -96,6 +114,35 @@ class GQAAttentionSpec(AttentionSpecBase):
             "single query group across ranks and the local qkv rows are not a per-group slice. "
             "Use --megatron-to-hf-mode bridge."
         )
+
+
+class MuseSparkAttentionSpec(GQAAttentionSpec):
+    """Muse Spark's fused gated QKV: the output gate is its own HF ``gate_proj`` and the checkpoint
+    keeps each q/k head's rotary halves consecutive."""
+
+    name = "muse_spark"
+    layout = ModuleLayout(
+        name="muse_spark",
+        present_when_attr="linear_qkv",
+        fused=(
+            FusedAttach(
+                module_attr="linear_qkv",
+                projections=(
+                    ProjectionSpec("q_proj", "q", ShardLayout.COLUMN),
+                    ProjectionSpec("gate_proj", "g", ShardLayout.COLUMN),
+                    ProjectionSpec("k_proj", "k", ShardLayout.COLUMN),
+                    ProjectionSpec("v_proj", "v", ShardLayout.COLUMN),
+                ),
+                adapter_attr="lora_qkv_adapter",
+                build=_build_split_qgkv,
+            ),
+        ),
+        singles=GQAAttentionSpec.layout.singles,
+    )
+
+    def validate(self, config, *, tp_size: int) -> None:
+        assert config.attention_output_gate, "the muse_spark native LoRA spec adapts gated attention only"
+        super().validate(config, tp_size=tp_size)
 
 
 class MLAAttentionSpec(AttentionSpecBase):

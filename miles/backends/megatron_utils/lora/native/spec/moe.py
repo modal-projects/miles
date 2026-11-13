@@ -132,5 +132,14 @@ class DeepSeekV4GroupedExpertsSpec(GroupedExpertsSpec):
     hf_block_pattern = r"ffn\.experts\.(?:\d+|\*)"
 
 
+class MuseSparkGroupedExpertsSpec(GroupedExpertsSpec):
+    """Muse Spark's routed experts, one HF module per expert: ``mlp.experts.<n>.gate_proj``/``up_proj`` and
+    ``down_proj``."""
+
+    gate_up_hf_leaves = ("gate_proj", "up_proj")
+    down_hf_leaf = "down_proj"
+    hf_block_pattern = r"mlp\.experts\.(?:\d+|\*)"
+
+
 def _sub_expert_delta(delta, index: int, x: torch.Tensor, host: nn.Module, *_host_args) -> torch.Tensor:
     return delta(x, host, index)
