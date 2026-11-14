@@ -150,10 +150,10 @@ at::Tensor grouped_mm_cuda(const at::Tensor& mat_a_in, const at::Tensor& mat_b_i
   const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32);
   if (mat_a.dim() == 2 && mat_b.dim() == 2 && (sm80_kernel || dtype == at::kFloat)) {
     // The sm80 mainloop runs the partial K tile first, so zero rows appended to a group would shift every tile and
-    // change its sums; padding each group to whole K tiles (32 rows covers every config) keeps the order fixed. The
+    // change its sums; padding each group to whole K tiles (64 rows covers every config) keeps the order fixed. The
     // TMA tf32 kernels instead need each group to start on 16 bytes along a contiguous K.
     if (sm80_kernel) {
-      std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 32, /*k_major=*/false);
+      std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 64, /*k_major=*/false);
     } else {
       std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 16 / mat_a.element_size(), /*k_major=*/true);
     }

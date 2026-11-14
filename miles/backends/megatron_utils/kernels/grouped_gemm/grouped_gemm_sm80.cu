@@ -190,6 +190,47 @@ void sm80_dispatch(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::T
   }
 }
 
+template <int M, int N, int K, int WarpM, int WarpN, int Stages_>
+struct Config {
+  using Tile = GemmShape<M, N, K>;
+  using Warp = GemmShape<WarpM, WarpN, K>;
+  static constexpr int Stages = Stages_;
+};
+
+template <typename ElementIn, typename MathOp, typename Instruction, typename Small, typename Large>
+void sm80_select(
+    bool small,
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    at::Tensor& out) {
+  if (small) {
+    sm80_dispatch<ElementIn, MathOp, typename Small::Tile, typename Small::Warp, Instruction, Small::Stages>(
+        mat_a, mat_b, offs, out);
+  } else {
+    sm80_dispatch<ElementIn, MathOp, typename Large::Tile, typename Large::Warp, Instruction, Large::Stages>(
+        mat_a, mat_b, offs, out);
+  }
+}
+
+template <typename ElementIn>
+void sm80_select_16bit(
+    int major,
+    bool small,
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    at::Tensor& out) {
+  using Add = cutlass::arch::OpMultiplyAdd;
+  using Instr = GemmShape<16, 8, 16>;
+  using Small = Config<64, 64, 64, 32, 32, 5>;
+  if (major == 12) {
+    sm80_select<ElementIn, Add, Instr, Small, Config<128, 128, 32, 64, 64, 3>>(small, mat_a, mat_b, offs, out);
+  } else {
+    sm80_select<ElementIn, Add, Instr, Small, Config<128, 128, 32, 64, 64, 5>>(small, mat_a, mat_b, offs, out);
+  }
+}
+
 } // namespace
 
 void grouped_mm_sm80(
@@ -200,34 +241,40 @@ void grouped_mm_sm80(
     bool allow_tf32) {
   using Add = cutlass::arch::OpMultiplyAdd;
   using FastF32 = cutlass::arch::OpMultiplyAddFastF32;
-  // Tiles from a CUTLASS Python sweep on A100. The choice depends only on the non-ragged dims, so a group's
-  // accumulation order never depends on the other groups.
-  int64_t fixed0 = mat_a.size(-2), fixed1 = mat_b.size(-1);
+  using F32Instr = GemmShape<16, 8, 8>;
+  // Tiles from CUTLASS Python sweeps on A100, RTX PRO 6000, H100 and B200. The choice depends only on the GPU and
+  // the output's non-ragged dims, so a group's accumulation order never depends on the other groups.
+  const int major = at::cuda::getCurrentDeviceProperties()->major;
+  int64_t out_fixed = std::min(mat_a.size(-2), mat_b.size(-1));
   if (mat_b.dim() == 3) {
-    fixed0 = mat_b.size(-2);
+    out_fixed = mat_b.size(-1);
   } else if (mat_a.dim() == 3) {
-    fixed1 = mat_a.size(-1);
+    out_fixed = mat_a.size(-2);
   }
-  const bool small = std::min(fixed0, fixed1) <= 256;
+  const bool small = out_fixed < 128;
   switch (mat_a.scalar_type()) {
     case at::kBFloat16:
-      sm80_dispatch<cutlass::bfloat16_t, Add, GemmShape<128, 128, 32>, GemmShape<64, 64, 32>, GemmShape<16, 8, 16>, 5>(
-          mat_a, mat_b, offs, out);
+      sm80_select_16bit<cutlass::bfloat16_t>(major, small, mat_a, mat_b, offs, out);
       break;
     case at::kHalf:
-      sm80_dispatch<cutlass::half_t, Add, GemmShape<128, 128, 32>, GemmShape<64, 64, 32>, GemmShape<16, 8, 16>, 5>(
-          mat_a, mat_b, offs, out);
+      sm80_select_16bit<cutlass::half_t>(major, small, mat_a, mat_b, offs, out);
       break;
     default:
-      if (allow_tf32) {
-        sm80_dispatch<float, Add, GemmShape<128, 128, 16>, GemmShape<64, 64, 16>, GemmShape<16, 8, 8>, 5>(
-            mat_a, mat_b, offs, out);
-      } else if (small) {
-        sm80_dispatch<float, FastF32, GemmShape<64, 64, 16>, GemmShape<32, 32, 16>, GemmShape<16, 8, 8>, 3>(
-            mat_a, mat_b, offs, out);
+      using Tf32Small = Config<64, 64, 32, 32, 32, 5>;
+      using Fp32Small = Config<64, 64, 32, 32, 32, 3>;
+      if (allow_tf32 && major == 12) {
+        sm80_select<float, Add, F32Instr, Tf32Small, Config<128, 128, 16, 64, 64, 5>>(small, mat_a, mat_b, offs, out);
+      } else if (allow_tf32) {
+        sm80_select<float, Add, F32Instr, Tf32Small, Config<128, 128, 16, 64, 64, 3>>(small, mat_a, mat_b, offs, out);
+      } else if (major == 8) {
+        sm80_select<float, FastF32, F32Instr, Fp32Small, Config<64, 128, 16, 32, 64, 4>>(
+            small, mat_a, mat_b, offs, out);
+      } else if (major == 12) {
+        sm80_select<float, FastF32, F32Instr, Fp32Small, Config<64, 64, 16, 32, 32, 3>>(
+            small, mat_a, mat_b, offs, out);
       } else {
-        sm80_dispatch<float, FastF32, GemmShape<128, 128, 16>, GemmShape<32, 64, 16>, GemmShape<16, 8, 8>, 3>(
-            mat_a, mat_b, offs, out);
+        sm80_select<float, FastF32, F32Instr, Fp32Small, Config<64, 128, 32, 32, 64, 3>>(
+            small, mat_a, mat_b, offs, out);
       }
   }
 }
