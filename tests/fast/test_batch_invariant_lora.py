@@ -210,6 +210,7 @@ def test_option_and_topology_are_validated_before_model_start(
         expert_model_parallel_size=1,
         deterministic_mode=True,
         bf16=True,
+        fp16=False,
         qkv_format="thd",
         allgather_cp=False,
         lora_dropout=0.0,
@@ -296,3 +297,21 @@ def test_grouped_mm_self_check_fails_closed(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(invariant, "_grouped_mm", original)
     invariant._verify_grouped_mm(x, torch.randn(2, 8, 8, dtype=x.dtype))
     assert invariant._verified_gemms == {(x.device, x.dtype, 8, 8)}
+
+
+@pytest.mark.skipif(
+    invariant.miles_grouped_gemm is None
+    or not torch.cuda.is_available()
+    or torch.cuda.get_device_capability()[0] not in (9, 10),
+    reason="needs the miles_grouped_gemm extension on sm90/sm100",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_cutlass_grouped_mm_matches_torch_and_is_invariant(dtype: torch.dtype) -> None:
+    x = torch.randn(40, 64, device="cuda", dtype=dtype, requires_grad=True)
+    w = torch.randn(4, 32, 64, device="cuda", dtype=dtype, requires_grad=True)
+    offs = invariant._group_offsets((24, 0, 8, 8), x.device)
+    torch.library.opcheck(torch.ops.miles_grouped_gemm.grouped_mm, (x, w.transpose(-2, -1), offs))
+    if dtype == torch.bfloat16:
+        expected = torch._grouped_mm(x, w.transpose(-2, -1), offs)
+        assert torch.equal(invariant._grouped_mm(x, w, offs), expected)
+    invariant._verify_grouped_mm(x, w)

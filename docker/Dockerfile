@@ -268,6 +268,15 @@ RUN git clone https://github.com/radixark/miles.git /root/miles && \
 # int4_qat
 RUN pip install /tmp/wheels/fake_int4_quant_cuda-*.whl
 
+# Batch-invariant LoRA grouped GEMM: torch._grouped_mm's CUTLASS kernel for bf16 and fp16 on sm90/sm100,
+# built against the CUTLASS release torch 2.13 pins.
+ARG CUTLASS_TAG=v4.4.2
+RUN git clone --depth 1 --branch ${CUTLASS_TAG} https://github.com/NVIDIA/cutlass.git /tmp/cutlass && \
+    CUTLASS_DIR=/tmp/cutlass MAX_JOBS=8 pip install --no-build-isolation --no-deps \
+      /root/miles/miles/backends/megatron_utils/kernels/grouped_gemm && \
+    python3 -c "import miles_grouped_gemm" && \
+    rm -rf /tmp/cutlass
+
 # ====================================== Install sgl-model-gateway ============================================
 #   SGL_ROUTER_USE_WHEELS=0:
 #     Build from source  https://github.com/radixark/sgl-router-for-miles
