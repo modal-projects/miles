@@ -3530,7 +3530,10 @@ def miles_validate_args(args):
                 "sampling-support replay cannot be combined with --recompute-logprobs-via-prefill; "
                 "prefill scoring does not preserve the rollout sampling support"
             )
-        if args.kl_coef != 0 or args.use_kl_loss or args.use_opd:
+        # SGLang OPD with rollout log-probs scores the sampler's own log-prob of each sampled token against
+        # the teacher's; it never reads the actor score, so it estimates KL(sampler || teacher) as is.
+        opd_reads_actor_score = args.use_opd and not (args.opd_type == "sglang" and args.use_rollout_logprobs)
+        if args.kl_coef != 0 or args.use_kl_loss or opd_reads_actor_score:
             # The actor still produces full-vocabulary logits, but replay currently exposes only the
             # support-normalized actor score to the loss. These objectives can be enabled once the loss
             # path also preserves an unmasked actor score from the same forward pass.

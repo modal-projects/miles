@@ -1015,6 +1015,17 @@ def test_sampling_support_arguments_fail_closed(extra, message):
         miles_validate_args(args)
 
 
+def test_sampling_support_replay_allows_sglang_opd_on_rollout_log_probs():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    replay = ["--rollout-top-p", "0.95", "--rollout-top-k", "32"]
+    opd = ["--use-opd", "--opd-type", "sglang", "--use-rollout-logprobs"]
+    args = parser.parse_args(replay + opd + ["--num-rollout", "1"] + REQUIRED_ARGS)
+
+    miles_validate_args(args)
+    assert args.use_sampling_support_replay and args.use_opd
+
+
 @pytest.mark.parametrize(
     ("sampling_args", "expected"),
     [
