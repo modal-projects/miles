@@ -110,7 +110,7 @@ def test_packed_projection_and_frozen_head_match_independent_solo_gradients(
         with ThreadPoolExecutor(max_workers=1) as pool:
             actual = pool.submit(forward).result()
         actual_grads = torch.autograd.grad((actual * upstream).sum(), (x, a, b))
-    assert head.shapes == [(8, 1, 7)] * 3 + [(1, 1, 7)]
+    assert head.shapes == []
     expected = []
     for slot, span in enumerate(layout.spans):
         if not span.rows:
@@ -147,6 +147,9 @@ def test_padding_gradient_is_rejected_and_failed_unit_is_cleared(
             else:
                 weights = torch.ones(5, 3, 7, dtype=torch.float64, requires_grad=True)
                 layers._dense_multi_lora_mm(x, weights, token_splits=layout.counts, offsets=None).sum().backward()
+            assert invariant._active_unit.bad_padding_grad is not None
+            assert x.grad is not None
+            assert not x.grad[15:].any()
     assert invariant._active_unit is None
     with invariant.work_unit(True):
         model.get_batch(None, ["tokens"], pad_multiplier=8)
@@ -160,6 +163,24 @@ def test_padding_gradient_is_rejected_and_failed_unit_is_cleared(
 def test_partition_rejects_unproven_padding(counts: list[int], total: int) -> None:
     with pytest.raises(ValueError, match="padding"):
         invariant.partition([1, 3, 4], [3, 5, 7], counts, 8, total)
+
+
+@pytest.mark.parametrize("offset", [0, 1, 32])
+def test_mm_output_alignment_fallback(monkeypatch: pytest.MonkeyPatch, offset: int) -> None:
+    original = torch.mm
+    calls = []
+
+    def mm(a, b, *, out=None):
+        calls.append(out is not None)
+        return original(a, b) if out is None else original(a, b, out=out)
+
+    monkeypatch.setattr(torch, "mm", mm)
+    a = torch.randn(3, 7, dtype=torch.float64)
+    b = torch.randn(7, 5, dtype=torch.float64)
+    out = torch.empty(15 + offset, dtype=torch.float64)[offset:].view(3, 5)
+    invariant._mm_out(a, b, out)
+    assert calls == [offset % 32 == 0]
+    assert torch.equal(out, original(a, b))
 
 
 def test_disabled_path_preserves_calls_and_missing_head_fails_closed(
@@ -243,3 +264,18 @@ def test_install_rejects_trainable_head_and_changed_bridge_signature(
         error, message = RuntimeError, "signature"
     with pytest.raises(error, match=message):
         invariant.install(model, [chunk], layers=layers)
+
+
+# Padding-gradient flags are recorded on module state, which AOT tracing cannot capture.
+_OPCHECK_UTILS = ("test_schema", "test_autograd_registration", "test_faketensor")
+
+
+def test_custom_ops_pass_opcheck(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(invariant, "_active_unit", invariant._WorkUnit())
+    layout = invariant.partition([0, 2], [5, 4], [5, 0, 11], 8, 16)
+    args = invariant._layout_args(layout)
+    x = torch.randn(16, 7, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(3, 4, 7, dtype=torch.float64, requires_grad=True)
+    head = torch.randn(13, 7, dtype=torch.float64)
+    torch.library.opcheck(invariant._dense_mm_op, (x, weights, *args), test_utils=_OPCHECK_UTILS)
+    torch.library.opcheck(invariant._frozen_head_op, (x, head, *args), test_utils=_OPCHECK_UTILS)

@@ -9,13 +9,12 @@ from argparse import Namespace
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import wraps
+from functools import cached_property, wraps
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 
 OPTION = "--lora-batch-invariant"
 _MARKER = "_miles_batch_invariant_lora"
@@ -36,11 +35,16 @@ class Partition:
     real_rows: int
     total_rows: int
 
+    @cached_property
+    def tail_slot(self) -> int:
+        return next((i for i, (span, n) in enumerate(zip(self.spans, self.counts, strict=True)) if n > span.rows), -1)
+
 
 @dataclass
 class _WorkUnit:
     partition: Partition | None = None
     head_calls: int = 0
+    bad_padding_grad: torch.Tensor | None = None
 
 
 # Autograd recomputation can run on a different Python thread.
@@ -81,6 +85,8 @@ def work_unit(active: bool) -> Generator[None, None, None]:
     _active_unit = unit
     try:
         yield
+        if unit.bad_padding_grad is not None and bool(unit.bad_padding_grad):
+            raise RuntimeError("Batch padding carries a nonzero upstream gradient")
         if unit.partition is None or unit.head_calls == 0:
             raise RuntimeError("Batch-invariant LoRA did not observe the frozen head")
     finally:
@@ -118,27 +124,199 @@ def partition(
     return Partition(tuple(spans), counts, n_real, total_rows)
 
 
-class _UnusedRows(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx: torch.autograd.function.FunctionCtx, value: torch.Tensor) -> torch.Tensor:
-        return value
-
-    @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, *grad_outputs: torch.Tensor) -> None:
-        (grad,) = grad_outputs
-        if bool(torch.count_nonzero(grad)):
-            raise RuntimeError("Batch padding carries a nonzero upstream gradient")
-        return None
+_LIB = "miles_bi_lora"
 
 
-def _padded_input(x: torch.Tensor, span: Span) -> torch.Tensor:
-    return torch.cat(
-        (
-            x[span.start : span.start + span.rows],
-            x.new_zeros((span.padded_rows - span.rows, *x.shape[1:])),
-        ),
-        dim=0,
+def _layout_args(layout: Partition) -> tuple[list[int], list[int], list[int], int, int]:
+    return (
+        [span.start for span in layout.spans],
+        [span.rows for span in layout.spans],
+        [span.padded_rows for span in layout.spans],
+        layout.real_rows,
+        layout.tail_slot,
     )
+
+
+def _offsets(padded: Sequence[int]) -> list[int]:
+    offsets = [0]
+    for n in padded:
+        offsets.append(offsets[-1] + n)
+    return offsets
+
+
+def _slack(rows: Sequence[int], padded: Sequence[int]) -> int:
+    return max(p - n for n, p in zip(rows, padded, strict=True))
+
+
+def _record_padding_grad(bad: torch.Tensor) -> None:
+    unit = _active_unit
+    if unit is None:
+        raise RuntimeError("Padding gradient has no active work unit")
+    unit.bad_padding_grad = bad if unit.bad_padding_grad is None else unit.bad_padding_grad | bad
+
+
+def _any_nonzero(grad: torch.Tensor) -> torch.Tensor:
+    return grad.ne(0).any() if grad.numel() else grad.new_zeros((), dtype=torch.bool)
+
+
+def _mm_out(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> None:
+    # Keep cuBLAS pointer alignment identical to a fresh allocation.
+    if out.storage_offset() * out.element_size() % 256:
+        out.copy_(torch.mm(a, b))
+    else:
+        torch.mm(a, b, out=out)
+
+
+def _pack(x: torch.Tensor, starts: Sequence[int], rows: Sequence[int], padded: Sequence[int]) -> torch.Tensor:
+    offsets = _offsets(padded)
+    packed = x.new_empty((offsets[-1], x.shape[1]))
+    for start, n, p, offset in zip(starts, rows, padded, offsets, strict=False):
+        packed[offset : offset + n].copy_(x[start : start + n])
+        packed[offset + n : offset + p].zero_()
+    return packed
+
+
+@torch.library.custom_op(f"{_LIB}::dense_mm", mutates_args=())
+def _dense_mm_op(
+    x: torch.Tensor,
+    weights: torch.Tensor,
+    starts: list[int],
+    rows: list[int],
+    padded: list[int],
+    real_rows: int,
+    tail_slot: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    offsets = _offsets(padded)
+    xp = _pack(x, starts, rows, padded)
+    # Padded rows spill into the next span, which overwrites them afterwards.
+    y = x.new_empty((len(x) + _slack(rows, padded), weights.shape[1]))
+    for slot, (start, n, p, offset) in enumerate(zip(starts, rows, padded, offsets, strict=False)):
+        if n:
+            _mm_out(xp[offset : offset + p], weights[slot].t(), y[start : start + p])
+    if real_rows < len(x):
+        _mm_out(x[real_rows:], weights[tail_slot].t(), y[real_rows : len(x)])
+    return y[: len(x)], xp
+
+
+@_dense_mm_op.register_fake
+def _(x, weights, starts, rows, padded, real_rows, tail_slot):
+    return x.new_empty((len(x), weights.shape[1])), x.new_empty((sum(padded), x.shape[1]))
+
+
+@torch.library.custom_op(f"{_LIB}::dense_mm_backward", mutates_args=())
+def _dense_mm_backward_op(
+    gy: torch.Tensor,
+    xp: torch.Tensor,
+    weights: torch.Tensor,
+    starts: list[int],
+    rows: list[int],
+    padded: list[int],
+    real_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    offsets = _offsets(padded)
+    total = len(gy)
+    gyp = _pack(gy, starts, rows, padded)
+    gx = xp.new_empty((total + _slack(rows, padded), xp.shape[1]))
+    gw = torch.zeros_like(weights)
+    for slot, (start, n, p, offset) in enumerate(zip(starts, rows, padded, offsets, strict=False)):
+        if n:
+            g = gyp[offset : offset + p]
+            _mm_out(g, weights[slot], gx[start : start + p])
+            torch.mm(g.t(), xp[offset : offset + p], out=gw[slot])
+    gx[real_rows:total].zero_()
+    return gx[:total], gw, _any_nonzero(gy[real_rows:])
+
+
+@_dense_mm_backward_op.register_fake
+def _(gy, xp, weights, starts, rows, padded, real_rows):
+    return gy.new_empty((len(gy), xp.shape[1])), torch.empty_like(weights), gy.new_empty((), dtype=torch.bool)
+
+
+def _dense_setup(ctx, inputs, output) -> None:
+    _, weights, starts, rows, padded, real_rows, _ = inputs
+    ctx.save_for_backward(output[1], weights)
+    ctx.layout = (starts, rows, padded, real_rows)
+
+
+def _dense_backward(ctx, gy: torch.Tensor, _gxp: torch.Tensor | None):
+    xp, weights = ctx.saved_tensors
+    gx, gw, bad = _dense_mm_backward_op(gy.contiguous(), xp, weights, *ctx.layout)
+    _record_padding_grad(bad)
+    return gx, gw, None, None, None, None, None
+
+
+_dense_mm_op.register_autograd(_dense_backward, setup_context=_dense_setup)
+
+
+@torch.library.custom_op(f"{_LIB}::frozen_head", mutates_args=())
+def _frozen_head_op(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    starts: list[int],
+    rows: list[int],
+    padded: list[int],
+    real_rows: int,
+    tail_slot: int,
+) -> torch.Tensor:
+    offsets = _offsets(padded)
+    xp = _pack(x, starts, rows, padded)
+    # Padded rows spill into the next span, which overwrites them afterwards.
+    y = x.new_empty((len(x) + _slack(rows, padded), weight.shape[0]))
+    for start, n, p, offset in zip(starts, rows, padded, offsets, strict=False):
+        if n:
+            _mm_out(xp[offset : offset + p], weight.t(), y[start : start + p])
+    if real_rows < len(x):
+        _mm_out(x[real_rows:], weight.t(), y[real_rows : len(x)])
+    return y[: len(x)]
+
+
+@_frozen_head_op.register_fake
+def _(x, weight, starts, rows, padded, real_rows, tail_slot):
+    return x.new_empty((len(x), weight.shape[0]))
+
+
+@torch.library.custom_op(f"{_LIB}::frozen_head_backward", mutates_args=())
+def _frozen_head_backward_op(
+    gy: torch.Tensor,
+    weight: torch.Tensor,
+    starts: list[int],
+    rows: list[int],
+    padded: list[int],
+    real_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    total = len(gy)
+    gx = gy.new_empty((total + _slack(rows, padded), weight.shape[1]))
+    for start, n, p in zip(starts, rows, padded, strict=True):
+        if not n:
+            continue
+        # dgrad rows depend only on their own upstream row, so a view suffices.
+        grad = gy[start : start + p]
+        if len(grad) < p:
+            grad = torch.cat((grad, gy.new_zeros((p - len(grad), gy.shape[1]))))
+        _mm_out(grad, weight, gx[start : start + p])
+    gx[real_rows:total].zero_()
+    return gx[:total], _any_nonzero(gy[real_rows:])
+
+
+@_frozen_head_backward_op.register_fake
+def _(gy, weight, starts, rows, padded, real_rows):
+    return gy.new_empty((len(gy), weight.shape[1])), gy.new_empty((), dtype=torch.bool)
+
+
+def _head_setup(ctx, inputs, output) -> None:
+    _, weight, starts, rows, padded, real_rows, _ = inputs
+    ctx.save_for_backward(weight)
+    ctx.layout = (starts, rows, padded, real_rows)
+
+
+def _head_backward(ctx, gy: torch.Tensor):
+    (weight,) = ctx.saved_tensors
+    gx, bad = _frozen_head_backward_op(gy.contiguous(), weight, *ctx.layout)
+    _record_padding_grad(bad)
+    return gx, None, None, None, None, None, None
+
+
+_frozen_head_op.register_autograd(_head_backward, setup_context=_head_setup)
 
 
 def dense_mm(x: torch.Tensor, weights: torch.Tensor, layout: Partition) -> torch.Tensor:
@@ -146,18 +324,11 @@ def dense_mm(x: torch.Tensor, weights: torch.Tensor, layout: Partition) -> torch
         raise ValueError("Expected flat THD inputs and stacked dense LoRA weights")
     if len(x) != layout.total_rows or len(weights) != len(layout.spans):
         raise ValueError("LoRA shapes disagree with the batch partition")
-    outputs = []
-    for slot, (span, weight) in enumerate(zip(layout.spans, weights, strict=True)):
-        if span.rows:
-            out = F.linear(_padded_input(x, span), weight)[: span.rows]
-        else:
-            out = x.new_empty((0, weight.shape[0]))
-        extra = layout.counts[slot] - span.rows
-        if extra:
-            tail = x[layout.real_rows :]
-            out = torch.cat((out, _UnusedRows.apply(F.linear(tail, weight))), dim=0)
-        outputs.append(out)
-    return torch.cat(outputs, dim=0)
+    return _dense_mm_op(x.contiguous(), weights.contiguous(), *_layout_args(layout))[0]
+
+
+def frozen_head_mm(x: torch.Tensor, weight: torch.Tensor, layout: Partition) -> torch.Tensor:
+    return _frozen_head_op(x.contiguous(), weight, *_layout_args(layout))
 
 
 def _head_forward(head: torch.nn.Module) -> Callable[..., tuple[torch.Tensor, None]]:
@@ -178,20 +349,11 @@ def _head_forward(head: torch.nn.Module) -> Callable[..., tuple[torch.Tensor, No
             raise ValueError("Batch-invariant LoRA requires frozen head weights")
         if inputs.ndim != 3 or inputs.shape[1] != 1 or inputs.shape[0] != layout.total_rows:
             raise ValueError("Expected a single-rank THD frozen head")
-        outputs = []
-        for span in layout.spans:
-            if span.rows:
-                output, bias = original(_padded_input(inputs, span), *args, **kwargs)
-                if bias is not None:
-                    raise ValueError("Batch-invariant LoRA requires a bias-free head")
-                outputs.append(output[: span.rows])
-        if layout.real_rows < layout.total_rows:
-            tail, bias = original(inputs[layout.real_rows :], *args, **kwargs)
-            if bias is not None:
-                raise ValueError("Batch-invariant LoRA requires a bias-free head")
-            outputs.append(_UnusedRows.apply(tail))
+        if getattr(head, "bias", None) is not None:
+            raise ValueError("Batch-invariant LoRA requires a bias-free head")
+        output = frozen_head_mm(inputs[:, 0], weight, layout)
         unit.head_calls += 1
-        return torch.cat(outputs, dim=0), None
+        return output.unsqueeze(1), None
 
     return forward
 
