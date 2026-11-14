@@ -258,6 +258,9 @@ def _verify_grouped_mm(x: torch.Tensor, weights: torch.Tensor) -> None:
     key = (x.device, x.dtype, out_features, in_features)
     if key in _verified_gemms:
         return
+    # Other dtypes and architectures loop per-group mm, whose kernel depends on each group's padded rows.
+    if x.is_cuda and (x.dtype != torch.bfloat16 or torch.cuda.get_device_capability(x.device)[0] not in (9, 10)):
+        raise RuntimeError(f"{OPTION} needs the bf16 sm90/sm100 torch._grouped_mm kernel")
     generator = torch.Generator(device=x.device).manual_seed(0)
 
     def randn(*shape: int) -> torch.Tensor:
