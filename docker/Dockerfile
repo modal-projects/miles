@@ -268,7 +268,7 @@ RUN git clone https://github.com/radixark/miles.git /root/miles && \
 # int4_qat
 RUN pip install /tmp/wheels/fake_int4_quant_cuda-*.whl
 
-# Batch-invariant LoRA grouped GEMM: torch._grouped_mm's CUTLASS kernel for bf16 and fp16 on sm90/sm100,
+# Batch-invariant LoRA grouped GEMM: torch._grouped_mm's CUTLASS kernel (bf16/fp16/fp32 on sm80, sm90, sm100, sm120),
 # built against the CUTLASS release torch 2.13 pins.
 ARG CUTLASS_TAG=v4.4.2
 RUN git clone --depth 1 --branch ${CUTLASS_TAG} https://github.com/NVIDIA/cutlass.git /tmp/cutlass && \

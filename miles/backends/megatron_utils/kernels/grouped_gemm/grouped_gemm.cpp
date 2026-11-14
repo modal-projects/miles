@@ -1,15 +1,29 @@
-// Registers miles_grouped_gemm::grouped_mm, torch._grouped_mm's CUTLASS kernel for bf16 and fp16 on sm90/sm100,
-// with no per-group cuBLAS fallback. Shape and stride rules follow PyTorch v2.13.0 GroupedMMUtils.h.
+// Registers miles_grouped_gemm::grouped_mm: torch._grouped_mm's CUTLASS kernel on sm90/sm100 for bf16, fp16 and
+// fp32, and a CUTLASS 2.x grouped kernel on sm80, with no per-group cuBLAS fallback. Shape and stride rules follow PyTorch v2.13.0 GroupedMMUtils.h.
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 
+#include <tuple>
+
 namespace miles_grouped_gemm {
 
 void grouped_mm_bf16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
 void grouped_mm_fp16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
+void grouped_mm_fp32_sm9x(
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    at::Tensor& out,
+    bool allow_tf32);
+void grouped_mm_sm80(
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    at::Tensor& out,
+    bool allow_tf32);
 
 namespace {
 
@@ -52,12 +66,75 @@ at::Tensor make_output(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
   return at::empty_strided(size, stride, mat_a.options());
 }
 
-at::Tensor grouped_mm_cuda(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs) {
+// Copy with K contiguous and the leading dimension padded to 16 bytes.
+at::Tensor k_major_copy(const at::Tensor& t, bool row_major) {
+  const int64_t d = t.dim();
+  const int64_t align = 16 / t.element_size();
+  const int64_t inner_dim = row_major ? d - 1 : d - 2;
+  const int64_t outer_dim = row_major ? d - 2 : d - 1;
+  const int64_t ld = (t.size(inner_dim) + align - 1) / align * align;
+  std::vector<int64_t> strides(d);
+  strides[inner_dim] = 1;
+  strides[outer_dim] = ld;
+  if (d == 3) {
+    strides[0] = ld * t.size(outer_dim);
+  }
+  at::Tensor out = at::empty_strided(t.sizes(), strides, t.options());
+  out.copy_(t);
+  return out;
+}
+
+// With K contiguous, a K-ragged group must start and end on 16 bytes. Copies each group into its own zero-padded slot
+// of a multiple of `align` rows; the padding depends only on the group's own size, so it is the same solo and packed.
+// Rows past offs[-1] go beyond every slot.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> pad_k_groups(
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    int64_t align,
+    bool k_major) {
+  const int64_t total = mat_a.size(1);
+  const int64_t groups = offs.size(0);
+  at::Tensor ends = offs.to(at::kLong);
+  at::Tensor starts = at::cat({at::zeros({1}, ends.options()), ends.slice(0, 0, groups - 1)});
+  at::Tensor padded_ends = ((ends - starts + align - 1).div(align, "floor") * align).cumsum(0);
+  at::Tensor padded_starts = at::cat({at::zeros({1}, ends.options()), padded_ends.slice(0, 0, groups - 1)});
+  const int64_t width = (total + groups * (align - 1) + align - 1) / align * align;
+  // Each padded K row is gathered from its source row; padding rows read row 0 and are zeroed.
+  at::Tensor rows = at::arange(width, ends.options());
+  at::Tensor group = at::searchsorted(padded_ends, rows, /*out_int32=*/false, /*right=*/true).clamp_max_(groups - 1);
+  at::Tensor src = rows - padded_starts.index_select(0, group) + starts.index_select(0, group);
+  at::Tensor pad = src.ge(ends.index_select(0, group)).unsqueeze(1);
+  src.masked_fill_(pad.squeeze(1), 0);
+  // (K, M) and (K, N) with M and N contiguous and their leading dimensions padded to 16 bytes.
+  auto gather = [&](const at::Tensor& k_rows) {
+    const int64_t cols = k_rows.size(1);
+    const int64_t elems = 16 / k_rows.element_size();
+    const int64_t ld = (cols + elems - 1) / elems * elems;
+    at::Tensor gathered = k_rows.index_select(0, src).masked_fill_(pad, 0);
+    if (ld == cols) {
+      return gathered;
+    }
+    return at::zeros({width, ld}, gathered.options()).narrow(1, 0, cols).copy_(gathered);
+  };
+  at::Tensor a = gather(mat_a.mT());
+  at::Tensor b = gather(mat_b);
+  if (k_major) {
+    return {a.mT().contiguous(), b.mT().contiguous().mT(), padded_ends.to(at::kInt)};
+  }
+  return {a.mT(), b, padded_ends.to(at::kInt)};
+}
+
+at::Tensor grouped_mm_cuda(const at::Tensor& mat_a_in, const at::Tensor& mat_b_in, const at::Tensor& offs_in, bool allow_tf32) {
+  at::Tensor offs = offs_in;
+  at::Tensor mat_a = mat_a_in;
+  at::Tensor mat_b = mat_b_in;
   TORCH_CHECK(mat_a.is_cuda() && mat_b.device() == mat_a.device() && offs.device() == mat_a.device(),
               "grouped_mm expects all inputs on one CUDA device");
   TORCH_CHECK(mat_a.scalar_type() == mat_b.scalar_type(), "mat_a and mat_b must have the same dtype");
-  TORCH_CHECK(mat_a.scalar_type() == at::kBFloat16 || mat_a.scalar_type() == at::kHalf,
-              "grouped_mm supports bfloat16 and float16, got ", mat_a.scalar_type());
+  const auto dtype = mat_a.scalar_type();
+  TORCH_CHECK(dtype == at::kBFloat16 || dtype == at::kHalf || dtype == at::kFloat,
+              "grouped_mm supports bfloat16, float16 and float32, got ", dtype);
   TORCH_CHECK((mat_a.dim() == 2 || mat_a.dim() == 3) && (mat_b.dim() == 2 || mat_b.dim() == 3),
               "mat_a and mat_b have to be 2 or 3d");
   TORCH_CHECK(mat_a.dim() == 2 || mat_b.dim() == 2, "grouped_mm needs a 2d ragged operand");
@@ -65,18 +142,47 @@ at::Tensor grouped_mm_cuda(const at::Tensor& mat_a, const at::Tensor& mat_b, con
     TORCH_CHECK(mat_a.size(-1) == mat_b.size(-2), "contraction dimension of mat_a and mat_b must match");
   }
   TORCH_CHECK(offs.dim() == 1 && offs.scalar_type() == at::kInt, "offs has to be a 1d int32 tensor");
-  check_strides(mat_a);
-  check_strides(mat_b);
 
   c10::cuda::CUDAGuard device_guard(mat_a.device());
   const int major = at::cuda::getCurrentDeviceProperties()->major;
-  TORCH_CHECK(major == 9 || major == 10, "grouped_mm needs an sm90 or sm100 GPU, got compute capability major ", major);
+  TORCH_CHECK(major == 8 || major == 9 || major == 10 || major == 12,
+              "grouped_mm needs an sm80, sm90, sm100 or sm120 GPU, got compute capability major ", major);
+  const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32);
+  if (mat_a.dim() == 2 && mat_b.dim() == 2 && (sm80_kernel || dtype == at::kFloat)) {
+    // The sm80 mainloop runs the partial K tile first, so zero rows appended to a group would shift every tile and
+    // change its sums; padding each group to whole K tiles (32 rows covers every config) keeps the order fixed. The
+    // TMA tf32 kernels instead need each group to start on 16 bytes along a contiguous K.
+    if (sm80_kernel) {
+      std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 32, /*k_major=*/false);
+    } else {
+      std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 16 / mat_a.element_size(), /*k_major=*/true);
+    }
+  } else if (sm80_kernel) {
+    // Column-major mat_a with column-major mat_b has no sm80 instantiation.
+    if (mat_a.stride(-1) != 1 && mat_b.stride(-1) != 1) {
+      mat_a = k_major_copy(mat_a, /*row_major=*/true);
+    }
+  } else if (dtype == at::kFloat) {
+    // The TMA tf32 kernels read only K-major operands (row-major A, column-major B).
+    if (mat_a.stride(-1) != 1) {
+      mat_a = k_major_copy(mat_a, /*row_major=*/true);
+    }
+    if (mat_b.stride(-2) != 1) {
+      mat_b = k_major_copy(mat_b, /*row_major=*/false);
+    }
+  }
+  check_strides(mat_a);
+  check_strides(mat_b);
 
   at::Tensor out = make_output(mat_a, mat_b, offs);
-  if (mat_a.scalar_type() == at::kBFloat16) {
+  if (sm80_kernel) {
+    grouped_mm_sm80(mat_a, mat_b, offs, out, allow_tf32);
+  } else if (dtype == at::kBFloat16) {
     grouped_mm_bf16(mat_a, mat_b, offs, out);
-  } else {
+  } else if (dtype == at::kHalf) {
     grouped_mm_fp16(mat_a, mat_b, offs, out);
+  } else {
+    grouped_mm_fp32_sm9x(mat_a, mat_b, offs, out, allow_tf32);
   }
   return out;
 }
@@ -85,7 +191,7 @@ at::Tensor grouped_mm_cuda(const at::Tensor& mat_a, const at::Tensor& mat_b, con
 } // namespace miles_grouped_gemm
 
 TORCH_LIBRARY(miles_grouped_gemm, m) {
-  m.def("grouped_mm(Tensor mat_a, Tensor mat_b, Tensor offs) -> Tensor");
+  m.def("grouped_mm(Tensor mat_a, Tensor mat_b, Tensor offs, bool allow_tf32=False) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(miles_grouped_gemm, CUDA, m) {

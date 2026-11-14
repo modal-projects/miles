@@ -296,7 +296,7 @@ def test_grouped_mm_self_check_fails_closed(monkeypatch: pytest.MonkeyPatch) -> 
         invariant._verify_grouped_mm(x, torch.randn(2, 8, 8, dtype=x.dtype))
     monkeypatch.setattr(invariant, "_grouped_mm", original)
     invariant._verify_grouped_mm(x, torch.randn(2, 8, 8, dtype=x.dtype))
-    assert invariant._verified_gemms == {(x.device, x.dtype, 8, 8)}
+    assert invariant._verified_gemms == {(x.device, x.dtype, 8, 8, False)}
 
 
 @pytest.mark.skipif(

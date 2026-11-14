@@ -1,6 +1,6 @@
 // Adapted from PyTorch v2.13.0 aten/src/ATen/native/cuda/{GroupMM.cu,GroupMMCommon.cuh,cutlass_common.cuh}
 // (BSD-3-Clause, Copyright (c) Meta Platforms, Inc. and affiliates), templated on the input dtype so
-// fp16 gets the same CUTLASS grouped GEMM that torch only builds for bf16. Built against CUTLASS v4.4.2,
+// fp16 and fp32 get the same CUTLASS grouped GEMM that torch only builds for bf16. Built against CUTLASS v4.4.2,
 // the version PyTorch v2.13.0 pins.
 // PyTorch license: LICENSE.pytorch in this directory.
 #pragma once
@@ -138,38 +138,31 @@ __global__ void prepare_grouped_gemm_data(
   stride_output[tid] = cutlass::make_cute_packed_stride(StrideOutput{}, {M, ldoutput, 1});
 }
 
-template <typename ArchTag, bool PONGOr2SM>
+template <typename Kernel_, typename Epilogue_>
 struct Schedule {
-  using CooperativeSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
-  using PongSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
-  using CooperativeEpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
-  using PongEpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using MMA1SMKernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmSm100;
-  using MMA1SMEpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
-  using MMA2SMKernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecialized2SmSm100;
-  using MMA2SMEpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized2Sm;
-
-  static constexpr bool is_sm100 = std::is_same_v<ArchTag, cutlass::arch::Sm100>;
-  using KernelSchedule = cute::conditional_t<
-      is_sm100,
-      cute::conditional_t<PONGOr2SM, MMA2SMKernelSchedule, MMA1SMKernelSchedule>,
-      cute::conditional_t<PONGOr2SM, PongSchedule, CooperativeSchedule>>;
-  using EpilogueSchedule = cute::conditional_t<
-      is_sm100,
-      cute::conditional_t<PONGOr2SM, MMA2SMEpilogueSchedule, MMA1SMEpilogueSchedule>,
-      cute::conditional_t<PONGOr2SM, PongEpilogueSchedule, CooperativeEpilogueSchedule>>;
+  using Kernel = Kernel_;
+  using Epilogue = Epilogue_;
 };
-
+using Sm90Cooperative = Schedule<
+    cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative,
+    cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative>;
+using Sm90Pingpong =
+    Schedule<cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong, cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong>;
+using Sm100OneSm =
+    Schedule<cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmSm100, cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm>;
+using Sm100TwoSm =
+    Schedule<cutlass::gemm::KernelPtrArrayTmaWarpSpecialized2SmSm100, cutlass::epilogue::PtrArrayTmaWarpSpecialized2Sm>;
 inline int round_up_to_nearest_multiple(int a, int b) {
   return (a + b - 1) / b * b;
 }
 
 template <
-    typename Dtype,
+    typename DtypeIn,
+    typename DtypeOut,
     typename ArchTag,
     bool a_row_major,
     bool b_row_major,
-    bool PONGOr2SM,
+    typename Schedules,
     typename TB_M,
     typename TB_N,
     typename TB_K>
@@ -178,11 +171,12 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
   using LayoutA = cute::conditional_t<a_row_major, cutlass::layout::RowMajor, cutlass::layout::ColumnMajor>;
   using LayoutB = cute::conditional_t<b_row_major, cutlass::layout::RowMajor, cutlass::layout::ColumnMajor>;
   using LayoutOutput = cutlass::layout::RowMajor;
-  constexpr int Alignment = 16 / sizeof(Dtype);
+  constexpr int AlignmentIn = 16 / sizeof(DtypeIn);
+  constexpr int AlignmentOut = 16 / sizeof(DtypeOut);
   using TileShape = cute::Shape<TB_M, TB_N, TB_K>;
   using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
-  using KernelSchedule = typename Schedule<ArchTag, PONGOr2SM>::KernelSchedule;
-  using EpilogueSchedule = typename Schedule<ArchTag, PONGOr2SM>::EpilogueSchedule;
+  using KernelSchedule = typename Schedules::Kernel;
+  using EpilogueSchedule = typename Schedules::Epilogue;
   using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
 
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -195,22 +189,22 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
       DtypeAccum,
       void,
       LayoutOutput*,
-      Alignment,
-      Dtype,
+      AlignmentOut,
+      DtypeOut,
       LayoutOutput*,
-      Alignment,
+      AlignmentOut,
       EpilogueSchedule,
-      cutlass::epilogue::fusion::LinearCombination<Dtype, DtypeAccum>>::CollectiveOp;
+      cutlass::epilogue::fusion::LinearCombination<DtypeOut, DtypeAccum>>::CollectiveOp;
 
   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
       ArchTag,
       cutlass::arch::OpClassTensorOp,
-      Dtype,
+      DtypeIn,
       LayoutA*,
-      Alignment,
-      Dtype,
+      AlignmentIn,
+      DtypeIn,
       LayoutB*,
-      Alignment,
+      AlignmentIn,
       DtypeAccum,
       TileShape,
       ClusterShape,
@@ -249,9 +243,9 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
   auto& allocator = *c10::cuda::CUDACachingAllocator::get();
   auto input_buf = allocator.allocate(input_args_size);
   void* buf_ptr = input_buf.get();
-  Dtype** inputA_ptrs = reinterpret_cast<Dtype**>(buf_ptr);
-  Dtype** inputB_ptrs = inputA_ptrs + aligned_group_count;
-  Dtype** output_ptrs = inputB_ptrs + aligned_group_count;
+  DtypeIn** inputA_ptrs = reinterpret_cast<DtypeIn**>(buf_ptr);
+  DtypeIn** inputB_ptrs = inputA_ptrs + aligned_group_count;
+  DtypeOut** output_ptrs = reinterpret_cast<DtypeOut**>(inputB_ptrs + aligned_group_count);
   static_assert(sizeof(StrideA) == 8, "expected StrideA to be 8 bytes for alignment");
   StrideA* stride_A = reinterpret_cast<StrideA*>(output_ptrs + aligned_group_count);
   StrideB* stride_B = reinterpret_cast<StrideB*>(stride_A + group_count);
@@ -266,9 +260,9 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
     return result;
   };
   prepare_grouped_gemm_data<<<1, group_count, 0, stream.stream()>>>(
-      reinterpret_cast<Dtype*>(mat_a.data_ptr()),
-      reinterpret_cast<Dtype*>(mat_b.data_ptr()),
-      reinterpret_cast<Dtype*>(out.data_ptr()),
+      reinterpret_cast<DtypeIn*>(mat_a.data_ptr()),
+      reinterpret_cast<DtypeIn*>(mat_b.data_ptr()),
+      reinterpret_cast<DtypeOut*>(out.data_ptr()),
       inputA_ptrs,
       inputB_ptrs,
       output_ptrs,
@@ -292,7 +286,7 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
   typename Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGrouped,
       {group_count, problem_sizes, nullptr},
-      {(const Dtype**)inputA_ptrs, stride_A, (const Dtype**)inputB_ptrs, stride_B},
+      {(const DtypeIn**)inputA_ptrs, stride_A, (const DtypeIn**)inputB_ptrs, stride_B},
       {{}, nullptr, stride_output, output_ptrs, stride_output}};
   arguments.epilogue.thread.alpha = 1.0;
   arguments.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
@@ -308,8 +302,7 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
 }
 
 // Same tile choice as torch: it depends only on N and the average rows per group, never on one group's size.
-template <typename Dtype, bool a_row_major, bool b_row_major>
-void dispatch_on_tile_size(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out) {
+inline bool use_small_tiles(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs) {
   int32_t M = mat_a.size(-2);
   int32_t N = mat_b.size(-1);
   int32_t group_count = offs.size(0);
@@ -318,21 +311,28 @@ void dispatch_on_tile_size(const at::Tensor& mat_a, const at::Tensor& mat_b, con
   } else if (mat_a.dim() != 2 && mat_b.dim() == 2) {
     N = N / group_count;
   }
-  bool small = (M <= 128 || N <= 128);
+  return M <= 128 || N <= 128;
+}
+
+template <typename Dtype, bool a_row_major, bool b_row_major>
+void dispatch_on_tile_size(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out) {
+  using cutlass::arch::Sm100;
+  using cutlass::arch::Sm90;
+  bool small = use_small_tiles(mat_a, mat_b, offs);
   if (at::cuda::getCurrentDeviceProperties()->major == 10) {
     if (small) {
-      grouped_gemm_impl<Dtype, cutlass::arch::Sm100, a_row_major, b_row_major, false, cute::_128, cute::_256, cute::_64>(
+      grouped_gemm_impl<Dtype, Dtype, Sm100, a_row_major, b_row_major, Sm100OneSm, cute::_128, cute::_256, cute::_64>(
           mat_a, mat_b, offs, out);
     } else {
-      grouped_gemm_impl<Dtype, cutlass::arch::Sm100, a_row_major, b_row_major, true, cute::_256, cute::_256, cute::_64>(
+      grouped_gemm_impl<Dtype, Dtype, Sm100, a_row_major, b_row_major, Sm100TwoSm, cute::_256, cute::_256, cute::_64>(
           mat_a, mat_b, offs, out);
     }
   } else {
     if (small) {
-      grouped_gemm_impl<Dtype, cutlass::arch::Sm90, a_row_major, b_row_major, true, cute::_64, cute::_128, cute::_128>(
+      grouped_gemm_impl<Dtype, Dtype, Sm90, a_row_major, b_row_major, Sm90Pingpong, cute::_64, cute::_128, cute::_128>(
           mat_a, mat_b, offs, out);
     } else {
-      grouped_gemm_impl<Dtype, cutlass::arch::Sm90, a_row_major, b_row_major, false, cute::_128, cute::_256, cute::_64>(
+      grouped_gemm_impl<Dtype, Dtype, Sm90, a_row_major, b_row_major, Sm90Cooperative, cute::_128, cute::_256, cute::_64>(
           mat_a, mat_b, offs, out);
     }
   }
@@ -355,5 +355,19 @@ void dispatch_on_layout(const at::Tensor& mat_a, const at::Tensor& mat_b, const 
 
 void grouped_mm_bf16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
 void grouped_mm_fp16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
+// fp32 operands must be row-major A and column-major B (K-major), the only layout TF32 wgmma reads.
+void grouped_mm_fp32_sm9x(
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    at::Tensor& out,
+    bool allow_tf32);
+// CUTLASS 2.x grouped GEMM (mma.sync), for sm80+. Same K-major layout requirement.
+void grouped_mm_sm80(
+    const at::Tensor& mat_a,
+    const at::Tensor& mat_b,
+    const at::Tensor& offs,
+    at::Tensor& out,
+    bool allow_tf32);
 
 } // namespace miles_grouped_gemm

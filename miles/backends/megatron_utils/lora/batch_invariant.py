@@ -62,8 +62,8 @@ def validate_args(args: Namespace | SimpleNamespace) -> None:
     ):
         if getattr(args, name, None) != 1:
             raise ValueError(f"{OPTION} requires {name}=1")
-    if not args.deterministic_mode or not (args.bf16 or args.fp16):
-        raise ValueError(f"{OPTION} requires deterministic_mode and bf16 or fp16")
+    if not args.deterministic_mode:
+        raise ValueError(f"{OPTION} requires deterministic_mode")
     if args.qkv_format != "thd" or getattr(args, "allgather_cp", False):
         raise ValueError(f"{OPTION} requires THD without all-gather CP")
     for name in ("lora_dropout", "attention_dropout", "hidden_dropout"):
@@ -255,8 +255,9 @@ def _column_major(t: torch.Tensor) -> bool:
 
 
 def _cutlass_setup(ctx: Any, inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
-    mat_a, mat_b, offs = inputs
+    mat_a, mat_b, offs, allow_tf32 = inputs
     ctx.save_for_backward(mat_a, mat_b, offs)
+    ctx.allow_tf32 = allow_tf32
     ctx.column_major = (_column_major(mat_a), _column_major(mat_b))
 
 
@@ -264,7 +265,7 @@ def _cutlass_backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor | None
     """torch._grouped_mm's backward formulas, so bf16 gradients match it bitwise."""
     mat_a, mat_b, offs = ctx.saved_tensors
     a_column_major, b_column_major = ctx.column_major
-    op = torch.ops.miles_grouped_gemm.grouped_mm
+    op = partial(torch.ops.miles_grouped_gemm.grouped_mm, allow_tf32=ctx.allow_tf32)
     # The kernel rejects broadcast (stride-0) gradients such as ones_like(...).expand.
     grad = grad.contiguous()
     grad_a = grad_b = None
@@ -272,10 +273,12 @@ def _cutlass_backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor | None
         grad_a = op(mat_b, grad.mT, offs).mT if a_column_major else op(grad, mat_b.mT, offs)
     if ctx.needs_input_grad[1]:
         grad_b = op(grad.mT, mat_a, offs).mT if b_column_major else op(mat_a.mT, grad, offs)
-    return grad_a, grad_b, None
+    return grad_a, grad_b, None, None
 
 
-def _cutlass_fake(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+def _cutlass_fake(
+    mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, allow_tf32: bool = False
+) -> torch.Tensor:
     if mat_a.ndim == 2 and mat_b.ndim == 2:
         return mat_a.new_empty(len(offs), mat_a.shape[0], mat_b.shape[1])
     if mat_a.ndim == 2:
@@ -291,8 +294,12 @@ if miles_grouped_gemm is not None:
 def _grouped_mm(x: torch.Tensor, weights: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
     # torch._grouped_mm runs CUTLASS only for bf16 and otherwise loops cuBLAS per group, which is not invariant.
     if x.is_cuda:
-        return torch.ops.miles_grouped_gemm.grouped_mm(x, weights.transpose(-2, -1), offsets)
+        return torch.ops.miles_grouped_gemm.grouped_mm(x, weights.transpose(-2, -1), offsets, _allow_tf32())
     return torch._grouped_mm(x, weights.transpose(-2, -1), offsets)
+
+
+def _allow_tf32() -> bool:
+    return torch.get_float32_matmul_precision() != "highest"
 
 
 def _group_offsets(sizes: Sequence[int], device: torch.device) -> torch.Tensor:
@@ -302,15 +309,15 @@ def _group_offsets(sizes: Sequence[int], device: torch.device) -> torch.Tensor:
 def _verify_grouped_mm(x: torch.Tensor, weights: torch.Tensor) -> None:
     """Fail closed unless one group's fwd, dgrad and wgrad ignore the other groups."""
     out_features, in_features = weights.shape[1:]
-    key = (x.device, x.dtype, out_features, in_features)
+    key = (x.device, x.dtype, out_features, in_features, x.dtype == torch.float32 and _allow_tf32())
     if key in _verified_gemms:
         return
     if x.is_cuda and (
         miles_grouped_gemm is None
-        or x.dtype not in (torch.bfloat16, torch.float16)
-        or torch.cuda.get_device_capability(x.device)[0] not in (9, 10)
+        or x.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+        or torch.cuda.get_device_capability(x.device)[0] not in (8, 9, 10, 12)
     ):
-        raise RuntimeError(f"{OPTION} needs the miles_grouped_gemm extension with bf16 or fp16 on sm90/sm100")
+        raise RuntimeError(f"{OPTION} needs the miles_grouped_gemm extension on sm80, sm90, sm100 or sm120")
     generator = torch.Generator(device=x.device).manual_seed(0)
 
     def randn(*shape: int) -> torch.Tensor:
