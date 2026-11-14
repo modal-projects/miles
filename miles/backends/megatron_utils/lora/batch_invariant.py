@@ -292,7 +292,13 @@ def _verify_grouped_mm(x: torch.Tensor, weights: torch.Tensor) -> None:
         return output[own], grad_x[own], grad_w[slot]
 
     solo = run((), (), 0)
-    for before, after, slack in (((3000, 0), (64,), 127), ((1,), (0, 6000), 0), ((), (511,), 31)):
+    # The kernel picks smaller tiles when rows per group <= 128; the empty groups cover that switch.
+    for before, after, slack in (
+        ((3000, 0), (64,), 127),
+        ((1,), (0, 6000), 0),
+        ((), (511,), 31),
+        ((0,) * 4, (0,) * 3, 0),
+    ):
         if not all(torch.equal(a, b) for a, b in zip(solo, run(before, after, slack), strict=True)):
             raise RuntimeError(
                 f"torch._grouped_mm is not batch-invariant for {in_features}->{out_features} {x.dtype} "
