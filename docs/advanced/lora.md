@@ -60,6 +60,20 @@ model-specific to Inkling and Inkling-Small. Generalized model-provider support
 is under development in open [PR #1792](https://github.com/radixark/miles/pull/1792)
 and is not released on `main`.
 
+### Fixed per-adapter GEMM shapes
+
+`--lora-batch-invariant` keeps dense multi-LoRA projections and the frozen output
+head at each adapter's solo-padded GEMM shape. It is off by default and requires
+`--deterministic-mode`, BF16, THD packing, zero attention/hidden/LoRA dropout,
+and a single initialized rank. Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` before
+starting the trainer. Exclude the output head from LoRA targets.
+
+The option rejects TP, CP, PP, MoE, MTP, trainable output heads, and overlapping
+work units. It does not replace deterministic attention, change loss
+normalization, or make different microbatch splits and accumulation orders
+equivalent. Padding work can increase; both head forward and backward execution
+use per-adapter shapes. End-to-end GPU validation of this integration is pending.
+
 ## Validated models and recipes
 
 The table distinguishes CI-tested configurations from maintained recipes or
