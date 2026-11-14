@@ -1,4 +1,4 @@
-"""Fixed per-adapter GEMM shapes for dense single-rank multi-LoRA."""
+"""Batch-invariant GEMMs for dense single-rank multi-LoRA."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from argparse import Namespace
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import cached_property, wraps
+from functools import partial, wraps
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -34,10 +34,6 @@ class Partition:
     counts: tuple[int, ...]
     real_rows: int
     total_rows: int
-
-    @cached_property
-    def tail_slot(self) -> int:
-        return next((i for i, (span, n) in enumerate(zip(self.spans, self.counts, strict=True)) if n > span.rows), -1)
 
 
 @dataclass
@@ -127,13 +123,12 @@ def partition(
 _LIB = "miles_bi_lora"
 
 
-def _layout_args(layout: Partition) -> tuple[list[int], list[int], list[int], int, int]:
+def _layout_args(layout: Partition) -> tuple[list[int], list[int], list[int], int]:
     return (
         [span.start for span in layout.spans],
         [span.rows for span in layout.spans],
         [span.padded_rows for span in layout.spans],
         layout.real_rows,
-        layout.tail_slot,
     )
 
 
@@ -176,78 +171,6 @@ def _pack(x: torch.Tensor, starts: Sequence[int], rows: Sequence[int], padded: S
     return packed
 
 
-@torch.library.custom_op(f"{_LIB}::dense_mm", mutates_args=())
-def _dense_mm_op(
-    x: torch.Tensor,
-    weights: torch.Tensor,
-    starts: list[int],
-    rows: list[int],
-    padded: list[int],
-    real_rows: int,
-    tail_slot: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    offsets = _offsets(padded)
-    xp = _pack(x, starts, rows, padded)
-    # Padded rows spill into the next span, which overwrites them afterwards.
-    y = x.new_empty((len(x) + _slack(rows, padded), weights.shape[1]))
-    for slot, (start, n, p, offset) in enumerate(zip(starts, rows, padded, offsets, strict=False)):
-        if n:
-            _mm_out(xp[offset : offset + p], weights[slot].t(), y[start : start + p])
-    if real_rows < len(x):
-        _mm_out(x[real_rows:], weights[tail_slot].t(), y[real_rows : len(x)])
-    return y[: len(x)], xp
-
-
-@_dense_mm_op.register_fake
-def _(x, weights, starts, rows, padded, real_rows, tail_slot):
-    return x.new_empty((len(x), weights.shape[1])), x.new_empty((sum(padded), x.shape[1]))
-
-
-@torch.library.custom_op(f"{_LIB}::dense_mm_backward", mutates_args=())
-def _dense_mm_backward_op(
-    gy: torch.Tensor,
-    xp: torch.Tensor,
-    weights: torch.Tensor,
-    starts: list[int],
-    rows: list[int],
-    padded: list[int],
-    real_rows: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    offsets = _offsets(padded)
-    total = len(gy)
-    gyp = _pack(gy, starts, rows, padded)
-    gx = xp.new_empty((total + _slack(rows, padded), xp.shape[1]))
-    gw = torch.zeros_like(weights)
-    for slot, (start, n, p, offset) in enumerate(zip(starts, rows, padded, offsets, strict=False)):
-        if n:
-            g = gyp[offset : offset + p]
-            _mm_out(g, weights[slot], gx[start : start + p])
-            torch.mm(g.t(), xp[offset : offset + p], out=gw[slot])
-    gx[real_rows:total].zero_()
-    return gx[:total], gw, _any_nonzero(gy[real_rows:])
-
-
-@_dense_mm_backward_op.register_fake
-def _(gy, xp, weights, starts, rows, padded, real_rows):
-    return gy.new_empty((len(gy), xp.shape[1])), torch.empty_like(weights), gy.new_empty((), dtype=torch.bool)
-
-
-def _dense_setup(ctx, inputs, output) -> None:
-    _, weights, starts, rows, padded, real_rows, _ = inputs
-    ctx.save_for_backward(output[1], weights)
-    ctx.layout = (starts, rows, padded, real_rows)
-
-
-def _dense_backward(ctx, gy: torch.Tensor, _gxp: torch.Tensor | None):
-    xp, weights = ctx.saved_tensors
-    gx, gw, bad = _dense_mm_backward_op(gy.contiguous(), xp, weights, *ctx.layout)
-    _record_padding_grad(bad)
-    return gx, gw, None, None, None, None, None
-
-
-_dense_mm_op.register_autograd(_dense_backward, setup_context=_dense_setup)
-
-
 @torch.library.custom_op(f"{_LIB}::frozen_head", mutates_args=())
 def _frozen_head_op(
     x: torch.Tensor,
@@ -256,7 +179,6 @@ def _frozen_head_op(
     rows: list[int],
     padded: list[int],
     real_rows: int,
-    tail_slot: int,
 ) -> torch.Tensor:
     offsets = _offsets(padded)
     xp = _pack(x, starts, rows, padded)
@@ -271,7 +193,7 @@ def _frozen_head_op(
 
 
 @_frozen_head_op.register_fake
-def _(x, weight, starts, rows, padded, real_rows, tail_slot):
+def _(x, weight, starts, rows, padded, real_rows):
     return x.new_empty((len(x), weight.shape[0]))
 
 
@@ -304,7 +226,7 @@ def _(gy, weight, starts, rows, padded, real_rows):
 
 
 def _head_setup(ctx, inputs, output) -> None:
-    _, weight, starts, rows, padded, real_rows, _ = inputs
+    _, weight, starts, rows, padded, real_rows = inputs
     ctx.save_for_backward(weight)
     ctx.layout = (starts, rows, padded, real_rows)
 
@@ -313,18 +235,93 @@ def _head_backward(ctx, gy: torch.Tensor):
     (weight,) = ctx.saved_tensors
     gx, bad = _frozen_head_backward_op(gy.contiguous(), weight, *ctx.layout)
     _record_padding_grad(bad)
-    return gx, None, None, None, None, None, None
+    return gx, None, None, None, None, None
 
 
 _frozen_head_op.register_autograd(_head_backward, setup_context=_head_setup)
 
 
-def dense_mm(x: torch.Tensor, weights: torch.Tensor, layout: Partition) -> torch.Tensor:
+_verified_gemms: set[tuple[object, ...]] = set()
+
+
+def _grouped_mm(x: torch.Tensor, weights: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    return torch._grouped_mm(x, weights.transpose(-2, -1), offsets)
+
+
+def _group_offsets(sizes: Sequence[int], device: torch.device) -> torch.Tensor:
+    return torch.tensor(sizes, device=device).cumsum(0, dtype=torch.int32)
+
+
+def _verify_grouped_mm(x: torch.Tensor, weights: torch.Tensor) -> None:
+    """Fail closed unless one group's fwd, dgrad and wgrad ignore the other groups."""
+    out_features, in_features = weights.shape[1:]
+    key = (x.device, x.dtype, out_features, in_features)
+    if key in _verified_gemms:
+        return
+    generator = torch.Generator(device=x.device).manual_seed(0)
+
+    def randn(*shape: int) -> torch.Tensor:
+        return torch.randn(shape, generator=generator, device=x.device, dtype=x.dtype)
+
+    rows = 257
+    own_x, own_w, own_gy = randn(rows, in_features), randn(out_features, in_features), randn(rows, out_features)
+
+    def run(before: tuple[int, ...], after: tuple[int, ...], slack: int) -> tuple[torch.Tensor, ...]:
+        sizes = (*before, rows + slack, *after)
+        start, slot = sum(before), len(before)
+        inputs = torch.cat((randn(start, in_features), own_x, randn(slack + sum(after), in_features)))
+        weights = torch.stack([own_w if i == slot else randn(out_features, in_features) for i in range(len(sizes))])
+        # Padding rows carry zero upstream gradient, as the frozen head enforces.
+        grad = torch.cat(
+            (
+                randn(start, out_features),
+                own_gy,
+                own_gy.new_zeros(slack, out_features),
+                randn(sum(after), out_features),
+            )
+        )
+        with torch.enable_grad():
+            inputs.requires_grad_(True)
+            weights.requires_grad_(True)
+            output = _grouped_mm(inputs, weights, _group_offsets(sizes, x.device))
+            grad_x, grad_w = torch.autograd.grad(output, (inputs, weights), grad)
+        own = slice(start, start + rows)
+        return output[own], grad_x[own], grad_w[slot]
+
+    solo = run((), (), 0)
+    for before, after, slack in (((3000, 0), (64,), 127), ((1,), (0, 6000), 0), ((), (511,), 31)):
+        if not all(torch.equal(a, b) for a, b in zip(solo, run(before, after, slack), strict=True)):
+            raise RuntimeError(
+                f"torch._grouped_mm is not batch-invariant for {in_features}->{out_features} {x.dtype} "
+                f"on {x.device}; disable {OPTION}"
+            )
+    _verified_gemms.add(key)
+
+
+def _check_dense_grad(grad: torch.Tensor, *, real_rows: int) -> torch.Tensor:
+    _record_padding_grad(_any_nonzero(grad[real_rows:]))
+    # The grouped-GEMM backward rejects broadcast gradients.
+    return grad.contiguous()
+
+
+def dense_mm(
+    x: torch.Tensor,
+    weights: torch.Tensor,
+    layout: Partition,
+    offsets: torch.Tensor | None = None,
+) -> torch.Tensor:
     if x.ndim != 2 or weights.ndim != 3:
         raise ValueError("Expected flat THD inputs and stacked dense LoRA weights")
     if len(x) != layout.total_rows or len(weights) != len(layout.spans):
         raise ValueError("LoRA shapes disagree with the batch partition")
-    return _dense_mm_op(x.contiguous(), weights.contiguous(), *_layout_args(layout))[0]
+    _verify_grouped_mm(x, weights)
+    if offsets is None:
+        offsets = _group_offsets(layout.counts, x.device)
+    # Per-group grouped-GEMM tiling does not depend on the other groups, so no solo padding is needed.
+    output = _grouped_mm(x, weights, offsets)
+    if output.requires_grad:
+        output.register_hook(partial(_check_dense_grad, real_rows=layout.real_rows))
+    return output
 
 
 def frozen_head_mm(x: torch.Tensor, weight: torch.Tensor, layout: Partition) -> torch.Tensor:
@@ -408,6 +405,8 @@ def install(
     expected = ("x", "stacked_weights", "token_splits", "offsets")
     if tuple(inspect.signature(layers._dense_multi_lora_mm).parameters) != expected:
         raise RuntimeError("Unsupported Megatron-Bridge dense LoRA signature")
+    if not hasattr(torch, "_grouped_mm"):
+        raise RuntimeError("Batch-invariant LoRA requires torch._grouped_mm")
     heads = [m for chunk in models for n, m in chunk.named_modules() if n.rsplit(".", 1)[-1] == "output_layer"]
     if len(heads) != 1 or any(p.requires_grad for p in heads[0].parameters()):
         raise ValueError("Batch-invariant LoRA requires one frozen output layer")
@@ -431,7 +430,7 @@ def install(
                 return original(x, stacked_weights, token_splits=token_splits, offsets=offsets)
             if unit.partition is None or tuple(token_splits) != unit.partition.counts:
                 raise ValueError("LoRA rows disagree with the active partition")
-            return dense_mm(x, stacked_weights, unit.partition)
+            return dense_mm(x, stacked_weights, unit.partition, offsets)
 
         setattr(mm, _MARKER, True)
         layers._dense_multi_lora_mm = mm
