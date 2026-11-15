@@ -43,7 +43,18 @@ void grouped_mm_fp32_sm9x(
     }
     return;
   }
-  TORCH_CHECK(a_row_major && !b_row_major, "sm90 tf32 grouped_mm needs K-major operands");
+  if (!a_row_major && b_row_major) {
+    // MN-major operands (a ragged K). With small tiles the sm80 kernel is faster than transposing B in shared memory.
+    if (use_small_tiles(mat_a, mat_b, offs)) {
+      grouped_mm_sm80(mat_a, mat_b, offs, out, allow_tf32);
+      return;
+    }
+    // B is transposed in shared memory 128 bytes of K at a time, so K per tile is 32.
+    grouped_gemm_impl<tfloat32_t, float, Sm90, false, true, Sm90Cooperative, cute::_128, cute::_256, cute::_32>(
+        mat_a, mat_b, offs, out);
+    return;
+  }
+  TORCH_CHECK(a_row_major && !b_row_major, "sm90 tf32 grouped_mm needs K-major or MN-major operands");
   if (use_small_tiles(mat_a, mat_b, offs)) {
     grouped_gemm_impl<tfloat32_t, float, Sm90, true, false, Sm90Pingpong, cute::_64, cute::_128, cute::_64>(
         mat_a, mat_b, offs, out);

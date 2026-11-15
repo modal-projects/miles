@@ -106,13 +106,11 @@ at::Tensor grouped_mm_cuda(const at::Tensor& mat_a_in, const at::Tensor& mat_b_i
               "grouped_mm needs an sm80, sm90, sm100 or sm120 GPU, got compute capability major ", major);
   const bool ragged_k = mat_a.dim() == 2 && mat_b.dim() == 2;
   const bool sm90_tf32 = major == 9 && dtype == at::kFloat;
-  // sm90 TF32 wgmma reads only K-major operands, which a ragged K would need copied per group, so there a ragged K
-  // runs on the sm80 kernel.
-  const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32) || (sm90_tf32 && ragged_k);
+  const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32);
   if (ragged_k && (sm80_kernel || dtype == at::kFloat)) {
-    // Both kernels take K-strided operands with 16-byte leading dimensions as they are, and run whole K tiles from
-    // each group's start with only the last one masked, so zero rows appended to a group keep every sum bitwise
-    // unchanged.
+    // The sm80, sm90 TF32 and sm100 TF32 kernels take K-strided operands with 16-byte leading dimensions as they
+    // are, and run whole K tiles from each group's start with only the last one masked (TMA zero-fills past the
+    // group's end), so zero rows appended to a group keep every sum bitwise unchanged.
     auto aligned = [](const at::Tensor& t, int64_t ld) {
       return ld * t.element_size() % 16 == 0 && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0;
     };

@@ -23,6 +23,8 @@
 #include <cutlass/numeric_types.h>
 #include <cutlass/util/packed_stride.hpp>
 
+#include "cutlass_ext/sm90_array_rs_transpose_b.h"
+
 namespace miles_grouped_gemm {
 
 using Strides = std::array<int64_t, 3>;
@@ -156,6 +158,37 @@ inline int round_up_to_nearest_multiple(int a, int b) {
   return (a + b - 1) / b * b;
 }
 
+// sm90 TF32 with an MN-major A and B (a ragged K): the builder picks a mainloop with no ptr-array support for that, so
+// take its tile parameters and swap in the ptr-array version.
+template <typename Builder, typename StrideA, typename StrideB, typename KernelSchedule>
+struct Sm90TransposeBMainloop {
+  using Base = typename Builder::CollectiveOp;
+  using type = cutlass::gemm::collective::CollectiveMma<
+      cutlass::gemm::MainloopSm90ArrayTmaGmmaRmemATransposeB<
+          Base::DispatchPolicy::Stages,
+          typename Base::DispatchPolicy::ClusterShape,
+          KernelSchedule>,
+      typename Base::TileShape,
+      typename Base::ElementA,
+      StrideA,
+      typename Base::ElementB,
+      StrideB,
+      typename Base::TiledMma,
+      typename Base::GmemTiledCopyA,
+      typename Base::SmemLayoutAtomA,
+      typename Base::SmemCopyAtomA,
+      typename Base::TransformA,
+      typename Base::GmemTiledCopyB,
+      typename Base::SmemLayoutAtomB,
+      typename Base::SmemCopyAtomB,
+      typename Base::TransformB>;
+};
+
+template <typename Builder>
+struct BuiltMainloop {
+  using type = typename Builder::CollectiveOp;
+};
+
 template <
     typename DtypeIn,
     typename DtypeOut,
@@ -196,7 +229,29 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
       EpilogueSchedule,
       cutlass::epilogue::fusion::LinearCombination<DtypeOut, DtypeAccum>>::CollectiveOp;
 
-  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+  constexpr bool transpose_b = std::is_same_v<ArchTag, cutlass::arch::Sm90> && sizeof(DtypeIn) == 4 && !a_row_major &&
+      b_row_major;
+  // The non-ptr-array kernel schedule, for the tile parameters only; the ptr-array mainloop also keeps its two
+  // tensormaps in shared memory.
+  using TransposeBBuilder = cutlass::gemm::collective::CollectiveBuilder<
+      ArchTag,
+      cutlass::arch::OpClassTensorOp,
+      DtypeIn,
+      LayoutA,
+      AlignmentIn,
+      DtypeIn,
+      LayoutB,
+      AlignmentIn,
+      DtypeAccum,
+      TileShape,
+      ClusterShape,
+      cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+          sizeof(typename CollectiveEpilogue::SharedStorage) + 2 * sizeof(cute::TmaDescriptor))>,
+      std::conditional_t<
+          std::is_same_v<KernelSchedule, cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative>,
+          cutlass::gemm::KernelTmaWarpSpecializedCooperative,
+          cutlass::gemm::KernelTmaWarpSpecializedPingpong>>;
+  using Builder = cutlass::gemm::collective::CollectiveBuilder<
       ArchTag,
       cutlass::arch::OpClassTensorOp,
       DtypeIn,
@@ -210,7 +265,15 @@ void grouped_gemm_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
       ClusterShape,
       cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
           sizeof(typename CollectiveEpilogue::SharedStorage))>,
-      KernelSchedule>::CollectiveOp;
+      KernelSchedule>;
+  using CollectiveMainloop = typename std::conditional_t<
+      transpose_b,
+      Sm90TransposeBMainloop<
+          TransposeBBuilder,
+          cutlass::detail::TagToStrideA_t<LayoutA*>,
+          cutlass::detail::TagToStrideB_t<LayoutB*>,
+          KernelSchedule>,
+      BuiltMainloop<Builder>>::type;
 
   using GemmKernelBase = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop, CollectiveEpilogue>;
   using GemmKernel = std::conditional_t<
@@ -355,8 +418,8 @@ void dispatch_on_layout(const at::Tensor& mat_a, const at::Tensor& mat_b, const 
 
 void grouped_mm_bf16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
 void grouped_mm_fp16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
-// TF32. On sm90 the operands must be row-major A and column-major B (K-major), the only layout TF32 wgmma reads;
-// sm100 reads any layout.
+// TF32. sm90 takes row-major A with column-major B (K-major), or column-major A with row-major B (MN-major, a
+// ragged K), which it transposes in shared memory; sm100 reads any layout.
 void grouped_mm_fp32_sm9x(
     const at::Tensor& mat_a,
     const at::Tensor& mat_b,
