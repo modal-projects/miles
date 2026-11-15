@@ -429,8 +429,17 @@ def _frozen_gemm(x: torch.Tensor, mat_b: torch.Tensor) -> torch.Tensor:
     return torch.ops.miles_grouped_gemm.grouped_mm(x, mat_b, offsets, False).contiguous()
 
 
+def _te_reference_gemm() -> Callable[..., Any] | None:
+    try:
+        from transformer_engine.pytorch.cpp_extensions import gemm
+    except ImportError:
+        return None
+    return gemm.general_gemm
+
+
 def _te_gemm(original: Callable[..., Any]) -> Callable[..., Any]:
-    signature = inspect.signature(original)
+    # Megatron's --batch-invariant-mode replaces general_gemm with a (*args, **kwargs) wrapper of the same API.
+    signature = inspect.signature(_te_reference_gemm() or original)
     if not set(_TE_GEMM_PARAMS) <= set(signature.parameters):
         raise RuntimeError("Unsupported Transformer Engine general_gemm signature")
 
@@ -455,6 +464,7 @@ def _te_gemm(original: Callable[..., Any]) -> Callable[..., Any]:
             or p["bias"] is not None
             or p["ub"] is not None
             or p["alpha"] != 1.0
+            or p.get("beta") is not None
         ):
             raise RuntimeError(f"{OPTION} supports only plain BF16/FP16 frozen Transformer Engine GEMMs")
         # TE computes B @ op(A)^T: "TN" is fprop with A the [out, in] weight, "NN" is dgrad.

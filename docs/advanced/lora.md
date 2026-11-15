@@ -66,7 +66,9 @@ and is not released on `main`.
 `miles_grouped_gemm` extension and keeps the frozen output head at each adapter's
 solo-padded GEMM shape. Frozen Transformer Engine base linears run on the same
 extension with one group, because cuBLAS picks split-K kernels by row count and a
-small adapter's rows change bits once other adapters are packed beside them. It
+small adapter's rows change bits once other adapters are packed beside them.
+This composes with Megatron's `--batch-invariant-mode`, whose Triton GEMM is about
+3x slower than this path for the base linears on H100 and B200. It
 is off by default and requires
 `--deterministic-mode`, `--attention-backend flash`, BF16/FP16, THD packing, zero attention/hidden/LoRA dropout,
 and a single initialized rank. Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` before
