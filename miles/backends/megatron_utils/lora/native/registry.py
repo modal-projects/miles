@@ -87,9 +87,11 @@ def _kimi_k3_arch_spec() -> LoRAArchSpec:
         attention=attention,
         mlp=SplitGateUpMLPSpec(),
         experts=GroupedExpertsSpec(),
-        # the routed-expert down-proj may be omitted: its EP-shared w2_lora_B dominates adapter growth (#1559)
+        # the routed-expert down-proj may be omitted: its EP-shared w2_lora_B dominates adapter growth (#1559);
+        # multi-LoRA omits every routed-expert projection, since its slots cover only the other projections
         fixed_targets=FixedTargets(
-            serving=_shared_outer_serving_targets, optional=frozenset({"block_sparse_moe.experts.*.w2"})
+            serving=_shared_outer_serving_targets,
+            optional=frozenset(f"block_sparse_moe.experts.*.{leaf}" for leaf in ("w1", "w2", "w3")),
         ),
     )
 
