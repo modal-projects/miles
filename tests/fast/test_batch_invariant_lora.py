@@ -213,6 +213,7 @@ def test_option_and_topology_are_validated_before_model_start(
         fp16=False,
         qkv_format="thd",
         allgather_cp=False,
+        attention_backend=SimpleNamespace(name="flash"),
         lora_dropout=0.0,
         attention_dropout=0.0,
         hidden_dropout=0.0,
@@ -229,6 +230,7 @@ def test_option_and_topology_are_validated_before_model_start(
         ("lora_dropout", 0.1),
         ("deterministic_mode", False),
         ("qkv_format", "bshd"),
+        ("attention_backend", SimpleNamespace(name="auto")),
     ):
         changed = SimpleNamespace(**{**vars(args), key: bad})
         with pytest.raises(ValueError):

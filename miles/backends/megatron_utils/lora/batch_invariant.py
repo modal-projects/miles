@@ -69,6 +69,9 @@ def validate_args(args: Namespace | SimpleNamespace) -> None:
     for name in ("lora_dropout", "attention_dropout", "hidden_dropout"):
         if getattr(args, name, None) != 0:
             raise ValueError(f"{OPTION} requires {name}=0")
+    # TE's flash backend is invariant on sm90 and sm100; its cuDNN backend cannot run deterministically on sm90.
+    if getattr(args.attention_backend, "name", args.attention_backend) != "flash":
+        raise ValueError(f"{OPTION} requires --attention-backend flash")
     if args.enable_mtp_training or getattr(args, "num_experts", None):
         raise ValueError(f"{OPTION} does not support MTP or MoE")
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") not in {":4096:8", ":16:8"}:

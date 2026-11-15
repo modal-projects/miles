@@ -68,7 +68,7 @@ solo-padded GEMM shape. Frozen Transformer Engine base linears run on the same
 extension with one group, because cuBLAS picks split-K kernels by row count and a
 small adapter's rows change bits once other adapters are packed beside them. It
 is off by default and requires
-`--deterministic-mode`, BF16/FP16, THD packing, zero attention/hidden/LoRA dropout,
+`--deterministic-mode`, `--attention-backend flash`, BF16/FP16, THD packing, zero attention/hidden/LoRA dropout,
 and a single initialized rank. Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` before
 starting the trainer. Exclude the output head from LoRA targets.
 
