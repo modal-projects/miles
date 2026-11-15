@@ -6,6 +6,8 @@
 #include <cutlass/gemm/device/gemm_grouped.h>
 #include <cutlass/gemm/kernel/default_gemm_grouped.h>
 
+#include "cutlass_ext/residual_last_mma.h"
+
 namespace miles_grouped_gemm {
 namespace {
 
@@ -71,7 +73,8 @@ template <
     typename ThreadblockShape,
     typename WarpShape,
     typename InstructionShape,
-    int Stages>
+    int Stages,
+    bool ragged_k = false>
 void sm80_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out) {
   constexpr int AlignmentIn = 16 / sizeof(ElementIn);
   constexpr int AlignmentOut = 16 / sizeof(ElementOut);
@@ -98,7 +101,13 @@ void sm80_impl(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tenso
       Stages,
       cutlass::gemm::kernel::GroupScheduleMode::kDeviceOnly,
       MathOp>::GemmKernel;
-  using Gemm = cutlass::gemm::device::GemmGrouped<GemmKernel>;
+  using LastTileKernel = cutlass::gemm::kernel::GemmGrouped<
+      typename WithLastTileResidue<typename GemmKernel::Mma>::type,
+      typename GemmKernel::Epilogue,
+      typename GemmKernel::ThreadblockSwizzle,
+      cutlass::gemm::kernel::GroupScheduleMode::kDeviceOnly,
+      GemmKernel::kTransposed>;
+  using Gemm = cutlass::gemm::device::GemmGrouped<std::conditional_t<ragged_k, LastTileKernel, GemmKernel>>;
 
   int32_t M = mat_a.size(-2);
   int32_t N = mat_b.size(-1);
@@ -180,7 +189,11 @@ template <typename ElementIn, typename MathOp, typename Tile, typename Warp, typ
 void sm80_dispatch(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out) {
   const bool a_row_major = mat_a.stride(-1) == 1;
   const bool b_row_major = mat_b.stride(-1) == 1;
-  if (a_row_major && !b_row_major) {
+  if (mat_a.dim() == 2 && mat_b.dim() == 2) {
+    TORCH_CHECK(!a_row_major && b_row_major, "grouped_mm sm80 kernel needs K-strided operands for a ragged K");
+    sm80_impl<ElementIn, ElementIn, false, true, MathOp, Tile, Warp, Instruction, Stages, true>(
+        mat_a, mat_b, offs, out);
+  } else if (a_row_major && !b_row_major) {
     sm80_impl<ElementIn, ElementIn, true, false, MathOp, Tile, Warp, Instruction, Stages>(mat_a, mat_b, offs, out);
   } else if (a_row_major) {
     sm80_impl<ElementIn, ElementIn, true, true, MathOp, Tile, Warp, Instruction, Stages>(mat_a, mat_b, offs, out);

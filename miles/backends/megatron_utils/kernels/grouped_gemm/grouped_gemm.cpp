@@ -149,11 +149,17 @@ at::Tensor grouped_mm_cuda(const at::Tensor& mat_a_in, const at::Tensor& mat_b_i
               "grouped_mm needs an sm80, sm90, sm100 or sm120 GPU, got compute capability major ", major);
   const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32);
   if (mat_a.dim() == 2 && mat_b.dim() == 2 && (sm80_kernel || dtype == at::kFloat)) {
-    // The sm80 mainloop runs the partial K tile first, so zero rows appended to a group would shift every tile and
-    // change its sums; padding each group to whole K tiles (64 rows covers every config) keeps the order fixed. The
-    // TMA tf32 kernels instead need each group to start on 16 bytes along a contiguous K.
+    // The sm80 kernel takes K-strided operands with 16-byte leading dimensions as they are; any other layout is
+    // gathered into that form. Its mainloop masks only the last K tile, so zero rows appended to a group keep every
+    // sum bitwise unchanged. The TMA tf32 kernels instead need each group to start on 16 bytes along a contiguous K.
     if (sm80_kernel) {
-      std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 64, /*k_major=*/false);
+      auto aligned = [](const at::Tensor& t, int64_t ld) {
+        return ld * t.element_size() % 16 == 0 && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0;
+      };
+      if (!(mat_a.stride(-2) == 1 && mat_b.stride(-1) == 1 && aligned(mat_a, mat_a.stride(-1)) &&
+            aligned(mat_b, mat_b.stride(-2)))) {
+        std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 1, /*k_major=*/false);
+      }
     } else {
       std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 16 / mat_a.element_size(), /*k_major=*/true);
     }
