@@ -6,8 +6,6 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 
-#include <tuple>
-
 namespace miles_grouped_gemm {
 
 void grouped_mm_bf16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
@@ -66,8 +64,8 @@ at::Tensor make_output(const at::Tensor& mat_a, const at::Tensor& mat_b, const a
   return at::empty_strided(size, stride, mat_a.options());
 }
 
-// Copy with K contiguous and the leading dimension padded to 16 bytes.
-at::Tensor k_major_copy(const at::Tensor& t, bool row_major) {
+// Row- or column-major copy with the leading dimension padded to 16 bytes.
+at::Tensor aligned_copy(const at::Tensor& t, bool row_major) {
   const int64_t d = t.dim();
   const int64_t align = 16 / t.element_size();
   const int64_t inner_dim = row_major ? d - 1 : d - 2;
@@ -82,47 +80,6 @@ at::Tensor k_major_copy(const at::Tensor& t, bool row_major) {
   at::Tensor out = at::empty_strided(t.sizes(), strides, t.options());
   out.copy_(t);
   return out;
-}
-
-// With K contiguous, a K-ragged group must start and end on 16 bytes. Copies each group into its own zero-padded slot
-// of a multiple of `align` rows; the padding depends only on the group's own size, so it is the same solo and packed.
-// Rows past offs[-1] go beyond every slot.
-std::tuple<at::Tensor, at::Tensor, at::Tensor> pad_k_groups(
-    const at::Tensor& mat_a,
-    const at::Tensor& mat_b,
-    const at::Tensor& offs,
-    int64_t align,
-    bool k_major) {
-  const int64_t total = mat_a.size(1);
-  const int64_t groups = offs.size(0);
-  at::Tensor ends = offs.to(at::kLong);
-  at::Tensor starts = at::cat({at::zeros({1}, ends.options()), ends.slice(0, 0, groups - 1)});
-  at::Tensor padded_ends = ((ends - starts + align - 1).div(align, "floor") * align).cumsum(0);
-  at::Tensor padded_starts = at::cat({at::zeros({1}, ends.options()), padded_ends.slice(0, 0, groups - 1)});
-  const int64_t width = (total + groups * (align - 1) + align - 1) / align * align;
-  // Each padded K row is gathered from its source row; padding rows read row 0 and are zeroed.
-  at::Tensor rows = at::arange(width, ends.options());
-  at::Tensor group = at::searchsorted(padded_ends, rows, /*out_int32=*/false, /*right=*/true).clamp_max_(groups - 1);
-  at::Tensor src = rows - padded_starts.index_select(0, group) + starts.index_select(0, group);
-  at::Tensor pad = src.ge(ends.index_select(0, group)).unsqueeze(1);
-  src.masked_fill_(pad.squeeze(1), 0);
-  // (K, M) and (K, N) with M and N contiguous and their leading dimensions padded to 16 bytes.
-  auto gather = [&](const at::Tensor& k_rows) {
-    const int64_t cols = k_rows.size(1);
-    const int64_t elems = 16 / k_rows.element_size();
-    const int64_t ld = (cols + elems - 1) / elems * elems;
-    at::Tensor gathered = k_rows.index_select(0, src).masked_fill_(pad, 0);
-    if (ld == cols) {
-      return gathered;
-    }
-    return at::zeros({width, ld}, gathered.options()).narrow(1, 0, cols).copy_(gathered);
-  };
-  at::Tensor a = gather(mat_a.mT());
-  at::Tensor b = gather(mat_b);
-  if (k_major) {
-    return {a.mT().contiguous(), b.mT().contiguous().mT(), padded_ends.to(at::kInt)};
-  }
-  return {a.mT(), b, padded_ends.to(at::kInt)};
 }
 
 at::Tensor grouped_mm_cuda(const at::Tensor& mat_a_in, const at::Tensor& mat_b_in, const at::Tensor& offs_in, bool allow_tf32) {
@@ -147,34 +104,36 @@ at::Tensor grouped_mm_cuda(const at::Tensor& mat_a_in, const at::Tensor& mat_b_i
   const int major = at::cuda::getCurrentDeviceProperties()->major;
   TORCH_CHECK(major == 8 || major == 9 || major == 10 || major == 12,
               "grouped_mm needs an sm80, sm90, sm100 or sm120 GPU, got compute capability major ", major);
-  const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32);
-  if (mat_a.dim() == 2 && mat_b.dim() == 2 && (sm80_kernel || dtype == at::kFloat)) {
-    // The sm80 kernel takes K-strided operands with 16-byte leading dimensions as they are; any other layout is
-    // gathered into that form. Its mainloop masks only the last K tile, so zero rows appended to a group keep every
-    // sum bitwise unchanged. The TMA tf32 kernels instead need each group to start on 16 bytes along a contiguous K.
-    if (sm80_kernel) {
-      auto aligned = [](const at::Tensor& t, int64_t ld) {
-        return ld * t.element_size() % 16 == 0 && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0;
-      };
-      if (!(mat_a.stride(-2) == 1 && mat_b.stride(-1) == 1 && aligned(mat_a, mat_a.stride(-1)) &&
-            aligned(mat_b, mat_b.stride(-2)))) {
-        std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 1, /*k_major=*/false);
-      }
-    } else {
-      std::tie(mat_a, mat_b, offs) = pad_k_groups(mat_a, mat_b, offs, 16 / mat_a.element_size(), /*k_major=*/true);
+  const bool ragged_k = mat_a.dim() == 2 && mat_b.dim() == 2;
+  const bool sm90_tf32 = major == 9 && dtype == at::kFloat;
+  // sm90 TF32 wgmma reads only K-major operands, which a ragged K would need copied per group, so there a ragged K
+  // runs on the sm80 kernel.
+  const bool sm80_kernel = major == 8 || major == 12 || (dtype == at::kFloat && !allow_tf32) || (sm90_tf32 && ragged_k);
+  if (ragged_k && (sm80_kernel || dtype == at::kFloat)) {
+    // Both kernels take K-strided operands with 16-byte leading dimensions as they are, and run whole K tiles from
+    // each group's start with only the last one masked, so zero rows appended to a group keep every sum bitwise
+    // unchanged.
+    auto aligned = [](const at::Tensor& t, int64_t ld) {
+      return ld * t.element_size() % 16 == 0 && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0;
+    };
+    if (mat_a.stride(-2) != 1 || !aligned(mat_a, mat_a.stride(-1))) {
+      mat_a = aligned_copy(mat_a, /*row_major=*/false);
+    }
+    if (mat_b.stride(-1) != 1 || !aligned(mat_b, mat_b.stride(-2))) {
+      mat_b = aligned_copy(mat_b, /*row_major=*/true);
     }
   } else if (sm80_kernel) {
     // Column-major mat_a with column-major mat_b has no sm80 instantiation.
     if (mat_a.stride(-1) != 1 && mat_b.stride(-1) != 1) {
-      mat_a = k_major_copy(mat_a, /*row_major=*/true);
+      mat_a = aligned_copy(mat_a, /*row_major=*/true);
     }
-  } else if (dtype == at::kFloat) {
-    // The TMA tf32 kernels read only K-major operands (row-major A, column-major B).
+  } else if (sm90_tf32) {
+    // Row-major A and column-major B.
     if (mat_a.stride(-1) != 1) {
-      mat_a = k_major_copy(mat_a, /*row_major=*/true);
+      mat_a = aligned_copy(mat_a, /*row_major=*/true);
     }
     if (mat_b.stride(-2) != 1) {
-      mat_b = k_major_copy(mat_b, /*row_major=*/false);
+      mat_b = aligned_copy(mat_b, /*row_major=*/false);
     }
   }
   check_strides(mat_a);

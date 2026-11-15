@@ -355,7 +355,8 @@ void dispatch_on_layout(const at::Tensor& mat_a, const at::Tensor& mat_b, const 
 
 void grouped_mm_bf16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
 void grouped_mm_fp16(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::Tensor& offs, at::Tensor& out);
-// fp32 operands must be row-major A and column-major B (K-major), the only layout TF32 wgmma reads.
+// TF32. On sm90 the operands must be row-major A and column-major B (K-major), the only layout TF32 wgmma reads;
+// sm100 reads any layout.
 void grouped_mm_fp32_sm9x(
     const at::Tensor& mat_a,
     const at::Tensor& mat_b,
