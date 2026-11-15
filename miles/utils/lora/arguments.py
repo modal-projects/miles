@@ -111,7 +111,10 @@ def add_lora_arguments(parser):
         "--lora-batch-invariant",
         action="store_true",
         default=False,
-        help="Use per-adapter padded GEMM shapes for dense single-rank BF16 multi-LoRA with a frozen output head.",
+        help=(
+            "Make dense single-rank multi-LoRA batch-invariant: LoRA projections and frozen base linears run on the "
+            "miles_grouped_gemm extension, and the frozen output head on per-adapter padded shapes."
+        ),
     )
     parser.add_argument(
         "--check-lora-weight-equal",
