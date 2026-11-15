@@ -315,3 +315,36 @@ def test_cutlass_grouped_mm_matches_torch_and_is_invariant(dtype: torch.dtype) -
         expected = torch._grouped_mm(x, w.transpose(-2, -1), offs)
         assert torch.equal(invariant._grouped_mm(x, w, offs), expected)
     invariant._verify_grouped_mm(x, w)
+
+
+def _fake_general_gemm(
+    A,
+    B,
+    out_dtype=None,
+    quantization_params=None,
+    gelu=False,
+    alpha=1.0,
+    accumulate=False,
+    layout="TN",
+    out=None,
+    bias=None,
+    ub=None,
+):
+    return "cublas", None, None, None
+
+
+def test_frozen_te_gemm_passes_through_outside_work_units_and_wgrad(monkeypatch: pytest.MonkeyPatch) -> None:
+    gemm = invariant._te_gemm(_fake_general_gemm)
+    a, b = torch.randn(4, 8, dtype=torch.bfloat16), torch.randn(3, 8, dtype=torch.bfloat16)
+    assert gemm(a, b)[0] == "cublas"
+    monkeypatch.setattr(invariant, "_active_unit", invariant._WorkUnit())
+    assert gemm(a, b, layout="NT")[0] == "cublas"
+    with pytest.raises(RuntimeError, match="frozen Transformer Engine GEMMs"):
+        gemm(a, b, quantization_params=object())
+    with pytest.raises(RuntimeError, match="frozen Transformer Engine GEMMs"):
+        gemm(a.float(), b.float())
+
+
+def test_frozen_te_gemm_rejects_changed_signature() -> None:
+    with pytest.raises(RuntimeError, match="general_gemm signature"):
+        invariant._te_gemm(lambda A, B: None)

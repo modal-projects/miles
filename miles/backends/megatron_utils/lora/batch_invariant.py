@@ -394,6 +394,77 @@ def frozen_head_mm(x: torch.Tensor, weight: torch.Tensor, layout: Partition) -> 
     return _frozen_head_op(x.contiguous(), weight, *_layout_args(layout))
 
 
+# Rejects Transformer Engine's quantized tensor subclasses.
+_PLAIN_TENSORS = (torch.Tensor, torch.nn.Parameter)
+_TE_GEMM_PARAMS = (
+    "A",
+    "B",
+    "out_dtype",
+    "quantization_params",
+    "gelu",
+    "alpha",
+    "accumulate",
+    "layout",
+    "out",
+    "bias",
+    "ub",
+)
+
+
+def _te_gemm_modules() -> tuple[ModuleType, ...]:
+    try:
+        from transformer_engine.pytorch.module import layernorm_linear, linear
+    except ImportError:
+        return ()
+    return linear, layernorm_linear
+
+
+def _frozen_gemm(x: torch.Tensor, mat_b: torch.Tensor) -> torch.Tensor:
+    # One group: the grouped kernel never splits K and its tile choice leaves every row's sum unchanged, while
+    # cuBLAS picks split-K kernels by M, so a small batch's rows change bits once other rows are packed beside it.
+    offsets = torch.tensor([len(x)], device=x.device, dtype=torch.int32)
+    return torch.ops.miles_grouped_gemm.grouped_mm(x, mat_b, offsets, False).contiguous()
+
+
+def _te_gemm(original: Callable[..., Any]) -> Callable[..., Any]:
+    signature = inspect.signature(original)
+    if not set(_TE_GEMM_PARAMS) <= set(signature.parameters):
+        raise RuntimeError("Unsupported Transformer Engine general_gemm signature")
+
+    @wraps(original)
+    def general_gemm(*args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        p = bound.arguments
+        # Wgrad ("NT") only runs for trainable weights, which the frozen base does not have.
+        if _active_unit is None or p["layout"] == "NT":
+            return original(*args, **kwargs)
+        a, b = p["A"], p["B"]
+        if (
+            type(a) not in _PLAIN_TENSORS
+            or type(b) not in _PLAIN_TENSORS
+            or a.dtype != b.dtype
+            or a.dtype not in (torch.bfloat16, torch.float16)
+            or p["out_dtype"] not in (None, a.dtype)
+            or p["quantization_params"] is not None
+            or p["gelu"]
+            or p["accumulate"]
+            or p["bias"] is not None
+            or p["ub"] is not None
+            or p["alpha"] != 1.0
+        ):
+            raise RuntimeError(f"{OPTION} supports only plain BF16/FP16 frozen Transformer Engine GEMMs")
+        # TE computes B @ op(A)^T: "TN" is fprop with A the [out, in] weight, "NN" is dgrad.
+        mat_b = a.t() if p["layout"] == "TN" else a
+        out = _frozen_gemm(b.reshape(-1, b.shape[-1]), mat_b.unsqueeze(0)).view(*b.shape[:-1], mat_b.shape[1])
+        if p["out"] is not None:
+            p["out"].copy_(out)
+            out = p["out"]
+        return out, None, None, None
+
+    return general_gemm
+
+
 def _head_forward(head: torch.nn.Module) -> Callable[..., tuple[torch.Tensor, None]]:
     original = head.forward
 
@@ -462,6 +533,7 @@ def install(
     models: Sequence[torch.nn.Module],
     *,
     layers: ModuleType | SimpleNamespace | None = None,
+    te_gemm_modules: Sequence[ModuleType | SimpleNamespace] | None = None,
 ) -> None:
     if not dist.is_initialized() or dist.get_world_size() != 1:
         raise ValueError("Batch-invariant LoRA requires one initialized rank")
@@ -500,6 +572,12 @@ def install(
 
         setattr(mm, _MARKER, True)
         layers._dense_multi_lora_mm = mm
+    # Frozen base linears run at the packed row count, which picks cuBLAS kernels by M.
+    for module in _te_gemm_modules() if te_gemm_modules is None else te_gemm_modules:
+        if not getattr(module.general_gemm, _MARKER, False):
+            gemm = _te_gemm(module.general_gemm)
+            setattr(gemm, _MARKER, True)
+            module.general_gemm = gemm
     head = heads[0]
     if not getattr(head.forward, _MARKER, False):
         forward = _head_forward(head)
