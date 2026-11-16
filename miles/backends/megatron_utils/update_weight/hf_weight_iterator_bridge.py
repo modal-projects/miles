@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._adapter_export_cpu = False
 
         bridge_checkpoint = _select_bridge_checkpoint(self.args)
         self._bridge = megatron_bridge_utils.load_auto_bridge(bridge_checkpoint)
@@ -35,6 +36,16 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
         # all use SGLang's model namespace.
         self._remap_hf_name = _load_checkpoint_name_remap(bridge_checkpoint)
         self._export_dtypes = None
+
+    def materialize_adapter(self, adapter, *, materialize=True):
+        # Disk snapshots need CPU tensors. Stage each converted tensor before
+        # the exporter builds its full list; copying the final list is too late.
+        previous = self._adapter_export_cpu
+        self._adapter_export_cpu = True
+        try:
+            return super().materialize_adapter(adapter, materialize=materialize)
+        finally:
+            self._adapter_export_cpu = previous
 
     def _iter_hf_param_units(self, weights, *, materialize):
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in weights.items()}
@@ -103,7 +114,10 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
         return [(h, slice_lora_to_rank(h, w, adapter.rank)) for h, w in named_tensors]
 
     def _export_current_adapter(self) -> list:
-        return list(self.iter_current_adapter())
+        return [
+            (name, tensor.detach().to("cpu", copy=True) if self._adapter_export_cpu else tensor)
+            for name, tensor in self.iter_current_adapter()
+        ]
 
     def iter_current_adapter(self):
         """The exposed adapter's HF-named tensors, TP/EP gathered; Bridge broadcasts every PP stage's adapters to all stages."""
