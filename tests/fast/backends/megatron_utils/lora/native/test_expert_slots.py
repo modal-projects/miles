@@ -50,7 +50,7 @@ def test_expert_major_forward_and_gradients_match_per_token_reference(monkeypatc
     )
     adapter = NativeMultiLoRAExpertAdapter([build() for _ in counts], context)
     for slot in range(3):
-        adapter.init_slot(slot, slot + 1, 2 * (slot + 1))
+        adapter.init_slot(slot, slot + 1, 6)
         with torch.no_grad():
             for name, parameter in adapter.adapters[slot].named_parameters():
                 if name.endswith("_B"):
@@ -74,7 +74,7 @@ def test_expert_major_forward_and_gradients_match_per_token_reference(monkeypatc
             delta = b @ (single.w2_A[expert] @ row)
         else:
             delta = torch.cat([b[expert] @ ((a if shared_outer else a[expert]) @ row) for _, a, b in single.factors()])
-        expected.append(2 * delta)
+        expected.append((6 / (slot + 1)) * delta)
     reference = torch.stack(expected) if expected else actual.new_empty(actual.shape)
     torch.testing.assert_close(actual, reference)
     actual.sum().backward()
