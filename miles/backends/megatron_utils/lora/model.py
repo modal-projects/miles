@@ -64,10 +64,12 @@ def optim_step(
     return step_slot_optimizers(stepped, adam_params_by_slot)
 
 
-def load_slot(args: Namespace, model: Sequence[DDP], slot: int, rank: int, alpha: float) -> SlotOptimizer:
+def load_slot(
+    args: Namespace, model: Sequence[DDP], slot: int, rank: int, alpha: float, seed: int | None = None
+) -> SlotOptimizer:
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot
 
-    init_adapter_slot(model, slot, rank=rank, alpha=alpha)
+    init_adapter_slot(model, slot, rank=rank, alpha=alpha, seed=seed)
     slot_optimizer = SlotOptimizer(args, model, slot)
     slot_optimizer.zero_grads()
     return slot_optimizer
