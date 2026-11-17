@@ -64,7 +64,9 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
         return result
 
     @with_logs
-    def load_slot(self, slot: int, rank: int, alpha: float, source: dict | None = None) -> dict | None:
+    def load_slot(
+        self, slot: int, rank: int, alpha: float, source: dict | None = None, seed: int | None = None
+    ) -> dict | None:
         """``source``: ``path``, ``load_optimizer`` and the source's ``parametrization_fields``; None starts the slot
         fresh. A source the slot cannot take is refused before the slot changes, as a user error."""
         if source is not None:
@@ -83,7 +85,9 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
                 return {"error": mismatch, "error_category": "user"}
             # load_state lands in the slot create_model claimed; it is claimed again at the source's alpha
             lora_model.unload_slot(self.adapter_slots, self.slot_optimizers.pop(slot))
-        self.slot_optimizers[slot] = lora_model.load_slot(self.args, self.model, self.adapter_slots, slot, rank, alpha)
+        self.slot_optimizers[slot] = lora_model.load_slot(
+            self.args, self.model, self.adapter_slots, slot, rank, alpha, seed=None if source is not None else seed
+        )
         if source is not None:
             lora_checkpoint.load_slot(
                 self.model,
