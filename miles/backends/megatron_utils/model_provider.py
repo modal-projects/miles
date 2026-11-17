@@ -21,6 +21,7 @@ from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.args.runtime import TrainerConfig
 from miles.utils.audit_utils.witness.module import install_witness
 from miles.utils.function_registry import load_function
+from miles.utils.hf_utils.config import load_hf_config
 from miles.utils.megatron_bridge_utils import load_auto_bridge
 from miles.utils.replay_base import routing_replay_manager
 
@@ -192,6 +193,16 @@ def get_model_provider_func(
             return model
 
         return wrapped_model_provider
+
+    if (
+        args.megatron_to_hf_mode == "raw"
+        and args.hf_checkpoint is not None
+        and load_hf_config(args.hf_checkpoint).model_type == "nemotron_h"
+    ):
+        # The hybrid stack imports Mamba's CUDA kernels, absent from CPU-only argument parsing.
+        from miles_plugins.models.nemotron_h.model import get_model_provider
+
+        return get_model_provider(args)
 
     if args.megatron_to_hf_mode == "bridge":
         bridge = load_auto_bridge(args.hf_checkpoint)
