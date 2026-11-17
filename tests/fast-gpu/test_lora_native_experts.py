@@ -5,6 +5,7 @@
 
 import os
 from datetime import timedelta
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -13,11 +14,13 @@ from megatron.core.distributed.finalize_model_grads import _update_router_expert
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+from megatron.core.transformer.moe.moe_utils import permute, unpermute
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.ci.ci_register import register_cuda_ci
 from tests.fast.backends.megatron_utils.lora.native.naming_stub import FixedPrefixNaming
 from torch.utils.checkpoint import checkpoint
 
+from mbridge.core.parallel_states import ParallelStates
 from miles.backends.megatron_utils.lora.native.checkpoint import NativeAdapterSlots
 from miles.backends.megatron_utils.lora.native.config import LoRAConfig
 from miles.backends.megatron_utils.lora.native.hf_adapter import export_lora_hf_named
@@ -27,10 +30,11 @@ from miles.backends.megatron_utils.lora.native.modules.linear import (
     iter_slot_adapters,
 )
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
-from miles.backends.megatron_utils.lora.native.spec.moe import HFGroupedExpertsSpec
+from miles.backends.megatron_utils.lora.native.spec.moe import HFGroupedExpertsSpec, NemotronExpertsSpec
 from miles.backends.megatron_utils.lora.utils import freeze_router_bias
 from miles.utils.distributed_utils import init_gloo_group
 from miles.utils.lora.hf_lora_targets import HfLoraTargets
+from miles_plugins.mbridge.nemotron_h import NemotronHBridge
 
 register_cuda_ci(
     est_time=180,
@@ -41,8 +45,48 @@ register_cuda_ci(
 )
 
 
-class _UngatedExpertsSpec(HFGroupedExpertsSpec):
-    gate_up_hf_leaves = ("up_proj",)
+def _check_nano_permutation_precision():
+    hf = SimpleNamespace(
+        num_hidden_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        intermediate_size=64,
+        attention_dropout=0.0,
+        hidden_dropout=0.0,
+        layer_norm_epsilon=1e-5,
+        mlp_hidden_act="relu2",
+        tie_word_embeddings=False,
+        mamba_head_dim=16,
+        mamba_num_heads=8,
+        n_groups=2,
+        ssm_state_size=8,
+        n_routed_experts=6,
+        moe_intermediate_size=64,
+        moe_shared_expert_intermediate_size=64,
+        num_experts_per_tok=6,
+        routed_scaling_factor=1.0,
+        n_group=1,
+        topk_group=1,
+        hybrid_override_pattern="ME",
+    )
+    config = NemotronHBridge(hf, parallel_states=ParallelStates(vpp_size=None)).config
+    counts, width = 1024, 64
+    routing = torch.ones(counts, 6, device="cuda", dtype=torch.bool)
+    coefficients = torch.tensor([256.0, 1.0, -256.0, 256.0, 1.0, -256.0], device="cuda", dtype=torch.bfloat16)
+    values = coefficients.repeat_interleave(counts).unsqueeze(1).expand(-1, width).contiguous()
+    expected = torch.full((counts, width), 2.0, device="cuda", dtype=torch.bfloat16)
+    for _ in range(8):
+        tokens = torch.zeros_like(expected, requires_grad=True)
+        dispatched, _, indices, _, _ = permute(
+            tokens, routing, num_out_tokens=counts * 6, accumulate_in_fp32=config.moe_permute_accumulation_in_fp32
+        )
+        (dispatched.float() * values.float()).sum().backward()
+        torch.testing.assert_close(tokens.grad, expected, rtol=0, atol=0)
+        combined = unpermute(
+            values, indices, expected.shape, accumulate_in_fp32=config.moe_permute_accumulation_in_fp32
+        )
+        torch.testing.assert_close(combined, expected, rtol=0, atol=0)
 
 
 def _case(gated, shared_outer):
@@ -91,9 +135,9 @@ def _case(gated, shared_outer):
         transformer_config=config,
         tp_size=2,
         tp_rank=parallel_state.get_tensor_model_parallel_rank(),
-        naming=FixedPrefixNaming("model.layers.0.mlp.experts."),
+        naming=FixedPrefixNaming("backbone.layers.0.mixer.experts."),
     )
-    expert_spec = HFGroupedExpertsSpec() if gated else _UngatedExpertsSpec()
+    expert_spec = HFGroupedExpertsSpec() if gated else NemotronExpertsSpec()
     assert expert_spec.attach(mlp, None, context) == 2
     assert_every_adapter_slotted([mlp])
     wrappers = list(iter_multi_lora_adapters([mlp]))
@@ -142,7 +186,7 @@ def _case(gated, shared_outer):
     targets = HfLoraTargets(
         attention=(),
         mlp=tuple(
-            f"model.layers.*.mlp.experts.{leaf}"
+            f"backbone.layers.*.mixer.experts.{leaf}"
             for leaf in (("gate_up_proj", "down_proj") if gated else ("*.up_proj", "*.down_proj"))
         ),
         unembed=("lm_head",),
@@ -167,6 +211,7 @@ if __name__ == "__main__":
         tensor_model_parallel_size=2, expert_model_parallel_size=2, expert_tensor_parallel_size=1
     )
     model_parallel_cuda_manual_seed(1234)
+    _check_nano_permutation_precision()
     for gated in (True, False):
         for shared_outer in (False, True):
             _case(gated, shared_outer)
