@@ -47,6 +47,17 @@ def test_nemotron_hf_names_cover_mamba_and_ungated_experts(name, expected):
     assert hf_weight_names(name) == [expected]
 
 
+def test_nemotron_accepts_transformers_packed_expert_parameters():
+    modules = ["model.layers.1.mixer.experts.up_proj", "model.layers.1.mixer.experts.down_proj"]
+    assert resolve_adapter_targets(
+        {"model_type": "nemotron_h"},
+        ["up_proj", "down_proj"],
+        hf_modules=modules,
+        lora_type="canonical_lora",
+        experts_shared_outer_loras=False,
+    ) == ["up_proj", "down_proj"]
+
+
 @pytest.mark.parametrize("shared_outer", [False, True])
 def test_nemotron_targets_include_routed_and_shared_up_down_without_a_gate(shared_outer):
     prefix = "backbone.layers.*.mixer."

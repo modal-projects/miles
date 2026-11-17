@@ -143,7 +143,7 @@ class PackedGroupedExpertsSpec(GroupedExpertsSpec):
 class NemotronExpertsSpec(GroupedExpertsSpec):
     gate_up_hf_leaves = ("up_proj",)
     down_hf_leaf = "down_proj"
-    hf_block_pattern = r"mixer\.experts\.(?:\d+|\*)"
+    hf_block_pattern = r"mixer\.experts(?:\.(?:\d+|\*))?"
 
 
 class HFGroupedExpertsSpec(GroupedExpertsSpec):
