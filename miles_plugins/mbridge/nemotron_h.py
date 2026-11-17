@@ -40,6 +40,7 @@ class NemotronHBridge(Qwen2Bridge):
             moe_router_dtype="fp32",
             moe_router_pre_softmax=True,
             moe_grouped_gemm=True,
+            moe_permute_accumulation_in_fp32=True,
             moe_aux_loss_coeff=0.0,
             moe_router_bias_update_rate=0.0,
             moe_shared_expert_overlap=False,
