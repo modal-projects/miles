@@ -91,9 +91,17 @@ def _resolve_attach_context(args, transformer_config, arch_spec: LoRAArchSpec) -
 
 
 def _attach_layer(layer: nn.Module, arch_spec: LoRAArchSpec, context: AttachContext) -> int:
+    if arch_spec.has_mamba_layers and not hasattr(
+        layer, "self_attention"
+    ):  # config-access-exempt: Mamba layers expose a mixer instead of self_attention
+        return 0
     attention = layer.self_attention
     # Hybrid GDN mixer layers have no fused qkv; any other miss means the registry disagrees with the model.
-    assert arch_spec.has_linear_attention_layers or arch_spec.attention.applies_to(attention), (
+    assert (
+        arch_spec.has_mamba_layers
+        or arch_spec.has_linear_attention_layers
+        or arch_spec.attention.applies_to(attention)
+    ), (
         f"native LoRA's {arch_spec.name} spec does not apply to layer {layer.layer_number - 1}'s "
         f"{type(attention).__name__}; the built attention module does not match the registered architecture."
     )

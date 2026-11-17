@@ -242,6 +242,7 @@ class LayoutSpec:
     """
 
     name: str = ""
+    gated_linear_unit: bool = True
     layout: ModuleLayout = ModuleLayout(name="empty")
 
     @property

@@ -21,6 +21,34 @@ def _fc1_inter_local(mlp: nn.Module, _context: AttachContext) -> int:
     return mlp.linear_fc1.weight.shape[0] // 2
 
 
+class UngatedMLPSpec(LayoutSpec):
+    """Nemotron-H's up/down MLP, including its always-on shared experts."""
+
+    name = "ungated_mlp"
+    gated_linear_unit = False
+    hf_block_pattern = r"mixer(?:\.shared_experts)?"
+    layout = ModuleLayout(
+        name="ungated_mlp",
+        present_when_attr="linear_fc1",
+        singles=(
+            ProjectionBinding(
+                projection=ProjectionSpec("up_proj", "up", ShardLayout.COLUMN),
+                module_attr="linear_fc1",
+                in_dim=L.hidden_size,
+                out_dim=L.host_out_local("linear_fc1"),
+                adapter_attr="lora_fc1_adapter",
+            ),
+            ProjectionBinding(
+                projection=ProjectionSpec("down_proj", "down", ShardLayout.ROW),
+                module_attr="linear_fc2",
+                in_dim=L.host_out_local("linear_fc1"),
+                out_dim=L.hidden_size,
+                adapter_attr="lora_fc2_adapter",
+            ),
+        ),
+    )
+
+
 def _build_split_fc1(
     mlp: nn.Module,
     hf_prefix: str,

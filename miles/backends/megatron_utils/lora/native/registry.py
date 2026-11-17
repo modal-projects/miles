@@ -17,6 +17,7 @@ from miles.backends.megatron_utils.lora.native.spec.attention import (
     InklingAttentionSpec,
     KimiK3AttentionSpec,
     MLAAttentionSpec,
+    NemotronAttentionSpec,
 )
 from miles.backends.megatron_utils.lora.native.spec.base import FixedTargets, LoRAArchSpec
 from miles.backends.megatron_utils.lora.native.spec.gdn import Qwen35GDNSpec
@@ -26,11 +27,13 @@ from miles.backends.megatron_utils.lora.native.spec.mlp import (
     DeepSeekV4SharedExpertSpec,
     FusedGateUpMLPSpec,
     SplitGateUpMLPSpec,
+    UngatedMLPSpec,
 )
 from miles.backends.megatron_utils.lora.native.spec.moe import (
     DeepSeekV4ExpertsSpec,
     GroupedExpertsSpec,
     HFGroupedExpertsSpec,
+    NemotronExpertsSpec,
     PackedGroupedExpertsSpec,
 )
 from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
@@ -147,6 +150,14 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
     )
     inkling = _inkling_arch_spec()
     return {
+        "nemotron_h": LoRAArchSpec(
+            name="nemotron_h",
+            attention=NemotronAttentionSpec(),
+            mlp=UngatedMLPSpec(),
+            experts=NemotronExpertsSpec(),
+            lm_head=_LM_HEAD,
+            has_mamba_layers=True,
+        ),
         "llama": gqa,
         "qwen2": gqa,
         "qwen3": gqa,
@@ -235,7 +246,8 @@ def resolve_adapter_targets(
         f"{' ...' if len(unattachable) > 8 else ''}. Select supported projections (e.g. "
         f"--target-modules {attention_target_modules_csv(hf_config)}) or use --megatron-to-hf-mode bridge."
     )
-    _assert_shared_expert_up_proj_has_gate_proj(selected or hf_targets)
+    if spec.mlp.gated_linear_unit:
+        _assert_shared_expert_up_proj_has_gate_proj(selected or hf_targets)
     served = (
         hf_targets
         if spec.linear_attention is None
