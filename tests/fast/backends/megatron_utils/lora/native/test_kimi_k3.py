@@ -166,7 +166,9 @@ def test_export_names_and_shapes_match_sglang(include_fc2):
     targets = resolve_hf_lora_targets(_k3_hf_config())
     if not include_fc2:
         targets = [target for target in targets if not target.endswith(".experts.*.w2")]
-    exported = dict(export_lora_hf_named(iter_adapters([_model(leaves=("w1", "w3", "w2") if include_fc2 else ("w1", "w3"))])))
+    exported = dict(
+        export_lora_hf_named(iter_adapters([_model(leaves=("w1", "w3", "w2") if include_fc2 else ("w1", "w3"))]))
+    )
 
     served = _resolve(targets)
     for module in get_adapter_target_modules(exported):
@@ -361,7 +363,7 @@ def test_the_routed_experts_are_optional():
 
 @pytest.mark.parametrize("leaf", ["w1", "w3"])
 def test_routed_expert_gate_and_up_are_adapted_together(leaf):
-    with pytest.raises(AssertionError, match="w1 and w3 together"):
+    with pytest.raises(AssertionError, match="select the expert gate and up projections together"):
         _model(leaves=(leaf,))
 
 
@@ -424,14 +426,11 @@ def test_kda_o_proj_delta_stays_a_partial_sum(monkeypatch):
     torch.testing.assert_close(output, inputs @ (weight + scale * lora_b @ lora_a).t())
 
 
-def test_slots_wrap_every_dense_host_and_leave_the_grouped_experts_outside():
-    """The specs' own attach builds slot modules; the grouped experts have none, which a multi-LoRA attach refuses."""
-    model = _model(num_slots=3)
+def test_slots_wrap_dense_and_shared_hosts_when_routed_experts_are_omitted():
+    model = _model(leaves=(), num_slots=3)
 
     multi_adapters = list(iter_multi_lora_adapters([model]))
     assert {len(multi_adapter.adapters) for multi_adapter in multi_adapters} == {3}
     blocks = {name.rsplit(".", 1)[0] for name, module in model.named_modules() if module in multi_adapters}
     assert {"mla", "dense", "moe.shared_experts"} <= blocks, blocks
-    with pytest.raises(AssertionError, match="sit outside the slots"):
-        assert_every_adapter_slotted([model])
-    assert_every_adapter_slotted([_model(leaves=(), num_slots=3)])
+    assert_every_adapter_slotted([model])
