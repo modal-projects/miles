@@ -88,6 +88,7 @@ class MLPLoRASpec(Protocol):
     """Architecture-specific dense/shared-MLP attachment contract."""
 
     name: str
+    gated_linear_unit: bool
     supported_targets: frozenset[str]
     # regex of the HF blocks (below ``layers.N.``) whose projections this spec adapts
     hf_block_pattern: str
@@ -145,6 +146,7 @@ class LoRAArchSpec:
     experts: ExpertsLoRASpec | None = None
     lm_head: Any = None
     has_linear_attention_layers: bool = False
+    has_mamba_layers: bool = False
     # adapters of the linear-attention mixer layers; None leaves those layers unadapted
     linear_attention: LinearAttentionLoRASpec | None = None
     fixed_targets: FixedTargets | None = None
@@ -187,5 +189,7 @@ class LoRAArchSpec:
         )
 
     def validate(self, context: AttachContext) -> None:
-        assert context.transformer_config.gated_linear_unit, "native LoRA's MLP specs assume a gated (SwiGLU) MLP"
+        assert (
+            context.transformer_config.gated_linear_unit == self.mlp.gated_linear_unit
+        ), f"native LoRA's {self.mlp.name} spec disagrees with the model's gated MLP setting"
         self.attention.validate(context.transformer_config, tp_size=context.tp_size)
