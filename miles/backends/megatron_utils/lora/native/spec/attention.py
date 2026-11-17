@@ -98,6 +98,11 @@ class GQAAttentionSpec(AttentionSpecBase):
         )
 
 
+class NemotronAttentionSpec(GQAAttentionSpec):
+    name = "nemotron_h_attention"
+    layout = dataclasses.replace(GQAAttentionSpec.layout, name=name, hf_block_prefix="mixer.")
+
+
 class MLAAttentionSpec(AttentionSpecBase):
     """Compressed query and key/value projection layout used by DeepSeek/GLM/Kimi."""
 

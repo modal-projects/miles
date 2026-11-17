@@ -63,8 +63,13 @@ same declaration drives attachment, HF export/import, and SGLang serving targets
 The spec is selected from the checkpoint's `model_type`.
 
 Adapters cover attention projections (GQA Q/K/V/O, MLA Q-A/Q-B/KV-A/KV-B/O), dense
-MLPs, and shared experts. Routed experts carry shared-outer adapters on Inkling, Kimi K3
-and Qwen3.5/3.6 MoE; selecting them requires `--experts-shared-outer-loras`. The output head (`lm_head`, the
+MLPs, and shared experts. Grouped routed experts support independent factors per expert,
+or shared hidden-side factors with `--experts-shared-outer-loras`. Native multi-LoRA
+preserves adapter identity through all-to-all expert dispatch; it requires expert TP=1
+and rejects capacity padding. Inkling and Kimi K3 retain their shared-outer contract.
+Nemotron-3 Nano adds split Q/K/V adapters and ungated up/down adapters on routed and
+shared experts; Mamba projections stay frozen. Its raw checkpoint loader and model
+provider use Megatron-Core without Megatron-Bridge PEFT. The output head (`lm_head`, the
 `unembed` group) is adaptable on every family except Kimi K3, GLM-5.3-Flash and DeepSeek-V4.1; on a
 tied-embedding model it gets its own adapter and the input embedding is unchanged, as with official
 Tinker's unembed. A selected head needs `--vocab-size`, and is refused with `--enable-mtp-training` and, on a

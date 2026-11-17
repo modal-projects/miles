@@ -7,6 +7,10 @@ import functools
 import torch
 import torch.nn as nn
 
+from miles.backends.megatron_utils.lora.native.modules.expert_slots import (
+    NativeMultiLoRAExpertAdapter,
+    install_expert_slot_routing,
+)
 from miles.backends.megatron_utils.lora.native.modules.linear import attach_adapter_forward, attach_delta_forward
 from miles.backends.megatron_utils.lora.native.modules.moe import (
     LoRAGroupedFC1,
@@ -53,6 +57,7 @@ class GroupedExpertsSpec:
             is_ep=parallel_state.get_expert_model_parallel_world_size() > 1,
         )
         count = 0
+        slotted = []
         # the adapters take the hosts' compute dtype and logical widths: an MXFP4 host's weight0 is its packed bytes
         reference = torch.empty((), dtype=fc1.params_dtype, device=fc1.weight0.device)
         fc1_prefix = context.naming.block_prefix(layer, fc1.weight0, list(self.gate_up_hf_leaves))
@@ -61,29 +66,37 @@ class GroupedExpertsSpec:
             fc1_selectors = ["gate_up_proj"]
         else:
             fc1_selectors = [f"0.{leaf}" for leaf in self.gate_up_hf_leaves]
+            selected = [context.lora.selects(f"{fc1_prefix}{selector}") for selector in fc1_selectors]
+            assert len(set(selected)) == 1, f"{fc1_prefix}: select the expert gate and up projections together"
         if any(context.lora.selects(f"{fc1_prefix}{selector}") for selector in fc1_selectors):
-            experts.lora_fc1_adapter = LoRAGroupedFC1(
+            build_fc1 = functools.partial(
+                LoRAGroupedFC1,
                 hf_prefix=fc1_prefix,
                 hf_leaves=self.gate_up_hf_leaves,
                 reference=reference,
                 width=fc1.in_features,
                 **common,
             )
+            experts.lora_fc1_adapter = _build_expert_adapter(build_fc1, context, slotted)
             attach_adapter_forward(fc1, experts.lora_fc1_adapter)
             count += 1
         fc2_prefix = context.naming.block_prefix(layer, fc2.weight0, [self.down_hf_leaf])
         fc2_selector = "down_proj" if self.packed_targets else f"0.{self.down_hf_leaf}"
         if context.lora.selects(f"{fc2_prefix}{fc2_selector}"):
-            experts.lora_fc2_adapter = LoRAGroupedFC2(
+            build_fc2 = functools.partial(
+                LoRAGroupedFC2,
                 hf_prefix=fc2_prefix,
                 hf_leaf=self.down_hf_leaf,
                 reference=reference,
                 width=fc2.out_features,
                 **common,
             )
+            experts.lora_fc2_adapter = _build_expert_adapter(build_fc2, context, slotted)
             attach_adapter_forward(fc2, experts.lora_fc2_adapter)
             count += 1
 
+        if slotted:
+            install_expert_slot_routing(mlp, slotted)
         shared = getattr(
             mlp, "shared_experts", None
         )  # absent on MoEs without shared experts  # config-access-exempt: MoE implementations may omit shared experts
@@ -127,5 +140,29 @@ class PackedGroupedExpertsSpec(GroupedExpertsSpec):
     hf_block_pattern = r"mlp\.experts"
 
 
+class NemotronExpertsSpec(GroupedExpertsSpec):
+    gate_up_hf_leaves = ("up_proj",)
+    down_hf_leaf = "down_proj"
+    hf_block_pattern = r"mixer\.experts\.(?:\d+|\*)"
+
+
+class HFGroupedExpertsSpec(GroupedExpertsSpec):
+    gate_up_hf_leaves = ("gate_proj", "up_proj")
+    down_hf_leaf = "down_proj"
+    hf_block_pattern = r"mlp\.experts\.(?:\d+|\*)"
+
+
+class DeepSeekV4ExpertsSpec(GroupedExpertsSpec):
+    hf_block_pattern = r"ffn\.experts\.(?:\d+|\*)"
+
+
 def _sub_expert_delta(delta, index: int, x: torch.Tensor, host: nn.Module, *_host_args) -> torch.Tensor:
     return delta(x, host, index)
+
+
+def _build_expert_adapter(build, context, slotted):
+    if context.lora.num_slots is None:
+        return build()
+    adapter = NativeMultiLoRAExpertAdapter([build() for _ in range(context.lora.num_slots)], context)
+    slotted.append(adapter)
+    return adapter

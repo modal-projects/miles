@@ -25,6 +25,9 @@ HF_MODULES = [f"{LAYER}self_attn.q_proj", f"{LAYER}mlp.experts.gate_up_proj", f"
 class _GroupedLinear(nn.Module):
     def __init__(self, out_features, in_features):
         super().__init__()
+        self.params_dtype = torch.float32
+        self.in_features = in_features
+        self.out_features = out_features
         for index in range(EXPERTS):
             self.register_parameter(f"weight{index}", nn.Parameter(torch.randn(out_features, in_features)))
 
@@ -91,8 +94,7 @@ def _resolve(targets, *, shared_outer):
 
 def test_routed_expert_targets_are_served_shared_outer():
     assert {GATE_UP, DOWN} <= set(_resolve([Q_PROJ, GATE_UP, DOWN], shared_outer=True))
-    with pytest.raises(AssertionError, match="pass --experts-shared-outer-loras"):
-        _resolve([Q_PROJ, GATE_UP, DOWN], shared_outer=False)
+    assert {GATE_UP, DOWN} <= set(_resolve([Q_PROJ, GATE_UP, DOWN], shared_outer=False))
 
 
 def test_attention_only_targets_need_no_expert_layout():

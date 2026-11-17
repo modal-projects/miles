@@ -293,7 +293,16 @@ def _beam_targets(config):
     return attention, tuple(mlp)
 
 
+def _nemotron_h_targets(config):
+    attention = _prefix_paths("mixer", "q_proj", "k_proj", "v_proj", "o_proj")
+    mlp = _prefix_paths("mixer.experts.*", "up_proj", "down_proj")
+    if config["n_shared_experts"]:
+        mlp += _prefix_paths("mixer.shared_experts", "up_proj", "down_proj")
+    return attention, mlp
+
+
 _HF_LORA_MODELS = {
+    "nemotron_h": _HfLoraModelSpec(_nemotron_h_targets, layer_prefix="backbone.layers.*"),
     "llama": _HfLoraModelSpec(_dense_targets),
     "qwen2": _HfLoraModelSpec(_dense_targets),
     # MiMo-7B: a Qwen2 body; its MTP layers sit under model.mtp_layers
