@@ -35,7 +35,7 @@ def _ep_rank() -> int:
 
 
 class LoRAGroupedFC1(NativeLoRAAdapter):
-    """Routed-expert fused gate/up adapter: shared A per branch, per-expert B.
+    """Routed-expert up or fused gate/up adapter, optionally sharing A across experts.
 
     ``width`` is the experts' input width: the hidden size, or a latent MoE's latent size.
     """
@@ -145,7 +145,7 @@ class LoRAGroupedFC1(NativeLoRAAdapter):
 
 
 class LoRAGroupedFC2(NativeLoRAAdapter):
-    """Routed-expert down adapter: per-expert A over the token buffer, shared B of the experts' output ``width``."""
+    """Routed-expert down adapter, optionally sharing B across experts."""
 
     def __init__(
         self,

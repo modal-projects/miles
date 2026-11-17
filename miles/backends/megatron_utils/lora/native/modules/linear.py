@@ -565,7 +565,7 @@ class NativeMultiLoRAAdapter(nn.Module):
     rows and B's columns past its rank at zero, and with them their gradients.
     """
 
-    def __init__(self, adapters: Sequence[PhasedLoRAAdapter], context: AttachContext):
+    def __init__(self, adapters: Sequence[NativeLoRAAdapter], context: AttachContext):
         super().__init__()
         self._validate_adapter_types(adapters)
         self.adapters = nn.ModuleList(adapters)

@@ -21,7 +21,7 @@ from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 
 
 class GroupedExpertsSpec:
-    """Shared-outer routed experts (shared A / per-expert B for gate/up, the reverse for down).
+    """Grouped routed experts with independent factors or shared hidden-side factors.
 
     The adapter widths come from the grouped host weights, so latent MoEs need no extra
     table entry. Shared experts stored as a list of sub-experts get one adapter over all of
