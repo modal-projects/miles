@@ -282,6 +282,17 @@ def _mimo_v2_targets(config):
     return _QKVO_ATTENTION, tuple(mlp)
 
 
+def _beam_targets(config):
+    # The attention output gate is a separate HF projection, fused with q/k/v in Megatron's linear_qkv.
+    attention = _prefix_paths("self_attn", "q_proj", "k_proj", "v_proj", "gate_proj", "o_proj")
+    mlp = []
+    if "dense" in config["mlp_layer_types"]:
+        mlp.extend(_DENSE_MLP)
+    if "sparse" in config["mlp_layer_types"]:
+        mlp.extend(_ROUTED_EXPERTS)
+    return attention, tuple(mlp)
+
+
 _HF_LORA_MODELS = {
     "llama": _HfLoraModelSpec(_dense_targets),
     "qwen2": _HfLoraModelSpec(_dense_targets),
@@ -349,6 +360,7 @@ _HF_LORA_MODELS = {
         _glm5_next_targets, layer_prefix="model.language_model.layers.*", unwrap_text_config=True
     ),
     "mimo_v2": _HfLoraModelSpec(_mimo_v2_targets),
+    "beam": _HfLoraModelSpec(_beam_targets),
     "inkling_text": _HfLoraModelSpec(_inkling_targets, default_train_unembed=True),
     "inkling_model": _HfLoraModelSpec(_inkling_targets, default_train_unembed=True),
     "inkling_mm_model": _HfLoraModelSpec(

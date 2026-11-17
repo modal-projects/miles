@@ -118,7 +118,9 @@ def _validate_multi_lora_moe_support(args: TrainerConfig, provider) -> None:
         "desynchronizes the dispatched token order)."
     )
     # sglang only wraps a fused MoE layer when both expert projections are targeted.
-    served = {target.rsplit(".", 1)[-1] for target in args.hf_lora_targets}
+    served = {
+        target.rsplit(".", 1)[-1] for target in args.hf_lora_targets if target.split(".")[-2:-1] != ["self_attn"]
+    }
     if "gate_up_proj" in served:
         served.update(("gate_proj", "up_proj"))
     expert_pair = {"up_proj", "down_proj"}
