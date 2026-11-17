@@ -27,7 +27,7 @@ from miles.backends.megatron_utils.lora.native.modules.linear import (
     iter_slot_adapters,
 )
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
-from miles.backends.megatron_utils.lora.native.spec.moe import HFGroupedExpertsSpec
+from miles.backends.megatron_utils.lora.native.spec.moe import HFGroupedExpertsSpec, NemotronExpertsSpec
 from miles.backends.megatron_utils.lora.utils import freeze_router_bias
 from miles.utils.distributed_utils import init_gloo_group
 from miles.utils.lora.hf_lora_targets import HfLoraTargets
@@ -39,10 +39,6 @@ register_cuda_ci(
     labels=["lora", "megatron"],
     hardware=["hopper", "blackwell"],
 )
-
-
-class _UngatedExpertsSpec(HFGroupedExpertsSpec):
-    gate_up_hf_leaves = ("up_proj",)
 
 
 def _case(gated, shared_outer):
@@ -91,9 +87,9 @@ def _case(gated, shared_outer):
         transformer_config=config,
         tp_size=2,
         tp_rank=parallel_state.get_tensor_model_parallel_rank(),
-        naming=FixedPrefixNaming("model.layers.0.mlp.experts."),
+        naming=FixedPrefixNaming("backbone.layers.0.mixer.experts."),
     )
-    expert_spec = HFGroupedExpertsSpec() if gated else _UngatedExpertsSpec()
+    expert_spec = HFGroupedExpertsSpec() if gated else NemotronExpertsSpec()
     assert expert_spec.attach(mlp, None, context) == 2
     assert_every_adapter_slotted([mlp])
     wrappers = list(iter_multi_lora_adapters([mlp]))
@@ -142,7 +138,7 @@ def _case(gated, shared_outer):
     targets = HfLoraTargets(
         attention=(),
         mlp=tuple(
-            f"model.layers.*.mlp.experts.{leaf}"
+            f"backbone.layers.*.mixer.experts.{leaf}"
             for leaf in (("gate_up_proj", "down_proj") if gated else ("*.up_proj", "*.down_proj"))
         ),
         unembed=("lm_head",),
