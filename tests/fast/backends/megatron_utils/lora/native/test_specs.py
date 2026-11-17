@@ -102,7 +102,7 @@ class TestResolveAdapterTargets:
         "model_type,target",
         [
             ("qwen3_moe", "model.layers.*.mlp.experts.gate_up_proj"),
-            ("kimi_k2", "model.layers.*.mlp.experts.*.gate_proj"),
+            ("kimi_k2", "model.layers.*.mlp.gate"),
             ("qwen3_next", "model.layers.*.linear_attn.in_proj_qkvz"),
         ],
     )
