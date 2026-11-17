@@ -9,6 +9,7 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
+from megatron.core.distributed.finalize_model_grads import _update_router_expert_bias
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -27,6 +28,7 @@ from miles.backends.megatron_utils.lora.native.modules.linear import (
 )
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 from miles.backends.megatron_utils.lora.native.spec.moe import HFGroupedExpertsSpec, NemotronExpertsSpec
+from miles.backends.megatron_utils.lora.utils import freeze_router_bias
 from miles.utils.distributed_utils import init_gloo_group
 from miles.utils.lora.hf_lora_targets import HfLoraTargets
 
@@ -52,6 +54,9 @@ def _case(gated, shared_outer):
         num_moe_experts=4,
         moe_ffn_hidden_size=64,
         moe_router_topk=2,
+        moe_router_score_function="sigmoid",
+        moe_router_enable_expert_bias=True,
+        moe_router_bias_update_rate=0.01,
         moe_grouped_gemm=True,
         moe_token_dispatcher_type="alltoall",
         moe_permute_fusion=False,
@@ -70,6 +75,11 @@ def _case(gated, shared_outer):
     )
     for parameter in mlp.parameters():
         parameter.requires_grad = False
+    freeze_router_bias([mlp])
+    before_bias = mlp.router.expert_bias.clone()
+    mlp.router.local_tokens_per_expert.copy_(torch.arange(4, device="cuda"))
+    _update_router_expert_bias([mlp], config, None)
+    torch.testing.assert_close(mlp.router.expert_bias, before_bias, rtol=0, atol=0)
     context = AttachContext(
         lora=LoRAConfig(
             rank=32, alpha=32, dropout=0, target_modules=None, num_slots=3, experts_shared_outer_loras=shared_outer
