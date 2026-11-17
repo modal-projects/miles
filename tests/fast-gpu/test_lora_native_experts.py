@@ -17,6 +17,7 @@ from tests.ci.ci_register import register_cuda_ci
 from tests.fast.backends.megatron_utils.lora.native.naming_stub import FixedPrefixNaming
 from torch.utils.checkpoint import checkpoint
 
+from miles.backends.megatron_utils.lora.native.checkpoint import NativeAdapterSlots
 from miles.backends.megatron_utils.lora.native.config import LoRAConfig
 from miles.backends.megatron_utils.lora.native.hf_adapter import export_lora_hf_named
 from miles.backends.megatron_utils.lora.native.modules.linear import (
@@ -26,6 +27,8 @@ from miles.backends.megatron_utils.lora.native.modules.linear import (
 )
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 from miles.backends.megatron_utils.lora.native.spec.moe import HFGroupedExpertsSpec, NemotronExpertsSpec
+from miles.utils.distributed_utils import init_gloo_group
+from miles.utils.lora.hf_lora_targets import HfLoraTargets
 
 register_cuda_ci(
     est_time=180,
@@ -122,12 +125,30 @@ def _case(gated, shared_outer):
             gathered = [torch.empty_like(value) for _ in range(2)]
             dist.all_gather(gathered, value)
             torch.testing.assert_close(gathered[0], gathered[1], rtol=0, atol=0)
+    targets = HfLoraTargets(
+        attention=(),
+        mlp=tuple(
+            f"backbone.layers.*.mixer.experts.{leaf}"
+            for leaf in (("gate_up_proj", "down_proj") if gated else ("*.up_proj", "*.down_proj"))
+        ),
+        unembed=("lm_head",),
+    )
+    slots = NativeAdapterSlots([mlp], None, targets, multi_lora=True)
+    for slot, rank in enumerate((8, 16, 32)):
+        specs = slots.get_local_shard_specs(slot)
+        pieces = slots.local_pieces(slot, slots.slot_parameters(slot))
+        assert len(specs) == len(pieces) > 0
+        for spec, piece in zip(specs, pieces, strict=True):
+            assert tuple(piece.shape) == spec.local_shape
+            rank_axis = -2 if spec.key.endswith(".lora_A") else -1
+            assert spec.global_shape[rank_axis] == rank
     dist.barrier()
 
 
 if __name__ == "__main__":
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl", timeout=timedelta(minutes=5))
+    init_gloo_group()
     parallel_state.initialize_model_parallel(
         tensor_model_parallel_size=2, expert_model_parallel_size=2, expert_tensor_parallel_size=1
     )
