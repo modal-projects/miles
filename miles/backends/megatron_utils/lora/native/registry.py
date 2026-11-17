@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from miles.backends.megatron_utils.lora.native.naming import DeclaredNaming
 from miles.backends.megatron_utils.lora.native.spec.attention import (
@@ -14,6 +14,7 @@ from miles.backends.megatron_utils.lora.native.spec.attention import (
     Glm5NextAttentionSpec,
     GQAAttentionSpec,
     HybridGQAGDNAttentionSpec,
+    Inkling2AttentionSpec,
     InklingAttentionSpec,
     KimiK3AttentionSpec,
     MLAAttentionSpec,
@@ -21,14 +22,14 @@ from miles.backends.megatron_utils.lora.native.spec.attention import (
 from miles.backends.megatron_utils.lora.native.spec.base import FixedTargets, LoRAArchSpec
 from miles.backends.megatron_utils.lora.native.spec.gdn import Qwen35GDNSpec
 from miles.backends.megatron_utils.lora.native.spec.layout import AttentionSpecBase
-from miles.backends.megatron_utils.lora.native.spec.lm_head import InklingLMHeadSpec, LMHeadSpec
+from miles.backends.megatron_utils.lora.native.spec.lm_head import Inkling2LMHeadSpec, InklingLMHeadSpec, LMHeadSpec
 from miles.backends.megatron_utils.lora.native.spec.mlp import (
     DeepSeekV4SharedExpertSpec,
     FusedGateUpMLPSpec,
     SplitGateUpMLPSpec,
 )
 from miles.backends.megatron_utils.lora.native.spec.moe import GroupedExpertsSpec
-from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
+from miles.utils.lora.hf_lora_targets import get_hf_lora_targets, resolve_hf_lora_targets
 from miles.utils.lora.utils import exports_hf_snapshots, matches_lora_target
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,28 @@ def _inkling_arch_spec() -> LoRAArchSpec:
     )
 
 
+def _inkling2_arch_spec() -> LoRAArchSpec:
+    """TML's Inkling schema: attention, shared-outer routed experts and the unembed."""
+    attention = Inkling2AttentionSpec()
+    return LoRAArchSpec(
+        name=attention.name,
+        attention=attention,
+        mlp=FusedGateUpMLPSpec(),
+        experts=GroupedExpertsSpec(),
+        lm_head=Inkling2LMHeadSpec(),
+        declared_naming=DeclaredNaming(
+            "model.llm.layers.", {"self_attention.": "attn.", "mlp.experts.": "mlp.experts."}
+        ),
+        # Explicit targets: SGLang resolves "all-linear" to every supported module plus embed.
+        fixed_targets=FixedTargets(serving=_inkling2_serving_targets, select_all=True),
+    )
+
+
+def _inkling2_serving_targets(targets: list[str]) -> list[str]:
+    """SGLang serves the checkpoint's unembed as its lm_head module."""
+    return ["lm_head" if target == "model.llm.unembed" else target for target in targets]
+
+
 def _kimi_k3_arch_spec() -> LoRAArchSpec:
     attention = KimiK3AttentionSpec()
     return LoRAArchSpec(
@@ -125,6 +148,7 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
         HybridGQAGDNAttentionSpec(), has_linear_attention_layers=True, linear_attention=Qwen35GDNSpec()
     )
     inkling = _inkling_arch_spec()
+    inkling2 = _inkling2_arch_spec()
     return {
         "llama": gqa,
         "qwen2": gqa,
@@ -152,13 +176,15 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
         "inkling_text": inkling,
         "inkling_model": inkling,
         "inkling_mm_model": inkling,
+        "inkling2": inkling2,
+        "inkling2_mm_model": inkling2,
     }
 
 
 MODEL_SPECS: dict[str, LoRAArchSpec] = _build_model_specs()
 
 
-def resolve_config_spec(hf_config: dict) -> tuple[str, LoRAArchSpec]:
+def resolve_config_spec(hf_config: dict, *, hf_targets: list[str] | None = None) -> tuple[str, LoRAArchSpec]:
     """Resolve the spec from the outer or nested text ``model_type`` of an HF config."""
     text_config = hf_config.get("text_config") or {}
     candidates = [
@@ -170,12 +196,23 @@ def resolve_config_spec(hf_config: dict) -> tuple[str, LoRAArchSpec]:
         f"{sorted(MODEL_SPECS)}. Verify the adapter math for this architecture and register it in "
         "miles.backends.megatron_utils.lora.native.registry.MODEL_SPECS, or use --megatron-to-hf-mode bridge."
     )
-    return model_type, MODEL_SPECS[model_type]
+    spec = MODEL_SPECS[model_type]
+    if spec.name == "inkling2" and hf_targets is not None and not any(".experts." in t for t in hf_targets):
+        spec = replace(
+            spec,
+            experts=None,
+            fixed_targets=replace(
+                spec.fixed_targets,
+                optional=frozenset(get_hf_lora_targets(hf_config).mlp),
+                select_all=False,
+            ),
+        )
+    return model_type, spec
 
 
-def resolve_checkpoint_spec(hf_checkpoint: str) -> tuple[str, LoRAArchSpec]:
+def resolve_checkpoint_spec(hf_checkpoint: str, *, hf_targets: list[str] | None = None) -> tuple[str, LoRAArchSpec]:
     with open(os.path.join(hf_checkpoint, "config.json")) as handle:
-        return resolve_config_spec(json.load(handle))
+        return resolve_config_spec(json.load(handle), hf_targets=hf_targets)
 
 
 def resolve_adapter_targets(
@@ -196,7 +233,7 @@ def resolve_adapter_targets(
         f"--lora-type {lora_type} shares one lora_A across each fused projection on bridge. Drop --lora-type, "
         "or use --megatron-to-hf-mode bridge"
     )
-    _model_type, spec = resolve_config_spec(hf_config)
+    _model_type, spec = resolve_config_spec(hf_config, hf_targets=hf_targets)
     assert (
         spec.experts is None or experts_shared_outer_loras
     ), f"native {spec.name} LoRA trains shared-outer expert adapters; pass --experts-shared-outer-loras"
@@ -234,7 +271,12 @@ def validate_native_lora_args(args, hf_modules: list[str]) -> None:
         "native LoRA does not support --overlap-grad-reduce: replicated adapter gradients need a "
         "tensor-parallel sum over the buffer MCore's in-flight data-parallel reduce-scatter writes."
     )
-    _model_type, spec = resolve_checkpoint_spec(args.hf_checkpoint)
+    _model_type, spec = resolve_checkpoint_spec(args.hf_checkpoint, hf_targets=args.hf_lora_targets)
+    if spec.name == "inkling2" and args.multi_lora:
+        assert spec.experts is None, (
+            "Inkling2 multi-LoRA supports attention and unembedding only; "
+            "select --target-modules attn,unembed to keep routed experts frozen"
+        )
     assert (
         spec.experts is None or args.expert_tensor_parallel_size == 1
     ), f"native {spec.name} expert LoRA assumes --expert-tensor-parallel-size 1"
@@ -259,7 +301,11 @@ def _selects_head(spec: LoRAArchSpec, hf_modules: list[str], hf_targets: list[st
 
 def _assert_fixed_target_layout(spec: LoRAArchSpec, hf_config: dict, hf_targets: list[str]) -> None:
     layout = resolve_hf_lora_targets(hf_config)
-    optional = {t for t in layout if any(t.endswith(f".{suffix}") for suffix in spec.fixed_targets.optional)}
+    optional = {
+        t
+        for t in layout
+        if t in spec.fixed_targets.optional or any(t.endswith(f".{suffix}") for suffix in spec.fixed_targets.optional)
+    }
     missing = sorted(set(layout) - set(hf_targets) - optional)
     unexpected = sorted(set(hf_targets) - set(layout))
     assert not (missing or unexpected), (
