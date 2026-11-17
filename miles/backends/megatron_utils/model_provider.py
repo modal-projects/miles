@@ -194,7 +194,11 @@ def get_model_provider_func(
 
         return wrapped_model_provider
 
-    if args.megatron_to_hf_mode == "raw" and load_hf_config(args.hf_checkpoint).model_type == "nemotron_h":
+    if (
+        args.megatron_to_hf_mode == "raw"
+        and args.hf_checkpoint is not None
+        and load_hf_config(args.hf_checkpoint).model_type == "nemotron_h"
+    ):
         # The hybrid stack imports Mamba's CUDA kernels, absent from CPU-only argument parsing.
         from miles_plugins.models.nemotron_h.model import get_model_provider
 
