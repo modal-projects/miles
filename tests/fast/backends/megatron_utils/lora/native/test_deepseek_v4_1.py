@@ -61,7 +61,7 @@ def _layer():
     moe.experts = nn.Module()
     moe.experts.num_local_experts = 2
     moe.experts.linear_fc1 = GroupedLinear(2, 10, HIDDEN)
-    moe.experts.linear_fc2 = GroupedLinear(2, HIDDEN, 5)
+    moe.experts.linear_fc2 = GroupedLinear(2, HIDDEN, 5, partition_dim=1)
     moe.shared_experts = nn.Module()
     moe.shared_experts.linear_fc1 = _Linear(2 * 5, HIDDEN, "column")
     moe.shared_experts.linear_fc2 = _Linear(HIDDEN, 5, "row")

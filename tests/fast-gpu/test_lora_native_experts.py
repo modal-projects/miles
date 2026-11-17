@@ -12,7 +12,6 @@ from megatron.core import parallel_state
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.ci.ci_register import register_cuda_ci
 from tests.fast.backends.megatron_utils.lora.native.naming_stub import FixedPrefixNaming
@@ -63,9 +62,9 @@ def _case(gated, shared_outer):
         use_cpu_initialization=False,
     )
     spec = get_moe_module_spec(use_te=True, num_experts=4, moe_grouped_gemm=True)
-    mlp = build_module(
-        spec, config=config, layer_number=1, pg_collection=ProcessGroupCollection.use_mpu_process_groups()
-    ).to(torch.bfloat16)
+    mlp = spec(config=config, layer_number=1, pg_collection=ProcessGroupCollection.use_mpu_process_groups()).to(
+        torch.bfloat16
+    )
     for parameter in mlp.parameters():
         parameter.requires_grad = False
     context = AttachContext(
