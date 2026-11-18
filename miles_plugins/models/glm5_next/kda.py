@@ -111,35 +111,47 @@ class Glm5NextKDA(nn.Module):
         self.o_norm = FusedRMSNormGated(head_dim, eps=rms_norm_eps, activation="sigmoid")
         self.o_proj = nn.Linear(self.projection_size, hidden_size, bias=False)
 
-    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor):
-        cp_context = build_gdn_cp_context(self, cu_seqlens, hidden_states.device)
-
+    def _project_and_convolve(self, hidden_states, cu_seqlens, cp_context):
         mixed_qkv = torch.cat(
             (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)),
             dim=-1,
         )
-        conv_cu_seqlens = cp_context.cu_seqlens if cp_context is not None else cu_seqlens
-        mixed_qkv = causal_short_conv(
+        return causal_short_conv(
             mixed_qkv,
             self.conv1d.weight[:, 0],
             self.conv1d.activation,
             self.conv1d.backend,
-            cu_seqlens=conv_cu_seqlens,
+            cu_seqlens=cu_seqlens,
             cp_context=cp_context,
         )
-        query, key, value = torch.split(mixed_qkv, [self.projection_size] * 3, dim=-1)
-        query = query.unflatten(-1, (self.num_heads, self.head_dim))
-        key = key.unflatten(-1, (self.num_heads, self.head_dim))
-        value = value.unflatten(-1, (self.num_heads, self.head_dim))
 
-        beta = torch.sigmoid(self.b_proj(hidden_states).float())
+    def _forget_gate(self, hidden_states):
         forget = self.f_b_proj(self.f_a_proj(hidden_states))
-        g = fused_kda_gate(
+        return fused_kda_gate(
             forget.unflatten(-1, (self.num_heads, self.head_dim)),
             self.A_log,
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
         )
+
+    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor):
+        cp_context = build_gdn_cp_context(self, cu_seqlens, hidden_states.device)
+        conv_cu_seqlens = cp_context.cu_seqlens if cp_context is not None else cu_seqlens
+        conv_elements = hidden_states.shape[0] * hidden_states.shape[1] * 3 * self.projection_size
+        if torch.is_grad_enabled() and cp_context is None and conv_elements > INT32_ELEMENTS:
+            # Defer convolution inputs and gate intermediates until after the recurrence backward.
+            mixed_qkv = checkpoint(
+                self._project_and_convolve, hidden_states, conv_cu_seqlens, cp_context, use_reentrant=False
+            )
+            g = checkpoint(self._forget_gate, hidden_states, use_reentrant=False)
+        else:
+            mixed_qkv = self._project_and_convolve(hidden_states, conv_cu_seqlens, cp_context)
+            g = self._forget_gate(hidden_states)
+        query, key, value = torch.split(mixed_qkv, [self.projection_size] * 3, dim=-1)
+        query = query.unflatten(-1, (self.num_heads, self.head_dim))
+        key = key.unflatten(-1, (self.num_heads, self.head_dim))
+        value = value.unflatten(-1, (self.num_heads, self.head_dim))
+        beta = torch.sigmoid(self.b_proj(hidden_states).float())
 
         if cp_context is not None:
             core_attn_out, _ = chunk_kda(

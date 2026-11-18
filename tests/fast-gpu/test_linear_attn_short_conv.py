@@ -116,6 +116,7 @@ def test_glm_kda_bounds_convolution_and_preserves_gradients(monkeypatch, split_h
     if split_heads:
         import miles_plugins.models.glm5_next.kda as kda
 
+        # Force head slicing and projection/convolution recomputation on small tensors.
         monkeypatch.setattr(kda, "INT32_ELEMENTS", 65536)
     actual = run()
     assert torch.equal(actual[0], expected[0])
