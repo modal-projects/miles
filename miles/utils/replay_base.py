@@ -34,12 +34,12 @@ class Replay:
             )
         top_indices = self.top_indices_list[self.forward_index]
         self.forward_index += 1
-        return top_indices.to(torch.cuda.current_device())
+        return top_indices.to(torch.cuda.current_device(), non_blocking=True)
 
     def pop_backward(self) -> torch.Tensor:
         top_indices = self.top_indices_list[self.backward_index]
         self.backward_index += 1
-        return top_indices.to(torch.cuda.current_device())
+        return top_indices.to(torch.cuda.current_device(), non_blocking=True)
 
     def clear(self):
         self.forward_index = 0
@@ -101,12 +101,11 @@ class BaseReplayManager:
 
             # fill padding tokens with arange to avoid invalid reading
             all_invalid = (top_indices == -1).all(dim=-1)
-            if all_invalid.any():
-                ar = (
-                    torch.arange(top_indices.shape[1], device=top_indices.device, dtype=top_indices.dtype)
-                    % scores.shape[1]
-                )
-                top_indices = torch.where(all_invalid.unsqueeze(-1), ar, top_indices)
+            ar = (
+                torch.arange(top_indices.shape[1], device=top_indices.device, dtype=top_indices.dtype)
+                % scores.shape[1]
+            )
+            top_indices = torch.where(all_invalid.unsqueeze(-1), ar, top_indices)
 
             if return_probs:
                 return scores.gather(1, top_indices), top_indices
