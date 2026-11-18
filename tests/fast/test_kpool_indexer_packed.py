@@ -62,3 +62,25 @@ def test_local_positions_restart_per_sequence():
 
     expected = torch.cat([torch.arange(length) for length in SEQ_LENS])
     torch.testing.assert_close(local_positions, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="indexer scoring kernels need CUDA")
+def test_query_blocks_select_the_same_tokens(monkeypatch):
+    from miles_plugins.models.glm5_next.ops import kpool_indexer
+
+    torch.manual_seed(0)
+    seq_lens = [3001, 2003]
+    cu_seqlens = _cu_seqlens(seq_lens).cuda()
+    pool_cu_seqlens = pool_boundaries(cu_seqlens, KPOOL)
+    total = sum(seq_lens)
+    index_q = torch.randn(total, 32, 128, device="cuda", dtype=torch.bfloat16)
+    pooled_k = torch.randn(int(pool_cu_seqlens[-1]), 128, device="cuda", dtype=torch.bfloat16)
+    head_weights = torch.rand(total, 32, device="cuda")
+
+    def select(block):
+        monkeypatch.setattr(kpool_indexer, "QUERY_BLOCK", block)
+        return kpool_indexer.kpool_select_topk(
+            index_q, pooled_k, head_weights, cu_seqlens, pool_cu_seqlens, 256, KPOOL
+        )
+
+    assert torch.equal(select(total), select(512))
