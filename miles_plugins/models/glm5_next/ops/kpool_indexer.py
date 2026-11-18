@@ -3,6 +3,9 @@ import torch
 from miles.kernels.attention.dsa.kpool import append_tail_and_pad, pool_topk_to_token_fn, select_expand_tail
 from miles.utils.replay_base import indexer_replay_manager
 
+# Rows of [tokens, pools] fp32 scores built at once; the whole matrix is 64 GiB at 256K tokens.
+QUERY_BLOCK = 32768
+
 
 def kpool_select_topk(
     index_q: torch.Tensor,
@@ -22,6 +25,29 @@ def kpool_select_topk(
     pool_base = pool_cu_seqlens[seq_indices].to(torch.int32)
     local_positions = (token_ids - seq_token_base).to(torch.int32)
     eligible_pools = torch.div(local_positions + 1, kpool, rounding_mode="floor")
+
+    if pooled_k.shape[0] > 0 and not indexer_replay_manager.enabled:
+        from miles.kernels.attention.dsa import indexer_logits
+
+        # Selection is per query row, so scoring and selecting one block at a time is exact.
+        blocks = []
+        for start in range(0, num_tokens, QUERY_BLOCK):
+            rows = slice(start, start + QUERY_BLOCK)
+            with torch.no_grad():
+                block_logits = indexer_logits(
+                    index_q[rows],
+                    pooled_k,
+                    head_weights[rows],
+                    pool_base[rows],
+                    (pool_base[rows] + eligible_pools[rows]).to(torch.int32),
+                )
+            blocks.append(
+                select_expand_tail(
+                    block_logits, seq_token_base[rows], pool_base[rows], local_positions[rows], index_topk, kpool
+                )
+            )
+            del block_logits
+        return torch.cat(blocks).unsqueeze(1)
 
     if pooled_k.shape[0] > 0:
         # tilelang is GPU-only; importing it here keeps this module importable on CPU,
