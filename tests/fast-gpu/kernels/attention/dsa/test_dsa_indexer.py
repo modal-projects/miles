@@ -249,10 +249,6 @@ def test_canonical_topk_rejects_unaligned_rows():
         canonical_dsa_topk(scores, 16, ks, ks + 1027)
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
-
-
 @pytest.mark.parametrize("lengths", [[131], [37, 13, 81], [1, 2]])
 @pytest.mark.parametrize("reordered", [False, True])
 def test_glm_kpool_query_blocks_match_full_selection(monkeypatch, lengths, reordered):
@@ -272,10 +268,28 @@ def test_glm_kpool_query_blocks_match_full_selection(monkeypatch, lengths, reord
     monkeypatch.setattr(kpool_indexer, "_QUERY_BLOCK", sum(lengths))
     expected = kpool_indexer.kpool_select_topk(*args)
     monkeypatch.setattr(kpool_indexer, "_QUERY_BLOCK", 17)
-    actual = kpool_indexer.kpool_select_topk(*args)
+    import miles.kernels.attention.dsa as dsa
+
+    score_rows = []
+    original_logits = dsa.indexer_logits
+
+    def bounded_logits(q, *args, **kwargs):
+        score_rows.append(q.shape[0])
+        assert q.shape[0] <= 17
+        return original_logits(q, *args, **kwargs)
+
+    with monkeypatch.context() as bounded:
+        bounded.setattr(dsa, "indexer_logits", bounded_logits)
+        actual = kpool_indexer.kpool_select_topk(*args)
+    if k.shape[0]:
+        assert sum(score_rows) == sum(lengths)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     # The unchanged replay fallthrough path also serves as the pre-chunking reference.
     monkeypatch.setattr(indexer_replay_manager, "enabled", True)
     monkeypatch.setattr(indexer_replay_manager, "stage", "fallthrough")
     replay = kpool_indexer.kpool_select_topk(*args)
     torch.testing.assert_close(actual, replay, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
