@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from megatron.core.transformer.module import mark_keep_in_fp32
+from torch.utils.checkpoint import checkpoint
 
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
@@ -36,15 +37,19 @@ def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
         outputs = []
         for start in range(0, heads, head_block):
             selected = slice(start, start + head_block)
+            inputs = (
+                query[:, :, selected].contiguous(),
+                key[:, :, selected].contiguous(),
+                value[:, :, selected].contiguous(),
+                g[:, :, selected].contiguous(),
+                beta[:, :, selected].contiguous(),
+                cu_seqlens,
+            )
+            # Outer layer recomputation otherwise retains every head group's recurrent states.
             outputs.append(
-                _bounded_chunk_kda(
-                    query[:, :, selected].contiguous(),
-                    key[:, :, selected].contiguous(),
-                    value[:, :, selected].contiguous(),
-                    g[:, :, selected].contiguous(),
-                    beta[:, :, selected].contiguous(),
-                    cu_seqlens,
-                )
+                checkpoint(_bounded_chunk_kda, *inputs, use_reentrant=False)
+                if torch.is_grad_enabled()
+                else _bounded_chunk_kda(*inputs)
             )
         return torch.cat(outputs, dim=2)
     return chunk_kda(
