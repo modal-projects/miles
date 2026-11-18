@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from tests.ci.ci_register import register_cuda_ci, register_rocm_ci
 
 register_cuda_ci(
-    est_time=60, suite="stage-b-2-gpu-h200", labels=["precision"], hardware=["hopper", "blackwell"], num_gpus=1
+    est_time=300, suite="stage-b-2-gpu-h200", labels=["precision"], hardware=["hopper", "blackwell"], num_gpus=1
 )
 
 register_rocm_ci(est_time=90, suite="nightly-stage-c-2-gpu-mi350", labels=["precision"])
@@ -80,6 +80,42 @@ def test_chunked_conv_matches_single_call(monkeypatch, channels):
     assert torch.equal(whole[0], chunked[0])
     for a, b in zip(whole[1:], chunked[1:], strict=True):
         assert ((a.float() - b.float()).norm() / b.float().norm()).item() < 1e-4
+
+
+def test_glm_kda_bounds_convolution_and_preserves_gradients(monkeypatch):
+    import importlib
+
+    from miles_plugins.models.glm5_next.kda import Glm5NextKDA
+
+    torch.manual_seed(42)
+    layer = Glm5NextKDA(32, 2, 128, 4, -5.0, 1e-5).to(device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(1, 131, 32, device="cuda", dtype=torch.bfloat16) * 0.1
+    grad = torch.randn_like(x)
+    cu = torch.tensor([0, 37, 131], device="cuda", dtype=torch.int32)
+
+    def run():
+        layer.zero_grad(set_to_none=True)
+        xi = x.clone().requires_grad_()
+        out = layer(xi, cu)
+        out.backward(grad)
+        return out.detach(), xi.grad, *(p.grad.clone() for p in layer.parameters() if p.grad is not None)
+
+    expected = run()
+    limit = x.shape[1] * 300
+    monkeypatch.setattr(linear_attn, "INT32_ELEMENTS", limit)
+    monkeypatch.setattr(linear_attn, "_CHUNK_ELEMENTS", limit)
+    convolution = importlib.import_module("fla.modules.conv.causal_conv1d")
+    original = convolution.causal_conv1d
+
+    def bounded_convolution(*args, **kwargs):
+        assert kwargs["x"].numel() <= limit
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(convolution, "causal_conv1d", bounded_convolution)
+    actual = run()
+    assert torch.equal(actual[0], expected[0])
+    for a, b in zip(actual[1:], expected[1:], strict=True):
+        assert ((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-8)).item() < 5e-3
 
 
 if __name__ == "__main__":
