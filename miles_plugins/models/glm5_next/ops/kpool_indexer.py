@@ -4,6 +4,9 @@ from miles.kernels.attention.dsa.kpool import append_tail_and_pad, pool_topk_to_
 from miles.utils.replay_base import indexer_replay_manager
 
 
+_QUERY_BLOCK = 32768
+
+
 def kpool_select_topk(
     index_q: torch.Tensor,
     pooled_k: torch.Tensor,
@@ -27,6 +30,27 @@ def kpool_select_topk(
         # tilelang is GPU-only; importing it here keeps this module importable on CPU,
         # where tests/fast pins the per-sequence pool invariants.
         from miles.kernels.attention.dsa import indexer_logits
+
+        if not indexer_replay_manager.enabled:
+            # Bound the quadratic score allocation; top-k selection is independent per query.
+            blocks = []
+            for start in range(0, num_tokens, _QUERY_BLOCK):
+                rows = slice(start, start + _QUERY_BLOCK)
+                with torch.no_grad():
+                    logits = indexer_logits(
+                        index_q[rows],
+                        pooled_k,
+                        head_weights[rows],
+                        pool_base[rows],
+                        (pool_base[rows] + eligible_pools[rows]).to(torch.int32),
+                    )
+                blocks.append(
+                    select_expand_tail(
+                        logits, seq_token_base[rows], pool_base[rows], local_positions[rows], index_topk, kpool
+                    )
+                )
+                del logits
+            return torch.cat(blocks).unsqueeze(1)
 
         with torch.no_grad():
             pool_logits = indexer_logits(

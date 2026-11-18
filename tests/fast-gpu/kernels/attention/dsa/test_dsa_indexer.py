@@ -251,3 +251,31 @@ def test_canonical_topk_rejects_unaligned_rows():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("lengths", [[131], [37, 13, 81], [1, 2]])
+@pytest.mark.parametrize("reordered", [False, True])
+def test_glm_kpool_query_blocks_match_full_selection(monkeypatch, lengths, reordered):
+    from miles.kernels.attention.dsa.kpool import pool_boundaries
+    from miles.utils.replay_base import indexer_replay_manager
+    from miles_plugins.models.glm5_next.ops import kpool_indexer
+
+    torch.manual_seed(42)
+    cu = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0).int()
+    pool_cu = pool_boundaries(cu, 4)
+    q = torch.randn(sum(lengths), 32, 128, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(int(pool_cu[-1]), 128, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(sum(lengths), 32, device="cuda")
+    ids = torch.randperm(sum(lengths), device="cuda") if reordered else None
+    args = (q, k, weights, cu, pool_cu, 16, 4, ids)
+    monkeypatch.setattr(indexer_replay_manager, "enabled", False)
+    monkeypatch.setattr(kpool_indexer, "_QUERY_BLOCK", sum(lengths))
+    expected = kpool_indexer.kpool_select_topk(*args)
+    monkeypatch.setattr(kpool_indexer, "_QUERY_BLOCK", 17)
+    actual = kpool_indexer.kpool_select_topk(*args)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    # The unchanged replay fallthrough path also serves as the pre-chunking reference.
+    monkeypatch.setattr(indexer_replay_manager, "enabled", True)
+    monkeypatch.setattr(indexer_replay_manager, "stage", "fallthrough")
+    replay = kpool_indexer.kpool_select_topk(*args)
+    torch.testing.assert_close(actual, replay, rtol=0, atol=0)
