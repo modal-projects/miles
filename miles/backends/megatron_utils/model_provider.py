@@ -159,6 +159,10 @@ def get_model_provider_func(
     args: TrainerConfig,
     role: Literal["actor", "critic"] = "actor",
 ):
+    if args.prefix_tree_attention and (
+        args.megatron_to_hf_mode != "raw" or args.custom_model_provider_path is not None
+    ):
+        raise ValueError("--prefix-tree-attention requires the registered native raw model provider")
     # Support custom model provider path (similar to --custom-rm-path for reward models)
     if (custom_model_provider_path := args.custom_model_provider_path) is not None:
 
@@ -269,8 +273,14 @@ def get_model_provider_func(
         assert config is None, "miles builds the config from args, so it expects config to be None"
         config = core_transformer_config_from_args(args.backend)
 
-        if args.backend.spec is not None:
-            transformer_layer_spec = import_module(args.backend.spec)
+        layer_spec = args.backend.spec
+        if args.prefix_tree_attention:
+            # GPU provider selection imports the optional architecture adapter only here.
+            from miles.backends.training_utils.prefix_tree.megatron_adapters import resolve_native_tree_adapter
+
+            layer_spec = resolve_native_tree_adapter(layer_spec).spec
+        if layer_spec is not None:
+            transformer_layer_spec = import_module(layer_spec)
             # Allow the spec to be a function so that user can use customized Megatron easier.
             if callable(transformer_layer_spec):
                 transformer_layer_spec = transformer_layer_spec(args, config, vp_stage)

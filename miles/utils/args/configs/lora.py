@@ -34,6 +34,14 @@ class LoraConfig(BaseConfig):
         ),
     ] = None
     lora_dropout: A[float, Arg(help="LoRA dropout rate (default: 0.0)")] = 0.0
+    lora_kernel_policy: A[
+        Literal["native", "rowwise"],
+        Arg(
+            type_parser=str,
+            choices=["native", "rowwise"],
+            help="Native LoRA arithmetic policy; rowwise matches normalization and projection math across prefix layouts.",
+        ),
+    ] = "native"
     lora_A_init_method: A[
         str,
         Arg(

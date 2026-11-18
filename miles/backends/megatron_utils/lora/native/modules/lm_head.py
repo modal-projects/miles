@@ -48,10 +48,10 @@ class LoRAOutputHead(PhasedLoRAAdapter):
         return branch_input(scaled, base_module, self.context)
 
     def project_down(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.head_A)
+        return self._linear(x, self.head_A)
 
     def project_up(self, down: torch.Tensor) -> torch.Tensor:
-        return F.linear(down, self.head_B)
+        return self._linear(down, self.head_B)
 
     def weight_deltas(self):
         """The host divides its input by muP too, so the merged head carries the full delta."""

@@ -248,3 +248,43 @@ def test_fp8_gather_without_sdk_initializer_reports_required_dependency(
         subject.get_model_provider_func(args=args)()
 
     assert isinstance(error.value.__cause__, ImportError)
+
+
+def test_tree_attention_selects_native_spec_without_mutating_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from miles.backends.training_utils.prefix_tree.glm53.layout import GlmTreeLayout
+
+    native_spec = ["miles_plugins.models.glm5_next.glm5_next", "get_glm5_next_spec"]
+    args = _args(kind="custom_callable", spec=native_spec).model_copy(update={"prefix_tree_attention": True})
+    _, config = _patch_sdks(monkeypatch)
+    tree_spec = object()
+
+    def load_spec(path):
+        assert tuple(path) == ("miles.backends.training_utils.prefix_tree.glm53.native", "get_glm5_next_tree_spec")
+
+        def factory(received, resolved, stage):
+            assert received is args and resolved is config
+            resolved.prefix_tree_layout_type = GlmTreeLayout
+            return tree_spec
+
+        return factory
+
+    monkeypatch.setattr(subject, "import_module", load_spec)
+    model = subject.get_model_provider_func(args)()
+    assert model.kwargs["transformer_layer_spec"] is tree_spec
+    assert model.config.prefix_tree_layout_type is GlmTreeLayout
+    assert args.backend.spec is native_spec
+    with pytest.raises(AttributeError, match="immutable"):
+        args.backend.spec = []
+
+
+@pytest.mark.parametrize("mode,custom", [("bridge", None), ("raw", "custom.provider")])
+def test_tree_attention_refuses_paths_that_bypass_native_spec(mode: str, custom: str | None) -> None:
+    args = _args(kind="local").model_copy(
+        update={
+            "prefix_tree_attention": True,
+            "megatron_to_hf_mode": mode,
+            "custom_model_provider_path": custom,
+        }
+    )
+    with pytest.raises(ValueError, match="registered native raw"):
+        subject.get_model_provider_func(args)

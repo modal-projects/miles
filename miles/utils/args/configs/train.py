@@ -13,6 +13,12 @@ class TrainConfig(BaseConfig):
     train_backend: A[str, Arg(choices=["megatron", "fsdp", "torchtitan"], help="The backend for training.")] = (
         "megatron"
     )
+    prefix_tree_attention: A[
+        bool,
+        Arg(
+            help="Enable the native provider's tree-attention specification; the caller supplies packed tree metadata."
+        ),
+    ] = False
     qkv_format: A[str, Arg(choices=["thd", "bshd"], help="The qkv layout.")] = "thd"
     linear_attention_backend: A[
         str,

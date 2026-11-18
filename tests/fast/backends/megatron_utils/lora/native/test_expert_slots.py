@@ -27,9 +27,14 @@ def _context():
 @pytest.mark.parametrize("projection", ["gate_up", "up", "down"])
 @pytest.mark.parametrize("counts", [(3, 0, 2), (0, 0, 0)])
 @pytest.mark.parametrize("shared_outer", [True, False])
-def test_expert_major_forward_and_gradients_match_per_token_reference(monkeypatch, projection, counts, shared_outer):
+@pytest.mark.parametrize("kernel_policy", ["native", "rowwise"])
+def test_expert_major_forward_and_gradients_match_per_token_reference(
+    monkeypatch, projection, counts, shared_outer, kernel_policy
+):
     context = _context()
-    context = replace(context, lora=replace(context.lora, experts_shared_outer_loras=shared_outer))
+    context = replace(
+        context, lora=replace(context.lora, experts_shared_outer_loras=shared_outer, kernel_policy=kernel_policy)
+    )
     common = dict(
         hf_prefix="model.layers.0.mlp.experts.",
         reference=torch.empty(()),

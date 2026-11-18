@@ -11,8 +11,18 @@ from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAA
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 
 
-def _grouped_linear(inputs: torch.Tensor, weights: torch.Tensor, tokens_per_expert) -> torch.Tensor:
+def _grouped_linear(
+    inputs: torch.Tensor, weights: torch.Tensor, tokens_per_expert, *, backend="native"
+) -> torch.Tensor:
     """Per-local-expert matmul over the permuted token buffer, one grouped GEMM."""
+    if backend == "rowwise":
+        from miles.backends.training_utils.prefix_tree.operators import rowwise_linear
+
+        return torch.cat(
+            [rowwise_linear(part, w) for part, w in zip(inputs.split(list(tokens_per_expert)), weights, strict=True)]
+        )
+    if backend != "native":
+        raise ValueError(f"Unknown native LoRA linear backend: {backend}")
     if inputs.is_cuda and inputs.shape[0] > 0:
         offsets = torch.as_tensor(list(tokens_per_expert), device=inputs.device, dtype=torch.int32).cumsum(
             0, dtype=torch.int32
@@ -90,9 +100,14 @@ class LoRAGroupedFC1(NativeLoRAAdapter):
         return torch.cat(
             [
                 _grouped_linear(
-                    F.linear(dropped, a) if self.shared_outer else _grouped_linear(dropped, a, tokens_per_expert),
+                    (
+                        self._linear(dropped, a)
+                        if self.shared_outer
+                        else _grouped_linear(dropped, a, tokens_per_expert, backend=self.context.lora.kernel_policy)
+                    ),
                     b,
                     tokens_per_expert,
+                    backend=self.context.lora.kernel_policy,
                 )
                 for _, a, b in self.factors()
             ],
@@ -190,10 +205,15 @@ class LoRAGroupedFC2(NativeLoRAAdapter):
     def forward(self, x: torch.Tensor, base_module: nn.Module, *host_args) -> torch.Tensor:
         tokens_per_expert = host_args[0]
         inner = _grouped_linear(
-            apply_lora_dropout(x, self.context, base_module.training), self.w2_A, tokens_per_expert
+            apply_lora_dropout(x, self.context, base_module.training),
+            self.w2_A,
+            tokens_per_expert,
+            backend=self.context.lora.kernel_policy,
         )
         return (
-            F.linear(inner, self.w2_B) if self.shared_outer else _grouped_linear(inner, self.w2_B, tokens_per_expert)
+            self._linear(inner, self.w2_B)
+            if self.shared_outer
+            else _grouped_linear(inner, self.w2_B, tokens_per_expert, backend=self.context.lora.kernel_policy)
         )
 
     def weight_deltas(self):
@@ -291,13 +311,13 @@ class LoRASharedExpertsAdapter(NativeLoRAAdapter):
 
     def fc1_delta(self, x: torch.Tensor, host: nn.Module, index: int) -> torch.Tensor:
         x = branch_input(x, host, self.context)
-        gate = F.linear(F.linear(x, self.w1_A), self.w1_B[index])
-        up = F.linear(F.linear(x, self.w3_A), self.w3_B[index])
+        gate = self._linear(self._linear(x, self.w1_A), self.w1_B[index])
+        up = self._linear(self._linear(x, self.w3_A), self.w3_B[index])
         return torch.cat([gate, up], dim=-1)
 
     def fc2_delta(self, x: torch.Tensor, host: nn.Module, index: int) -> torch.Tensor:
-        local = F.linear(apply_lora_dropout(x, self.context, host.training), self.w2_A[index])
-        return F.linear(reduce_row_parallel(local, self.context), self.w2_B)
+        local = self._linear(apply_lora_dropout(x, self.context, host.training), self.w2_A[index])
+        return self._linear(reduce_row_parallel(local, self.context), self.w2_B)
 
     def weight_deltas(self):
         """Hosts are bound per sub-expert as ``fc1, fc2`` pairs, in sub-expert order."""

@@ -23,6 +23,7 @@ class LoRAConfig:
     a_init_method: str = "xavier"
     num_slots: int | None = None
     experts_shared_outer_loras: bool = True
+    kernel_policy: str = "native"
 
     @property
     def scale(self) -> float:
@@ -36,6 +37,7 @@ class LoRAConfig:
     @classmethod
     def from_args(cls, args, *, select_all: bool) -> LoRAConfig:
         return cls(
+            kernel_policy=args.lora_kernel_policy,
             rank=args.lora_rank,
             alpha=args.lora_alpha,
             dropout=args.lora_dropout,

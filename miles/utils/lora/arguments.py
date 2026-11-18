@@ -42,6 +42,10 @@ _DEFAULT_LORA_ALPHA = 16.0
 
 
 def validate_lora_args(args):
+    if args.lora_kernel_policy != "native" and not (
+        args.train_backend == "megatron" and args.megatron_to_hf_mode == "raw" and is_lora_enabled(args)
+    ):
+        raise ValueError("--lora-kernel-policy rowwise requires native Megatron LoRA (--megatron-to-hf-mode raw)")
     if args.lora_type is None:
         args.lora_type = _default_lora_type(args)
     validate_multi_lora_args(args)
