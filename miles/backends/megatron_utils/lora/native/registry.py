@@ -113,6 +113,7 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
         attention=attention,
         mlp=SplitGateUpMLPSpec(),
         experts=PackedGroupedExpertsSpec(),
+        lm_head=_LM_HEAD,
         # the checkpoint nests the text stack under model.language_model., which the raw converter drops
         declared_naming=DeclaredNaming(
             "model.language_model.layers.",
@@ -122,6 +123,7 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
                 "mlp.shared_experts.": "mlp.shared_experts.",
                 "mlp.experts.": "mlp.experts.",
             },
+            output_head="lm_head",
         ),
     )
 

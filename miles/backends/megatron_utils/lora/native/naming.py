@@ -83,9 +83,12 @@ class DeclaredNaming:
     ``hf_blocks_by_param_prefix`` maps a host's parameter name inside its layer, by prefix, to its HF block.
     """
 
-    def __init__(self, layer_prefix: str, hf_blocks_by_param_prefix: Mapping[str, str]):
+    def __init__(
+        self, layer_prefix: str, hf_blocks_by_param_prefix: Mapping[str, str], *, output_head: str | None = None
+    ):
         self.layer_prefix = layer_prefix
         self.hf_blocks_by_param_prefix = hf_blocks_by_param_prefix
+        self.output_head = output_head
 
     def block_prefix(self, layer: nn.Module, host_weight: nn.Parameter, leaves: Sequence[str]) -> str:
         del leaves
@@ -98,3 +101,7 @@ class DeclaredNaming:
             if name_in_layer.startswith(param_prefix)
         )
         return f"{self.layer_prefix}{layer.layer_number - 1}.{hf_block}"
+
+    def output_head_prefix(self, weight: nn.Parameter) -> str:
+        assert self.output_head is not None, "declared adapter naming has no output head"
+        return f"{self.output_head}."

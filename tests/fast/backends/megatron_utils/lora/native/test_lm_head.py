@@ -288,9 +288,7 @@ def test_the_unembed_group_is_attachable(hf_config):
     assert "lm_head" in served
 
 
-@pytest.mark.parametrize(
-    "model_type,head", [("glm5_next", "lm_head"), ("deepseek_v41", "lm_head"), ("deepseek_v41", "head")]
-)
+@pytest.mark.parametrize("model_type,head", [("deepseek_v41", "lm_head"), ("deepseek_v41", "head")])
 def test_specs_without_a_head_adapter_still_refuse_it(model_type, head):
     with pytest.raises(AssertionError, match=rf"does not implement adapters for \['{head}'\]"):
         resolve_adapter_targets(
@@ -318,3 +316,31 @@ def test_native_declares_its_head_rows_under_the_models_own_head_name(monkeypatc
     head_b = "language_model.lm_head.lora_B"
     slots.row_mapping = SimpleNamespace(pieces=[SimpleNamespace(key=head_b, global_shape=(VOCAB, 2))])
     assert slots._head_rows() == HeadRows(head_b, max_source_rows=16)
+
+
+def test_glm5_next_declared_head_trains_exports_and_merges():
+    spec = MODEL_SPECS["glm5_next"]
+    targets = resolve_adapter_targets(
+        {"model_type": "glm5_next"},
+        ["lm_head"],
+        hf_modules=[],
+        lora_type="canonical_lora",
+        experts_shared_outer_loras=False,
+    )
+    model = _Model(tied=False)
+    context = dataclasses.replace(_context(tuple(targets)), naming=spec.declared_naming)
+    assert spec.lm_head.attach(model, _ARGS, context) == 1
+    adapter = model.lora_lm_head_adapter
+    nn.init.normal_(adapter.head_B)
+    tokens = torch.tensor([1, 4, 7])
+    base = model.embedding.weight[tokens] @ model.output_layer.weight.t()
+    trained = model(tokens)
+    assert not torch.equal(trained, base)
+    trained.sum().backward()
+    assert adapter.head_A.grad is not None and adapter.head_B.grad is not None
+    gather = SimpleNamespace(request=lambda tensor, dim: lambda: tensor)
+    exported = {name: value() if callable(value) else value for name, value in adapter.export_plan(gather)}
+    assert exported["lm_head.lora_B.weight"].shape == (VOCAB, 2)
+    weight = model.output_layer.weight
+    merged = merge_lora_into_weights([model], {"output_layer.weight": weight})["output_layer.weight"]
+    torch.testing.assert_close(model.embedding.weight[tokens] @ merged.t(), trained)
