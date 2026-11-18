@@ -158,8 +158,11 @@ def _cudnn_backward(q, kv, out, grad_out, indices, lse, attn_sink, sm_scale):
         grad_out.view(-1, heads, out.shape[-1]),
     )
     padded_heads = heads
-    if torch.cuda.get_device_capability(q.device)[0] == 10 and not (heads == 16 and head_dim == 576):
-        padded_heads = -(-heads // _CUDNN_SM100_HEAD_TILE) * _CUDNN_SM100_HEAD_TILE
+    if torch.cuda.get_device_capability(q.device)[0] == 10:
+        # The 576-wide kernel supports 16 heads; use it for smaller TP shards too.
+        padded_heads = (
+            16 if head_dim == 576 and heads <= 16 else -(-heads // _CUDNN_SM100_HEAD_TILE) * _CUDNN_SM100_HEAD_TILE
+        )
     if padded_heads != heads:
         pad = (0, 0, 0, padded_heads - heads)
         q, out, grad_out = (torch.nn.functional.pad(t, pad) for t in (q, out, grad_out))

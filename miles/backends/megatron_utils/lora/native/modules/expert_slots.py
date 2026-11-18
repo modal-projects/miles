@@ -75,6 +75,10 @@ class NativeMultiLoRAExpertAdapter(NativeMultiLoRAAdapter):
     def forward(self, x: torch.Tensor, base_module: nn.Module, *_host_args) -> torch.Tensor:
         routing = self.routing
         assert routing is not None, "routed expert adapters need the MoE slot-routing hook"
+        if len(self.adapters) == 1:
+            # One slot is already in expert order; avoid activation-sized permutation copies.
+            scale = self.lora_alphas_by_slot[0] / self.lora_ranks_by_slot[0]
+            return self.adapters[0](x, base_module, routing.counts[0]).mul_(scale)
         rows = x.index_select(0, routing.permutation)
         segments = rows.split([sum(counts) for counts in routing.counts])
         deltas = [
@@ -86,6 +90,8 @@ class NativeMultiLoRAExpertAdapter(NativeMultiLoRAAdapter):
         return torch.cat(deltas).index_select(0, routing.inverse)
 
     def add_delta(self, out: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+        if out.dtype == delta.dtype:
+            return delta.add_(out)
         return out + delta
 
 

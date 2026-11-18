@@ -102,13 +102,22 @@ BACKWARD_CASES = MQA_CASES[:4] + MQA_CASES[-1:] + MLA_CASES[:3] + MLA_CASES[-1:]
 @pytest.mark.parametrize("backward_backend", BACKWARD_BACKENDS)
 @pytest.mark.parametrize("backend", CONFIGS)
 @pytest.mark.parametrize("case", BACKWARD_CASES, ids=IDS(BACKWARD_CASES))
-def test_backward_matches_autograd(case, backend, backward_backend):
+def test_backward_matches_autograd(case, backend, backward_backend, monkeypatch):
     if backend == "default" and backward_backend != "tilelang":
         pytest.skip("the default config picks its own backward")
     torch.manual_seed(0)
     batch, seq_len, heads, groups, d_v, d_tail, seq_len_kv, topk, sink = case
     q, kv, indices, attn_sink = _inputs(batch, seq_len, heads, groups, d_v, d_tail, seq_len_kv, topk, sink)
     sm_scale = (d_v + d_tail) ** -0.5
+
+    if cudnn_dsa is not None and torch.cuda.get_device_capability()[0] == 10 and d_tail == 64 and heads <= 16:
+        original = cudnn_dsa.sparse_attention_backward_wrapper
+
+        def bounded_heads(query, *args, **kwargs):
+            assert query.shape[1] <= 16, "small MLA shards must not allocate 64 padded heads"
+            return original(query, *args, **kwargs)
+
+        monkeypatch.setattr(cudnn_dsa, "sparse_attention_backward_wrapper", bounded_heads)
 
     grad_out = torch.randn(batch, seq_len, heads, d_v, device="cuda", dtype=torch.float32)
 

@@ -25,11 +25,16 @@ def _context():
 
 
 @pytest.mark.parametrize("projection", ["gate_up", "up", "down"])
-@pytest.mark.parametrize("counts", [(3, 0, 2), (0, 0, 0)])
+@pytest.mark.parametrize("counts", [(3, 0, 2), (0, 0, 0), (3,), (0,)])
 @pytest.mark.parametrize("shared_outer", [True, False])
-def test_expert_major_forward_and_gradients_match_per_token_reference(monkeypatch, projection, counts, shared_outer):
+@pytest.mark.parametrize("base_dtype", [torch.float32, torch.float64])
+def test_expert_major_forward_and_gradients_match_per_token_reference(
+    monkeypatch, projection, counts, shared_outer, base_dtype
+):
     context = _context()
-    context = replace(context, lora=replace(context.lora, experts_shared_outer_loras=shared_outer))
+    context = replace(
+        context, lora=replace(context.lora, experts_shared_outer_loras=shared_outer, num_slots=len(counts))
+    )
     common = dict(
         hf_prefix="model.layers.0.mlp.experts.",
         reference=torch.empty(()),
@@ -49,14 +54,14 @@ def test_expert_major_forward_and_gradients_match_per_token_reference(monkeypatc
         )
     )
     adapter = NativeMultiLoRAExpertAdapter([build() for _ in counts], context)
-    for slot in range(3):
+    for slot in range(len(counts)):
         adapter.init_slot(slot, slot + 1, 6)
         with torch.no_grad():
             for name, parameter in adapter.adapters[slot].named_parameters():
                 if name.endswith("_B"):
                     parameter.normal_()
                     parameter[..., slot + 1 :].zero_()
-    slot_ids = torch.repeat_interleave(torch.arange(3), torch.tensor(counts))
+    slot_ids = torch.repeat_interleave(torch.arange(len(counts)), torch.tensor(counts))
     # top-2 dispatch duplicates each token once into each expert's segment.
     permutation = torch.arange(sum(counts)).repeat(2)
     dispatched_slots = slot_ids[permutation]
@@ -77,7 +82,13 @@ def test_expert_major_forward_and_gradients_match_per_token_reference(monkeypatc
         expected.append((6 / (slot + 1)) * delta)
     reference = torch.stack(expected) if expected else actual.new_empty(actual.shape)
     torch.testing.assert_close(actual, reference)
-    actual.sum().backward()
+    base = torch.randn_like(actual, dtype=base_dtype, requires_grad=True)
+    expected_sum = base + actual
+    summed = adapter.add_delta(base, actual)
+    torch.testing.assert_close(summed, expected_sum, rtol=0, atol=0)
+    assert summed.dtype == base_dtype
+    summed.sum().backward()
+    torch.testing.assert_close(base.grad, torch.ones_like(base))
     for single in adapter.adapters:
         for name, parameter in single.named_parameters():
             assert parameter.grad is not None
