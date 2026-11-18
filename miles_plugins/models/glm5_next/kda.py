@@ -18,6 +18,10 @@ from miles_plugins.models.hf_attention import HuggingfaceAttention
 from miles_plugins.models.linear_attn import INT32_ELEMENTS, causal_short_conv
 
 
+# Backward keeps several FP32 buffers; cap each input/state buffer at 4 GiB.
+_KDA_BUFFER_ELEMENTS = 2**30
+
+
 def _get_text_config(hf_config):
     return (
         getattr(hf_config, "text_config", None) or hf_config
@@ -30,7 +34,7 @@ def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
     value_dim = value.shape[-1]
     max_chunks = (tokens + chunk_size - 1) // chunk_size + cu_seqlens.numel() - 2
     elements_per_head = batch * max(tokens * max(key_dim, value_dim), max_chunks * key_dim * value_dim)
-    head_limit = max(1, INT32_ELEMENTS // elements_per_head)
+    head_limit = max(1, min(INT32_ELEMENTS, _KDA_BUFFER_ELEMENTS) // elements_per_head)
     head_block = 1 << (head_limit.bit_length() - 1)
     if head_block < heads:
         # FLA uses int32 offsets for packed inputs and recurrent states; heads are independent.
@@ -38,26 +42,27 @@ def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
         for start in range(0, heads, head_block):
             selected = slice(start, start + head_block)
             inputs = (
-                query[:, :, selected].contiguous(),
-                key[:, :, selected].contiguous(),
-                value[:, :, selected].contiguous(),
-                g[:, :, selected].contiguous(),
-                beta[:, :, selected].contiguous(),
+                query[:, :, selected],
+                key[:, :, selected],
+                value[:, :, selected],
+                g[:, :, selected],
+                beta[:, :, selected],
                 cu_seqlens,
             )
-            # Outer layer recomputation otherwise retains every head group's recurrent states.
+            # Keep views here: checkpointing the copies would retain every group's full input.
             outputs.append(
                 checkpoint(_bounded_chunk_kda, *inputs, use_reentrant=False)
                 if torch.is_grad_enabled()
                 else _bounded_chunk_kda(*inputs)
             )
         return torch.cat(outputs, dim=2)
+    # Copy inside the checkpoint so only the group being recomputed needs contiguous inputs.
     return chunk_kda(
-        query,
-        key,
-        value,
-        g=g,
-        beta=beta,
+        query.contiguous(),
+        key.contiguous(),
+        value.contiguous(),
+        g=g.contiguous(),
+        beta=beta.contiguous(),
         initial_state=None,
         output_final_state=False,
         use_qk_l2norm_in_kernel=True,
