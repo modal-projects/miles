@@ -82,7 +82,8 @@ def test_chunked_conv_matches_single_call(monkeypatch, channels):
         assert ((a.float() - b.float()).norm() / b.float().norm()).item() < 1e-4
 
 
-def test_glm_kda_bounds_convolution_and_preserves_gradients(monkeypatch):
+@pytest.mark.parametrize("split_heads", [False, True])
+def test_glm_kda_bounds_convolution_and_preserves_gradients(monkeypatch, split_heads):
     import importlib
 
     from miles_plugins.models.glm5_next.kda import Glm5NextKDA
@@ -112,6 +113,10 @@ def test_glm_kda_bounds_convolution_and_preserves_gradients(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(convolution, "causal_conv1d", bounded_convolution)
+    if split_heads:
+        import miles_plugins.models.glm5_next.kda as kda
+
+        monkeypatch.setattr(kda, "INT32_ELEMENTS", 65536)
     actual = run()
     assert torch.equal(actual[0], expected[0])
     for a, b in zip(actual[1:], expected[1:], strict=True):

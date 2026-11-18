@@ -14,13 +14,51 @@ except ImportError:
 
 from miles_plugins.models.cp_utils import build_gdn_cp_context
 from miles_plugins.models.hf_attention import HuggingfaceAttention
-from miles_plugins.models.linear_attn import causal_short_conv
+from miles_plugins.models.linear_attn import INT32_ELEMENTS, causal_short_conv
 
 
 def _get_text_config(hf_config):
     return (
         getattr(hf_config, "text_config", None) or hf_config
     )  # config-access-exempt: HF configs may wrap text_config for multimodal checkpoints
+
+
+def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
+    chunk_size = 64
+    batch, tokens, heads, key_dim = query.shape
+    value_dim = value.shape[-1]
+    max_chunks = (tokens + chunk_size - 1) // chunk_size + cu_seqlens.numel() - 2
+    elements_per_head = batch * max(tokens * max(key_dim, value_dim), max_chunks * key_dim * value_dim)
+    head_limit = max(1, INT32_ELEMENTS // elements_per_head)
+    head_block = 1 << (head_limit.bit_length() - 1)
+    if head_block < heads:
+        # FLA uses int32 offsets for packed inputs and recurrent states; heads are independent.
+        outputs = []
+        for start in range(0, heads, head_block):
+            selected = slice(start, start + head_block)
+            outputs.append(
+                _bounded_chunk_kda(
+                    query[:, :, selected].contiguous(),
+                    key[:, :, selected].contiguous(),
+                    value[:, :, selected].contiguous(),
+                    g[:, :, selected].contiguous(),
+                    beta[:, :, selected].contiguous(),
+                    cu_seqlens,
+                )
+            )
+        return torch.cat(outputs, dim=2)
+    return chunk_kda(
+        query,
+        key,
+        value,
+        g=g,
+        beta=beta,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+    )[0]
 
 
 class Glm5NextKDA(nn.Module):
@@ -105,17 +143,7 @@ class Glm5NextKDA(nn.Module):
                 cp_context=cp_context,
             )
         else:
-            core_attn_out, _ = chunk_kda(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=cu_seqlens,
-            )
+            core_attn_out = _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens)
 
         norm_gate = self.g_b_proj(self.g_a_proj(hidden_states))
         out_shape = core_attn_out.shape
