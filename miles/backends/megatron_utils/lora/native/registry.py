@@ -113,6 +113,7 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
         attention=attention,
         mlp=SplitGateUpMLPSpec(),
         experts=PackedGroupedExpertsSpec(),
+        lm_head=_LM_HEAD,
         # the checkpoint nests the text stack under model.language_model., which the raw converter drops
         declared_naming=DeclaredNaming(
             "model.language_model.layers.",
@@ -122,6 +123,7 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
                 "mlp.shared_experts.": "mlp.shared_experts.",
                 "mlp.experts.": "mlp.experts.",
             },
+            output_head="lm_head",
         ),
     )
 
@@ -274,9 +276,13 @@ def validate_native_lora_args(args, hf_modules: list[str]) -> None:
         "tensor-parallel sum over the buffer MCore's in-flight data-parallel reduce-scatter writes."
     )
     _model_type, spec = resolve_checkpoint_spec(args.hf_checkpoint)
-    assert (
-        not _selects_experts(spec, hf_modules, args.hf_lora_targets) or args.expert_tensor_parallel_size == 1
-    ), f"native {spec.name} expert LoRA assumes --expert-tensor-parallel-size 1"
+    if _selects_experts(spec, hf_modules, args.hf_lora_targets):
+        assert (
+            args.expert_tensor_parallel_size == 1
+        ), f"native {spec.name} expert LoRA assumes --expert-tensor-parallel-size 1"
+        assert not (
+            args.multi_lora and args.moe_permute_fusion
+        ), "native multi-LoRA expert adapters require moe_permute_fusion=False; disable --moe-permute-fusion"
     if spec.lm_head is not None and _selects_head(spec, hf_modules, args.hf_lora_targets):
         if isinstance(spec.lm_head, LMHeadSpec):
             assert args.vocab_size is not None, "native LoRA's lm_head adapter exports over --vocab-size; set it"
