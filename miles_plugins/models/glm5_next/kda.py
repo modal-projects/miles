@@ -28,7 +28,8 @@ def _get_text_config(hf_config):
     )  # config-access-exempt: HF configs may wrap text_config for multimodal checkpoints
 
 
-def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
+def _bounded_chunk_kda(query, key, value, forget, beta, cu_seqlens, A_log, dt_bias, lower_bound):
+    """Checkpoint heads without retaining global FP32 forget-gate or gate-gradient buffers."""
     chunk_size = 64
     batch, tokens, heads, key_dim = query.shape
     value_dim = value.shape[-1]
@@ -45,9 +46,12 @@ def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
                 query[:, :, selected],
                 key[:, :, selected],
                 value[:, :, selected],
-                g[:, :, selected],
+                forget[:, :, selected],
                 beta[:, :, selected],
                 cu_seqlens,
+                A_log[selected],
+                dt_bias.view(heads, key_dim)[selected].reshape(-1),
+                lower_bound,
             )
             # Keep views here: checkpointing the copies would retain every group's full input.
             outputs.append(
@@ -57,6 +61,7 @@ def _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens):
             )
         return torch.cat(outputs, dim=2)
     # Copy inside the checkpoint so only the group being recomputed needs contiguous inputs.
+    g = fused_kda_gate(forget.contiguous(), A_log, dt_bias, lower_bound=lower_bound)
     return chunk_kda(
         query.contiguous(),
         key.contiguous(),
@@ -131,20 +136,16 @@ class Glm5NextKDA(nn.Module):
             cp_context=cp_context,
         )
 
-    def _forget_gate(self, hidden_states):
+    def _project_forget(self, hidden_states):
         forget = self.f_b_proj(self.f_a_proj(hidden_states))
-        return fused_kda_gate(
-            forget.unflatten(-1, (self.num_heads, self.head_dim)),
-            self.A_log,
-            self.dt_bias,
-            lower_bound=self.gate_lower_bound,
-        )
+        return forget.unflatten(-1, (self.num_heads, self.head_dim))
 
     def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor):
         cp_context = build_gdn_cp_context(self, cu_seqlens, hidden_states.device)
         conv_cu_seqlens = cp_context.cu_seqlens if cp_context is not None else cu_seqlens
         conv_elements = hidden_states.shape[0] * hidden_states.shape[1] * 3 * self.projection_size
-        if torch.is_grad_enabled() and cp_context is None and conv_elements > INT32_ELEMENTS:
+        checkpoint_projections = torch.is_grad_enabled() and cp_context is None and conv_elements > INT32_ELEMENTS
+        if checkpoint_projections:
             # Independent checkpoints avoid full combined-QKV input and gradient buffers.
             qkv = []
             weights = self.conv1d.weight[:, 0].split(self.projection_size)
@@ -160,17 +161,22 @@ class Glm5NextKDA(nn.Module):
                     )
                 )
             query, key, value = qkv
-            g = checkpoint(self._forget_gate, hidden_states, use_reentrant=False)
         else:
             mixed_qkv = self._project_and_convolve(hidden_states, conv_cu_seqlens, cp_context)
             query, key, value = torch.split(mixed_qkv, [self.projection_size] * 3, dim=-1)
-            g = self._forget_gate(hidden_states)
         query = query.unflatten(-1, (self.num_heads, self.head_dim))
         key = key.unflatten(-1, (self.num_heads, self.head_dim))
         value = value.unflatten(-1, (self.num_heads, self.head_dim))
         beta = torch.sigmoid(self.b_proj(hidden_states).float())
+        # Keep projection/dropout RNG order consistent with the original GLM forward.
+        forget = (
+            checkpoint(self._project_forget, hidden_states, use_reentrant=False)
+            if checkpoint_projections
+            else self._project_forget(hidden_states)
+        )
 
         if cp_context is not None:
+            g = fused_kda_gate(forget, self.A_log, self.dt_bias, lower_bound=self.gate_lower_bound)
             core_attn_out, _ = chunk_kda(
                 query,
                 key,
@@ -182,7 +188,9 @@ class Glm5NextKDA(nn.Module):
                 cp_context=cp_context,
             )
         else:
-            core_attn_out = _bounded_chunk_kda(query, key, value, g, beta, cu_seqlens)
+            core_attn_out = _bounded_chunk_kda(
+                query, key, value, forget, beta, cu_seqlens, self.A_log, self.dt_bias, self.gate_lower_bound
+            )
 
         norm_gate = self.g_b_proj(self.g_a_proj(hidden_states))
         out_shape = core_attn_out.shape

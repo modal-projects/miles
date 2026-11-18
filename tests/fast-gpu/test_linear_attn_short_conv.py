@@ -90,11 +90,21 @@ def test_glm_kda_bounds_convolution_and_preserves_gradients(monkeypatch, split_h
 
     torch.manual_seed(42)
     layer = Glm5NextKDA(32, 2, 128, 4, -5.0, 1e-5).to(device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        # Distinct per-head gate parameters exercise parameter slicing as well as activation slicing.
+        layer.A_log.copy_(torch.tensor([0.1, -0.2], device="cuda"))
+        layer.dt_bias.copy_(torch.linspace(-0.25, 0.25, layer.dt_bias.numel(), device="cuda"))
+    # Exercise checkpoint RNG replay through stochastic projection paths.
+    layer.q_proj = torch.nn.Sequential(torch.nn.Dropout(0.2), layer.q_proj)
+    layer.b_proj = torch.nn.Sequential(torch.nn.Dropout(0.2), layer.b_proj)
+    layer.f_a_proj = torch.nn.Sequential(torch.nn.Dropout(0.2), layer.f_a_proj)
+    layer.g_a_proj = torch.nn.Sequential(torch.nn.Dropout(0.2), layer.g_a_proj)
     x = torch.randn(1, 131, 32, device="cuda", dtype=torch.bfloat16) * 0.1
     grad = torch.randn_like(x)
     cu = torch.tensor([0, 37, 131], device="cuda", dtype=torch.int32)
 
     def run():
+        torch.manual_seed(123)
         layer.zero_grad(set_to_none=True)
         xi = x.clone().requires_grad_()
         out = layer(xi, cu)
