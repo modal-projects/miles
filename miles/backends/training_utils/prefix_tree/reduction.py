@@ -6,6 +6,9 @@ from dataclasses import dataclass
 import torch
 
 
+_MAX_ORDERED_ELEMENTS = 1 << 24
+
+
 class _OrderedGather(torch.autograd.Function):
     @staticmethod
     def forward(ctx, value, indices, order, lengths):
@@ -17,11 +20,20 @@ class _OrderedGather(torch.autograd.Function):
     def backward(ctx, gradient):
         order, lengths = ctx.saved_tensors
         dtype = torch.float64 if ctx.input_dtype == torch.float64 else torch.float32
-        ordered = gradient.index_select(0, order).to(dtype)
-        # Each output row owns one segment. No threads atomically update the
-        # same parent; contributions are summed in their prepared stable order.
-        reduced = torch.segment_reduce(ordered, reduce="sum", lengths=lengths)
-        return reduced.to(ctx.input_dtype), None, None, None
+        if gradient.ndim != 2 or gradient.numel() <= _MAX_ORDERED_ELEMENTS or torch.is_grad_enabled():
+            ordered = gradient.index_select(0, order).to(dtype)
+            reduced = torch.segment_reduce(ordered, reduce="sum", lengths=lengths)
+            return reduced.to(ctx.input_dtype), None, None, None
+        result = gradient.new_empty((lengths.numel(), gradient.shape[1]), dtype=ctx.input_dtype)
+        columns = max(1, _MAX_ORDERED_ELEMENTS // max(gradient.shape[0], 1))
+        # Bound the FP32 reorder workspace independently of vocabulary width.
+        for start in range(0, gradient.shape[1], columns):
+            end = start + columns
+            ordered = gradient[:, start:end].index_select(0, order).to(dtype)
+            reduced = torch.segment_reduce(ordered, reduce="sum", lengths=lengths)
+            result[:, start:end].copy_(reduced.to(ctx.input_dtype))
+            del ordered, reduced
+        return result, None, None, None
 
 
 @dataclass(frozen=True)
