@@ -14,6 +14,7 @@ except ImportError:
 
 from miles_plugins.models.cp_utils import build_gdn_cp_context
 from miles_plugins.models.hf_attention import HuggingfaceAttention
+from miles_plugins.models.linear_attn import causal_short_conv
 
 
 def _get_text_config(hf_config):
@@ -70,8 +71,11 @@ class Glm5NextKDA(nn.Module):
             dim=-1,
         )
         conv_cu_seqlens = cp_context.cu_seqlens if cp_context is not None else cu_seqlens
-        mixed_qkv, _ = self.conv1d(
-            x=mixed_qkv,
+        mixed_qkv = causal_short_conv(
+            mixed_qkv,
+            self.conv1d.weight[:, 0],
+            self.conv1d.activation,
+            self.conv1d.backend,
             cu_seqlens=conv_cu_seqlens,
             cp_context=cp_context,
         )
