@@ -18,8 +18,8 @@ from miles_plugins.models.hf_attention import HuggingfaceAttention
 from miles_plugins.models.linear_attn import INT32_ELEMENTS, causal_short_conv
 
 
-# Backward keeps several FP32 buffers; cap each input/state buffer at 4 GiB.
-_KDA_BUFFER_ELEMENTS = 2**30
+# Backward keeps several FP32 buffers; cap each input/state buffer at 1 GiB.
+_KDA_BUFFER_ELEMENTS = 2**28
 
 
 def _get_text_config(hf_config):
@@ -116,9 +116,15 @@ class Glm5NextKDA(nn.Module):
             (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)),
             dim=-1,
         )
+        return self._convolve(mixed_qkv, self.conv1d.weight[:, 0], cu_seqlens, cp_context)
+
+    def _project_one_and_convolve(self, hidden_states, projection, weight, cu_seqlens):
+        return self._convolve(projection(hidden_states), weight, cu_seqlens)
+
+    def _convolve(self, inputs, weight, cu_seqlens, cp_context=None):
         return causal_short_conv(
-            mixed_qkv,
-            self.conv1d.weight[:, 0],
+            inputs,
+            weight,
             self.conv1d.activation,
             self.conv1d.backend,
             cu_seqlens=cu_seqlens,
@@ -139,15 +145,26 @@ class Glm5NextKDA(nn.Module):
         conv_cu_seqlens = cp_context.cu_seqlens if cp_context is not None else cu_seqlens
         conv_elements = hidden_states.shape[0] * hidden_states.shape[1] * 3 * self.projection_size
         if torch.is_grad_enabled() and cp_context is None and conv_elements > INT32_ELEMENTS:
-            # Defer convolution inputs and gate intermediates until after the recurrence backward.
-            mixed_qkv = checkpoint(
-                self._project_and_convolve, hidden_states, conv_cu_seqlens, cp_context, use_reentrant=False
-            )
+            # Independent checkpoints avoid full combined-QKV input and gradient buffers.
+            qkv = []
+            weights = self.conv1d.weight[:, 0].split(self.projection_size)
+            for projection, weight in zip((self.q_proj, self.k_proj, self.v_proj), weights, strict=True):
+                qkv.append(
+                    checkpoint(
+                        self._project_one_and_convolve,
+                        hidden_states,
+                        projection,
+                        weight,
+                        conv_cu_seqlens,
+                        use_reentrant=False,
+                    )
+                )
+            query, key, value = qkv
             g = checkpoint(self._forget_gate, hidden_states, use_reentrant=False)
         else:
             mixed_qkv = self._project_and_convolve(hidden_states, conv_cu_seqlens, cp_context)
+            query, key, value = torch.split(mixed_qkv, [self.projection_size] * 3, dim=-1)
             g = self._forget_gate(hidden_states)
-        query, key, value = torch.split(mixed_qkv, [self.projection_size] * 3, dim=-1)
         query = query.unflatten(-1, (self.num_heads, self.head_dim))
         key = key.unflatten(-1, (self.num_heads, self.head_dim))
         value = value.unflatten(-1, (self.num_heads, self.head_dim))
