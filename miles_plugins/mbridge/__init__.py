@@ -14,11 +14,13 @@ from .kimi_k25 import KimiK25Bridge
 from .mimo import MimoBridge
 from .minimax_m3 import MiniMaxM3Bridge
 from .muse_spark import MuseSpark1xBridge
+from .nemotron_h import NemotronHBridge
 from .qwen3_5 import Qwen3_5Bridge
 from .qwen3_8_next import Qwen38NextBridge
 from .qwen3_next import Qwen3NextBridge
 
 __all__ = [
+    "NemotronHBridge",
     "GLM4Bridge",
     "GLM4MoEBridge",
     "GLM4MoELiteBridge",

@@ -88,6 +88,7 @@ class MLPLoRASpec(Protocol):
     """Architecture-specific dense/shared-MLP attachment contract."""
 
     name: str
+    gated_linear_unit: bool
     supported_targets: frozenset[str]
     # regex of the HF blocks (below ``layers.N.``) whose projections this spec adapts
     hf_block_pattern: str
@@ -109,6 +110,9 @@ class LinearAttentionLoRASpec(Protocol):
 
 class ExpertsLoRASpec(Protocol):
     """Routed-expert attachment for architectures whose experts carry adapters."""
+
+    hf_block_pattern: str | None
+    supported_targets: frozenset[str]
 
     def attach(self, mlp: nn.Module, layer: nn.Module, context: AttachContext) -> int: ...
 
@@ -142,6 +146,7 @@ class LoRAArchSpec:
     experts: ExpertsLoRASpec | None = None
     lm_head: Any = None
     has_linear_attention_layers: bool = False
+    has_mamba_layers: bool = False
     # adapters of the linear-attention mixer layers; None leaves those layers unadapted
     linear_attention: LinearAttentionLoRASpec | None = None
     fixed_targets: FixedTargets | None = None
@@ -156,13 +161,24 @@ class LoRAArchSpec:
         ]
         if self.linear_attention is not None:
             blocks.append((re.escape(self.linear_attention.hf_block), self.linear_attention.supported_targets))
-        if self.adapts_head(hf_module):
+        if self.adapts_head(hf_module) or self.adapts_experts(hf_module):
             return True
         # a target may nest below its block (GLM-5.3-Flash's forget_gate.f_a_proj)
         return any(
             re.search(rf"{_HF_LAYER}{block}\.{re.escape(target)}$", hf_module)
             for block, targets in blocks
             for target in targets
+        )
+
+    def adapts_experts(self, hf_module: str) -> bool:
+        """Whether the HF module (or target) is a routed-expert projection this spec adapts."""
+        return (
+            self.experts is not None
+            and self.experts.hf_block_pattern is not None
+            and any(
+                re.search(rf"{_HF_LAYER}{self.experts.hf_block_pattern}\.{re.escape(target)}$", hf_module)
+                for target in self.experts.supported_targets
+            )
         )
 
     def adapts_head(self, hf_module: str) -> bool:
@@ -173,5 +189,7 @@ class LoRAArchSpec:
         )
 
     def validate(self, context: AttachContext) -> None:
-        assert context.transformer_config.gated_linear_unit, "native LoRA's MLP specs assume a gated (SwiGLU) MLP"
+        assert (
+            context.transformer_config.gated_linear_unit == self.mlp.gated_linear_unit
+        ), f"native LoRA's {self.mlp.name} spec disagrees with the model's gated MLP setting"
         self.attention.validate(context.transformer_config, tp_size=context.tp_size)

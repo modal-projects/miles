@@ -18,6 +18,7 @@ from miles.backends.megatron_utils.lora.native.spec.attention import (
     InklingAttentionSpec,
     KimiK3AttentionSpec,
     MLAAttentionSpec,
+    NemotronAttentionSpec,
 )
 from miles.backends.megatron_utils.lora.native.spec.base import FixedTargets, LoRAArchSpec
 from miles.backends.megatron_utils.lora.native.spec.gdn import Qwen35GDNSpec
@@ -27,8 +28,15 @@ from miles.backends.megatron_utils.lora.native.spec.mlp import (
     DeepSeekV4SharedExpertSpec,
     FusedGateUpMLPSpec,
     SplitGateUpMLPSpec,
+    UngatedMLPSpec,
 )
-from miles.backends.megatron_utils.lora.native.spec.moe import GroupedExpertsSpec
+from miles.backends.megatron_utils.lora.native.spec.moe import (
+    DeepSeekV4ExpertsSpec,
+    GroupedExpertsSpec,
+    HFGroupedExpertsSpec,
+    NemotronExpertsSpec,
+    PackedGroupedExpertsSpec,
+)
 from miles.utils.lora.hf_lora_targets import get_hf_lora_targets, resolve_hf_lora_targets
 from miles.utils.lora.utils import exports_hf_snapshots, matches_lora_target
 
@@ -47,11 +55,13 @@ def _arch_spec(
     lm_head=_LM_HEAD,
     has_linear_attention_layers: bool = False,
     linear_attention=None,
+    experts=None,
 ) -> LoRAArchSpec:
     return LoRAArchSpec(
         name=attention.name,
         attention=attention,
         mlp=mlp or SplitGateUpMLPSpec(),
+        experts=experts,
         lm_head=lm_head,
         has_linear_attention_layers=has_linear_attention_layers,
         linear_attention=linear_attention,
@@ -125,10 +135,16 @@ def _glm5_next_arch_spec() -> LoRAArchSpec:
         name=attention.name,
         attention=attention,
         mlp=SplitGateUpMLPSpec(),
+        experts=PackedGroupedExpertsSpec(),
         # the checkpoint nests the text stack under model.language_model., which the raw converter drops
         declared_naming=DeclaredNaming(
             "model.language_model.layers.",
-            {"self_attention.": "self_attn.", "mlp.": "mlp.", "mlp.shared_experts.": "mlp.shared_experts."},
+            {
+                "self_attention.": "self_attn.",
+                "mlp.": "mlp.",
+                "mlp.shared_experts.": "mlp.shared_experts.",
+                "mlp.experts.": "mlp.experts.",
+            },
         ),
     )
 
@@ -143,35 +159,54 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
     # HF GLM-4 keeps gate/up fused in one gate_up_proj module
     glm4 = _arch_spec(GQAAttentionSpec(), mlp=FusedGateUpMLPSpec())
     mla = _arch_spec(MLAAttentionSpec())
+    gqa_moe = replace(gqa, experts=HFGroupedExpertsSpec())
+    mla_moe = replace(mla, experts=HFGroupedExpertsSpec())
     hybrid = _arch_spec(HybridGQAGDNAttentionSpec(), has_linear_attention_layers=True)
     qwen3_5 = _arch_spec(
         HybridGQAGDNAttentionSpec(), has_linear_attention_layers=True, linear_attention=Qwen35GDNSpec()
     )
+    qwen3_5_moe = _arch_spec(
+        HybridGQAGDNAttentionSpec(),
+        has_linear_attention_layers=True,
+        linear_attention=Qwen35GDNSpec(),
+        experts=PackedGroupedExpertsSpec(),
+    )
     inkling = _inkling_arch_spec()
     inkling2 = _inkling2_arch_spec()
     return {
+        "nemotron_h": LoRAArchSpec(
+            name="nemotron_h",
+            attention=NemotronAttentionSpec(),
+            mlp=UngatedMLPSpec(),
+            experts=NemotronExpertsSpec(),
+            lm_head=_LM_HEAD,
+            has_mamba_layers=True,
+        ),
         "llama": gqa,
         "qwen2": gqa,
         "qwen3": gqa,
-        "qwen3_moe": gqa,
+        "qwen3_moe": gqa_moe,
         "mimo": gqa,
         "glm4": glm4,
-        "glm4_moe": gqa,
+        "glm4_moe": gqa_moe,
         "qwen3_5": qwen3_5,
-        "qwen3_5_moe": qwen3_5,
+        "qwen3_5_moe": qwen3_5_moe,
         "qwen3_6": qwen3_5,
-        "qwen3_6_moe": qwen3_5,
-        "qwen3_next": hybrid,
-        "deepseek_v3": mla,
-        "deepseek_v32": mla,
+        "qwen3_6_moe": qwen3_5_moe,
+        "qwen3_next": replace(hybrid, experts=HFGroupedExpertsSpec()),
+        "deepseek_v3": mla_moe,
+        "deepseek_v32": mla_moe,
         # its converter names the output head `head`, which no adapter here has been validated on
-        "deepseek_v41": _arch_spec(DeepSeekV41AttentionSpec(), mlp=DeepSeekV4SharedExpertSpec(), lm_head=None),
-        "glm4_moe_lite": mla,
-        "glm_moe_dsa": mla,
+        "deepseek_v41": replace(
+            _arch_spec(DeepSeekV41AttentionSpec(), mlp=DeepSeekV4SharedExpertSpec(), lm_head=None),
+            experts=DeepSeekV4ExpertsSpec(),
+        ),
+        "glm4_moe_lite": mla_moe,
+        "glm_moe_dsa": mla_moe,
         "glm5_next": _glm5_next_arch_spec(),
-        "kimi_k2": mla,
-        "kimi_k25": mla,
-        "joyai_llm_flash": mla,
+        "kimi_k2": mla_moe,
+        "kimi_k25": mla_moe,
+        "joyai_llm_flash": mla_moe,
         "kimi_k3": _kimi_k3_arch_spec(),
         "inkling_text": inkling,
         "inkling_model": inkling,
@@ -235,7 +270,7 @@ def resolve_adapter_targets(
     )
     _model_type, spec = resolve_config_spec(hf_config, hf_targets=hf_targets)
     assert (
-        spec.experts is None or experts_shared_outer_loras
+        spec.fixed_targets is None or not _selects_experts(spec, hf_modules, hf_targets) or experts_shared_outer_loras
     ), f"native {spec.name} LoRA trains shared-outer expert adapters; pass --experts-shared-outer-loras"
     if spec.fixed_targets is not None:
         _assert_fixed_target_layout(spec, hf_config, hf_targets)
@@ -248,10 +283,14 @@ def resolve_adapter_targets(
         f"{' ...' if len(unattachable) > 8 else ''}. Select supported projections (e.g. "
         f"--target-modules {attention_target_modules_csv(hf_config)}) or use --megatron-to-hf-mode bridge."
     )
-    _assert_shared_expert_up_proj_has_gate_proj(selected or hf_targets)
-    if spec.linear_attention is None:
-        return hf_targets
-    return spec.linear_attention.served_targets(selected or hf_targets, hf_targets)
+    if spec.mlp.gated_linear_unit:
+        _assert_shared_expert_up_proj_has_gate_proj(selected or hf_targets)
+    served = (
+        hf_targets
+        if spec.linear_attention is None
+        else spec.linear_attention.served_targets(selected or hf_targets, hf_targets)
+    )
+    return _shared_outer_serving_targets(served) if spec.experts is not None else served
 
 
 def validate_native_lora_args(args, hf_modules: list[str]) -> None:
@@ -278,7 +317,7 @@ def validate_native_lora_args(args, hf_modules: list[str]) -> None:
             "select --target-modules attn,unembed to keep routed experts frozen"
         )
     assert (
-        spec.experts is None or args.expert_tensor_parallel_size == 1
+        not _selects_experts(spec, hf_modules, args.hf_lora_targets) or args.expert_tensor_parallel_size == 1
     ), f"native {spec.name} expert LoRA assumes --expert-tensor-parallel-size 1"
     if spec.lm_head is not None and _selects_head(spec, hf_modules, args.hf_lora_targets):
         if isinstance(spec.lm_head, LMHeadSpec):
@@ -291,6 +330,16 @@ def validate_native_lora_args(args, hf_modules: list[str]) -> None:
             "a tied lm_head adapter cannot be merged into HF weights (it would change the input embedding); "
             "drop --save-hf / eval snapshots or the unembed target"
         )
+
+
+def _selects_experts(spec: LoRAArchSpec, hf_modules: list[str], hf_targets: list[str]) -> bool:
+    """Whether the targets reach the routed experts; a fixed target layout always includes them."""
+    if spec.experts is None:
+        return False
+    if spec.fixed_targets is not None:
+        return True
+    selected = [module for module in hf_modules if any(matches_lora_target(module, target) for target in hf_targets)]
+    return any(spec.adapts_experts(name) for name in selected + hf_targets)
 
 
 def _selects_head(spec: LoRAArchSpec, hf_modules: list[str], hf_targets: list[str]) -> bool:

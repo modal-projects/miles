@@ -12,6 +12,7 @@ from miles.backends.megatron_utils.lora.native.modules.linear import assert_ever
 from miles.backends.megatron_utils.lora.native.naming import ConverterNaming
 from miles.backends.megatron_utils.lora.native.registry import resolve_checkpoint_spec
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext, LoRAArchSpec
+from miles.backends.megatron_utils.lora.utils import freeze_router_bias
 from miles.utils.hf_utils.config import load_hf_config
 from miles.utils.hf_utils.weight_mapping import build_hf_namespace_predicate
 
@@ -33,6 +34,7 @@ def apply_native_lora(model, args):
         wrapped += arch_spec.lm_head.attach(model, args, context)
     if context.lora.num_slots is not None:
         assert_every_adapter_slotted([model])
+        freeze_router_bias([model])
 
     trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
     total = sum(parameter.numel() for parameter in model.parameters())
@@ -89,9 +91,17 @@ def _resolve_attach_context(args, transformer_config, arch_spec: LoRAArchSpec) -
 
 
 def _attach_layer(layer: nn.Module, arch_spec: LoRAArchSpec, context: AttachContext) -> int:
+    if arch_spec.has_mamba_layers and not hasattr(
+        layer, "self_attention"
+    ):  # config-access-exempt: Mamba layers expose a mixer instead of self_attention
+        return 0
     attention = layer.self_attention
     # Hybrid GDN mixer layers have no fused qkv; any other miss means the registry disagrees with the model.
-    assert arch_spec.has_linear_attention_layers or arch_spec.attention.applies_to(attention), (
+    assert (
+        arch_spec.has_mamba_layers
+        or arch_spec.has_linear_attention_layers
+        or arch_spec.attention.applies_to(attention)
+    ), (
         f"native LoRA's {arch_spec.name} spec does not apply to layer {layer.layer_number - 1}'s "
         f"{type(attention).__name__}; the built attention module does not match the registered architecture."
     )
