@@ -5,6 +5,7 @@ import pytest
 from miles.utils.lora.hf_lora_targets import (
     exclude_hf_lora_targets,
     expand_packed_hf_lora_targets,
+    get_hf_lora_targets,
     parse_lora_targets,
     resolve_hf_lora_targets,
 )
@@ -94,3 +95,15 @@ def test_paired_targets_include_packed_experts(dense, scoped, caplog):
     assert "Expanding paired gate_proj/up_proj" in caplog.text
     assert expand_packed_hf_lora_targets(targets[:1], modules) == targets[:1]
     assert expand_packed_hf_lora_targets(targets, ["model.layers.0.mlp.gate_proj"]) == targets
+
+
+def test_nemotron_omni_uses_only_the_language_model_layout():
+    config = {"model_type": "nemotron_h_omni", "llm_config": {"n_shared_experts": 1, "vocab_size": 131072}}
+    layout = get_hf_lora_targets(config)
+    targets = resolve_hf_lora_targets(config, target_modules=["attn", "mlp", "unembed"])
+    assert layout.vocab_size == 131072
+    assert "language_model.backbone.layers.*.mixer.q_proj" in targets
+    assert "language_model.backbone.layers.*.mixer.experts.*.up_proj" in targets
+    assert "language_model.backbone.layers.*.mixer.shared_experts.down_proj" in targets
+    assert "language_model.lm_head" in targets
+    assert all(target.startswith("language_model.") for target in targets)

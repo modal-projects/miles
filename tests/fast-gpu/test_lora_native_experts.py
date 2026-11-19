@@ -7,6 +7,7 @@ import os
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
@@ -89,7 +90,7 @@ def _check_nano_permutation_precision():
         torch.testing.assert_close(combined, expected, rtol=0, atol=0)
 
 
-def _case(gated, shared_outer):
+def _case(gated, shared_outer, *, fused=False):
     config = TransformerConfig(
         num_layers=1,
         hidden_size=64,
@@ -107,7 +108,7 @@ def _case(gated, shared_outer):
         moe_router_bias_update_rate=0.01,
         moe_grouped_gemm=True,
         moe_token_dispatcher_type="alltoall",
-        moe_permute_fusion=False,
+        moe_permute_fusion=fused,
         moe_shared_expert_overlap=False,
         add_bias_linear=False,
         gated_linear_unit=gated,
@@ -138,6 +139,10 @@ def _case(gated, shared_outer):
         naming=FixedPrefixNaming("backbone.layers.0.mixer.experts."),
     )
     expert_spec = HFGroupedExpertsSpec() if gated else NemotronExpertsSpec()
+    if fused:
+        with pytest.raises(AssertionError, match="moe_permute_fusion=False"):
+            expert_spec.attach(mlp, None, context)
+        return
     assert expert_spec.attach(mlp, None, context) == 2
     assert_every_adapter_slotted([mlp])
     wrappers = list(iter_multi_lora_adapters([mlp]))
@@ -212,6 +217,7 @@ if __name__ == "__main__":
     )
     model_parallel_cuda_manual_seed(1234)
     _check_nano_permutation_precision()
+    _case(True, False, fused=True)
     for gated in (True, False):
         for shared_outer in (False, True):
             _case(gated, shared_outer)

@@ -35,7 +35,7 @@ class _HfLoraModelSpec:
     build_groups: Callable[[dict], tuple[tuple[str, ...], tuple[str, ...]]]
     layer_prefix: str = "model.layers.*"
     unembed: str = "lm_head"
-    unwrap_text_config: bool = False
+    config_key: str | None = None
     default_train_unembed: bool = False
     build_whole_fused_attention: Callable[[dict], tuple[str, ...]] = lambda config: ()
     tinker_name_renames: tuple[tuple[str, str], ...] = ()
@@ -310,6 +310,12 @@ def _nemotron_h_targets(config):
 
 _HF_LORA_MODELS = {
     "nemotron_h": _HfLoraModelSpec(_nemotron_h_targets, layer_prefix="backbone.layers.*"),
+    "nemotron_h_omni": _HfLoraModelSpec(
+        _nemotron_h_targets,
+        layer_prefix="language_model.backbone.layers.*",
+        unembed="language_model.lm_head",
+        config_key="llm_config",
+    ),
     "llama": _HfLoraModelSpec(_dense_targets),
     "qwen2": _HfLoraModelSpec(_dense_targets),
     # MiMo-7B: a Qwen2 body; its MTP layers sit under model.mtp_layers
@@ -332,7 +338,7 @@ _HF_LORA_MODELS = {
     "qwen3_5": _HfLoraModelSpec(
         _qwen3_5_targets,
         layer_prefix="model.language_model.layers.*",
-        unwrap_text_config=True,
+        config_key="text_config",
         build_whole_fused_attention=_qwen3_5_whole_fused_attention,
         tinker_name_renames=_TINKER_RENAMES,
         component_rows_by_fused_module=_gdn_35_component_rows,
@@ -340,7 +346,7 @@ _HF_LORA_MODELS = {
     "qwen3_5_moe": _HfLoraModelSpec(
         _qwen3_5_moe_targets,
         layer_prefix="model.language_model.layers.*",
-        unwrap_text_config=True,
+        config_key="text_config",
         build_whole_fused_attention=_qwen3_5_whole_fused_attention,
         tinker_name_renames=_TINKER_RENAMES,
         component_rows_by_fused_module=_gdn_35_component_rows,
@@ -359,13 +365,13 @@ _HF_LORA_MODELS = {
         _kimi_targets,
         layer_prefix="language_model.model.layers.*",
         unembed="language_model.lm_head",
-        unwrap_text_config=True,
+        config_key="text_config",
     ),
     "kimi_k3": _HfLoraModelSpec(
         _kimi_k3_targets,
         layer_prefix="language_model.model.layers.*",
         unembed="language_model.lm_head",
-        unwrap_text_config=True,
+        config_key="text_config",
     ),
     "glm4": _HfLoraModelSpec(_glm4_targets),
     "glm4_moe": _HfLoraModelSpec(_glm4_moe_targets),
@@ -373,7 +379,7 @@ _HF_LORA_MODELS = {
     "glm4_moe_lite": _HfLoraModelSpec(_glm_dsa_targets),
     "glm_moe_dsa": _HfLoraModelSpec(_glm5_targets),
     "glm5_next": _HfLoraModelSpec(
-        _glm5_next_targets, layer_prefix="model.language_model.layers.*", unwrap_text_config=True
+        _glm5_next_targets, layer_prefix="model.language_model.layers.*", config_key="text_config"
     ),
     "mimo_v2": _HfLoraModelSpec(_mimo_v2_targets),
     "beam": _HfLoraModelSpec(_beam_targets),
@@ -382,21 +388,21 @@ _HF_LORA_MODELS = {
     "inkling_mm_model": _HfLoraModelSpec(
         _inkling_targets,
         layer_prefix="model.language_model.layers.*",
-        unwrap_text_config=True,
+        config_key="text_config",
         default_train_unembed=True,
     ),
     "inkling2": _HfLoraModelSpec(
         _inkling2_targets,
         layer_prefix="model.llm.layers.*",
         unembed="model.llm.unembed",
-        unwrap_text_config=True,
+        config_key="text_config",
         default_train_unembed=True,
     ),
     "inkling2_mm_model": _HfLoraModelSpec(
         _inkling2_targets,
         layer_prefix="model.llm.layers.*",
         unembed="model.llm.unembed",
-        unwrap_text_config=True,
+        config_key="text_config",
         default_train_unembed=True,
     ),
 }
@@ -411,7 +417,7 @@ def get_hf_lora_targets(hf_config: dict) -> HfLoraTargets:
     model_type = hf_config["model_type"]
     assert model_type in _HF_LORA_MODELS, f"HF LoRA target layout is not defined for model_type={model_type!r}"
     spec = _HF_LORA_MODELS[model_type]
-    text_config = hf_config["text_config"] if spec.unwrap_text_config else hf_config
+    text_config = hf_config[spec.config_key] if spec.config_key is not None else hf_config
     attention, mlp = spec.build_groups(text_config)
     return HfLoraTargets(
         attention=_prefix_paths(spec.layer_prefix, *attention),

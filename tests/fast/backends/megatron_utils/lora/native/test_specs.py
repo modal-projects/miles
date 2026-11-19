@@ -281,6 +281,8 @@ def _native_run_args(tmp_path, model_type, **overrides):
         moe_shared_expert_overlap=False,
         overlap_grad_reduce=False,
         expert_tensor_parallel_size=1,
+        multi_lora=True,
+        moe_permute_fusion=False,
         hf_lora_targets=[],
         enable_mtp_training=False,
         untie_embeddings_and_output_weights=False,
@@ -299,6 +301,7 @@ def _native_run_args(tmp_path, model_type, **overrides):
         ({"moe_shared_expert_overlap": True}, "moe-shared-expert-overlap"),
         ({"overlap_grad_reduce": True}, "overlap-grad-reduce"),
         ({"expert_tensor_parallel_size": 2}, "expert-tensor-parallel-size"),
+        ({"moe_permute_fusion": True}, "moe-permute-fusion"),
     ],
 )
 def test_native_run_contract_rejects_unvalidated_configs(tmp_path, override, message):
@@ -310,8 +313,13 @@ def test_native_run_contract_accepts_its_validated_configs(tmp_path):
     validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3"), _HF_MODULES)
     validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3", colocate=False), _HF_MODULES)
     validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3", colocate=False, lora_train_only=True), _HF_MODULES)
+    validate_native_lora_args(
+        _native_run_args(tmp_path, "kimi_k3", multi_lora=False, moe_permute_fusion=True), _HF_MODULES
+    )
     # expert TP only matters for specs whose routed experts carry adapters
-    validate_native_lora_args(_native_run_args(tmp_path, "qwen3_moe", expert_tensor_parallel_size=2), _HF_MODULES)
+    validate_native_lora_args(
+        _native_run_args(tmp_path, "qwen3_moe", expert_tensor_parallel_size=2, moe_permute_fusion=True), _HF_MODULES
+    )
 
 
 def test_expert_tensor_parallelism_matters_only_once_the_targets_reach_the_routed_experts(tmp_path):
