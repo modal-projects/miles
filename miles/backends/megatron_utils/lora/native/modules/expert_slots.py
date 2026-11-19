@@ -99,7 +99,8 @@ class NativeMultiLoRAExpertAdapter(NativeMultiLoRAAdapter):
 
     def add_delta(self, out: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
         # Expert deltas end in a fresh projection/concatenation, unused by their backward.
-        if out.shape == delta.shape and out.dtype == delta.dtype:
+        reusable = delta._base is None and not (delta.is_leaf and delta.requires_grad)
+        if reusable and out.shape == delta.shape and out.dtype == delta.dtype:
             return delta.add_(out)
         return out + delta
 

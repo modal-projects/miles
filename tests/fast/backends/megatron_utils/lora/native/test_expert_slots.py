@@ -129,7 +129,8 @@ def test_expert_routing_narrows_the_sequence_parallel_shard(monkeypatch):
 
 @pytest.mark.parametrize("alpha", [4, 8])
 @pytest.mark.parametrize("per_expert", [(3, 0, 2), (0, 0, 0)])
-def test_single_slot_identity_matches_explicit_routing_all_gradients(monkeypatch, alpha, per_expert):
+@pytest.mark.parametrize("backward_hook", [False, True])
+def test_single_slot_identity_matches_explicit_routing_all_gradients(monkeypatch, alpha, per_expert, backward_hook):
     context = _context()
     single = LoRAGroupedFC2(
         hf_prefix="model.layers.0.mlp.experts.",
@@ -143,6 +144,8 @@ def test_single_slot_identity_matches_explicit_routing_all_gradients(monkeypatch
     )
     adapter = NativeMultiLoRAExpertAdapter([single], context)
     adapter.init_slot(0, 4, alpha)
+    if backward_hook:
+        adapter.register_full_backward_hook(lambda *_args: None)
     with torch.no_grad():
         single.w2_B.normal_()
     rows = sum(per_expert)
@@ -155,13 +158,16 @@ def test_single_slot_identity_matches_explicit_routing_all_gradients(monkeypatch
         SimpleNamespace(hidden_shape_before_permute=(rows, 5)), per_expert, (rows,), context, "cpu"
     )
     assert adapter.routing.permutation is adapter.routing.inverse is None
-    actual = adapter(x, nn.Identity())
+    base_weight = torch.randn(5, 6, dtype=torch.float64)
+    delta = adapter(x, nn.Identity())
+    assert (delta._base is not None) == backward_hook
+    actual = adapter.add_delta(x @ base_weight, delta)
     gradient = torch.randn_like(actual)
     inputs = (x, *adapter.parameters())
     actual_gradients = torch.autograd.grad(actual, inputs, gradient)
     identity = torch.arange(rows)
     adapter.routing = expert_slots.ExpertSlotRouting(identity, identity, (per_expert,))
-    expected = adapter(x, nn.Identity())
+    expected = x @ base_weight + adapter(x, nn.Identity())
     expected_gradients = torch.autograd.grad(expected, inputs, gradient)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients, strict=True):
