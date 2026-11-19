@@ -167,19 +167,22 @@ def _append_tail_kernel(
     tl.store(out_ptr + t * out_width + cols, val, mask=in_out)
 
 
-def _pool_topk(pool_logits: torch.Tensor, topk: int, kpool: int):
+def _pool_topk(pool_logits: torch.Tensor, topk: int, kpool: int, select_pools=None):
     _, num_pools = pool_logits.shape
     group_topk = min(topk // kpool, num_pools)
     assert group_topk > 0, (topk, kpool, num_pools)
     assert kpool & (kpool - 1) == 0 and _SELECT_BLOCK % kpool == 0, kpool
-    scores, pools = torch.topk(pool_logits.float(), group_topk, dim=-1)
+    if select_pools is None:
+        scores, pools = torch.topk(pool_logits.float(), group_topk, dim=-1)
+    else:
+        scores, pools = select_pools(pool_logits, group_topk)
     return scores, pools, group_topk
 
 
-def pool_topk_to_token_fn(seq_token_base, pool_base, local_positions, kpool):
+def pool_topk_to_token_fn(seq_token_base, pool_base, local_positions, kpool, *, select_pools=None):
     def topk_fn(pool_logits: torch.Tensor, topk: int) -> torch.Tensor:
         num_tokens = pool_logits.shape[0]
-        scores, pools, group_topk = _pool_topk(pool_logits, topk, kpool)
+        scores, pools, group_topk = _pool_topk(pool_logits, topk, kpool, select_pools)
         tokens = torch.empty((num_tokens, topk), dtype=torch.int32, device=pool_logits.device)
         grid = (num_tokens, triton.cdiv(topk, _SELECT_BLOCK))
         _expand_topk_kernel[grid](
@@ -227,9 +230,9 @@ def append_tail_and_pad(
     return out
 
 
-def select_expand_tail(pool_logits, seq_token_base, pool_base, local_positions, topk, kpool):
+def select_expand_tail(pool_logits, seq_token_base, pool_base, local_positions, topk, kpool, *, select_pools=None):
     num_tokens = pool_logits.shape[0]
-    scores, pools, group_topk = _pool_topk(pool_logits, topk, kpool)
+    scores, pools, group_topk = _pool_topk(pool_logits, topk, kpool, select_pools)
     out_width = (topk + kpool - 1 + SPARSE_MLA_BLOCK - 1) // SPARSE_MLA_BLOCK * SPARSE_MLA_BLOCK
     out = torch.empty((num_tokens, out_width), dtype=torch.int32, device=pool_logits.device)
     grid = (num_tokens, triton.cdiv(out_width, _SELECT_BLOCK))

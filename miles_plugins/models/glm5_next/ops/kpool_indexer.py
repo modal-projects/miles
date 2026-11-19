@@ -1,6 +1,8 @@
 import torch
 
+from miles.kernels.attention.dsa import get_dsa_topk_fn
 from miles.kernels.attention.dsa.kpool import append_tail_and_pad, pool_topk_to_token_fn, select_expand_tail
+from miles.kernels.attention.dsa.topk import SCORE_ROW_ALIGN
 from miles.utils.replay_base import indexer_replay_manager
 
 
@@ -13,6 +15,7 @@ def kpool_select_topk(
     index_topk: int,
     kpool: int,
     query_token_ids: torch.Tensor | None = None,
+    topk_backend: str = "torch",
 ) -> torch.Tensor:
     num_tokens = index_q.shape[0]
     device = index_q.device
@@ -22,6 +25,16 @@ def kpool_select_topk(
     pool_base = pool_cu_seqlens[seq_indices].to(torch.int32)
     local_positions = (token_ids - seq_token_base).to(torch.int32)
     eligible_pools = torch.div(local_positions + 1, kpool, rounding_mode="floor")
+    selector_kwargs = {}
+    if topk_backend != "torch":
+        selector = get_dsa_topk_fn(topk_backend)
+
+        def select_pools(logits, count):
+            pools = selector(logits, count, pool_base, pool_base + eligible_pools)
+            scores = logits.gather(1, pools.clamp_min(0).long()).masked_fill(pools < 0, -torch.inf)
+            return scores, pools
+
+        selector_kwargs["select_pools"] = select_pools
 
     if pooled_k.shape[0] > 0:
         # tilelang is GPU-only; importing it here keeps this module importable on CPU,
@@ -37,16 +50,20 @@ def kpool_select_topk(
                 (pool_base + eligible_pools).to(torch.int32),
             )
     else:
-        pool_logits = torch.full((num_tokens, 1), float("-inf"), dtype=torch.float32, device=device)
+        pool_logits = torch.full((num_tokens, SCORE_ROW_ALIGN), float("-inf"), dtype=torch.float32, device=device)[
+            :, :1
+        ]
 
     if indexer_replay_manager.enabled:
         topk_fn = indexer_replay_manager.get_topk_fn(
-            pool_topk_to_token_fn(seq_token_base, pool_base, local_positions, kpool),
+            pool_topk_to_token_fn(seq_token_base, pool_base, local_positions, kpool, **selector_kwargs),
             return_probs=False,
         )
         tokens = topk_fn(pool_logits, index_topk)
         shortcut = (local_positions + 1) <= index_topk
         tokens = append_tail_and_pad(tokens, seq_token_base, local_positions, shortcut, kpool)
     else:
-        tokens = select_expand_tail(pool_logits, seq_token_base, pool_base, local_positions, index_topk, kpool)
+        tokens = select_expand_tail(
+            pool_logits, seq_token_base, pool_base, local_positions, index_topk, kpool, **selector_kwargs
+        )
     return tokens.unsqueeze(1)

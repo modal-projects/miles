@@ -53,6 +53,7 @@ class TreeDSAAttention(Glm5NextDSAAttention):
                 index_topk=self.index_topk,
                 kpool=self.index_kpool,
                 query_token_ids=torch.arange(query_start, len(k), device=q.device),
+                topk_backend=self.topk_backend,
             )
 
         return tree_kpool_select(index_q, index_k, head_weights, gate_score, layout, select=select)
