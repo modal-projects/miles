@@ -175,6 +175,7 @@ def _cudnn_backward(q, kv, out, grad_out, indices, lse, attn_sink, sm_scale):
         compact["indices"].clamp_min_(0),
         softmax_scale=sm_scale,
         topk_length=topk_length.clamp_min(1),
+        deterministic=torch.are_deterministic_algorithms_enabled(),
     )
     dq = grads["dq"][:, :heads].reshape(*indices.shape[:2], heads, head_dim)
     d_sink = None if attn_sink is None else grads["d_sink"][:heads].to(attn_sink.dtype)
