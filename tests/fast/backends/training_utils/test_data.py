@@ -42,6 +42,7 @@ def _scheduled_args() -> Namespace:
         use_dynamic_global_batch_size=False,
         use_dynamic_batch_size=True,
         max_tokens_per_gpu=64,
+        prefix_tree_max_tokens_per_gpu=None,
         balance_data=False,
         balance_by_flops=False,
         allow_partial_train_step=False,
@@ -178,3 +179,47 @@ class TestGetRolloutDataParallelWiring:
         assert seen == [(2, config, None)]
         assert rollout["tokens"][0].device.type == "cpu"
         assert result is store_result
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_training_side_prefix_budget_preserves_samples_and_aligns_dp_counts(monkeypatch, shared):
+    state = _parallel_state(dp_size=2)
+    monkeypatch.setattr(data_utils, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: data_utils.torch.device("cpu"))
+
+    class PeerSchedule:
+        def all_reduce(self, counts, group, op):
+            counts[1:] = counts[1:].clamp(min=2)
+
+    monkeypatch.setattr(data_utils.GeneralPGUtil, "create", lambda group: PeerSchedule())
+    args = _scheduled_args()
+    args.backend.global_batch_size = 8
+    args.max_tokens_per_gpu = 128
+    args.prefix_tree_max_tokens_per_gpu = 63
+    args.data_pad_size_multiplier = 1
+    tokens = [data_utils.torch.tensor([1 if shared else index + 10] * 24 + [index] * 8) for index in range(4)]
+    data = {"tokens": tokens, "total_lengths": [32] * 4}
+    [iterator], counts = data_utils.get_data_iterator(args, model=None, rollout_data=data)
+    assert counts == ([2] if shared else [4])
+    actual = [sample.tolist() for _ in range(counts[0]) for sample in iterator.get_next(["tokens"])["tokens"]]
+    assert sorted(actual) == sorted(sample.tolist() for sample in tokens)
+
+
+def test_prefix_budget_failure_is_reduced_before_any_rank_rejects(monkeypatch):
+    state = _parallel_state(dp_size=2)
+    monkeypatch.setattr(data_utils, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: data_utils.torch.device("cpu"))
+
+    class FailingPeer:
+        def all_reduce(self, counts, group, op):
+            counts[0] = 1
+
+    monkeypatch.setattr(data_utils.GeneralPGUtil, "create", lambda group: FailingPeer())
+    args = _scheduled_args()
+    args.backend.global_batch_size = 2
+    args.prefix_tree_max_tokens_per_gpu = 32
+    args.data_pad_size_multiplier = 1
+    with pytest.raises(ValueError, match="token budget exceeded on a DP rank"):
+        data_utils.get_data_iterator(
+            args, model=None, rollout_data={"tokens": [data_utils.torch.arange(16)], "total_lengths": [16]}
+        )

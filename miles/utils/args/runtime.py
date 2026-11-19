@@ -144,6 +144,22 @@ class TrainerConfig(
     # ======================== end same-name delegates =========================
 
     @model_validator(mode="after")
+    def _validate_prefix_token_budget(self) -> Self:
+        if self.prefix_tree_max_tokens_per_gpu is not None:
+            if self.prefix_tree_max_tokens_per_gpu <= 0:
+                raise ValueError("prefix_tree_max_tokens_per_gpu must be positive")
+            if not self.prefix_tree_attention or not self.use_dynamic_batch_size:
+                raise ValueError("Compact prefix budgets require tree attention and dynamic batching")
+            if (
+                self.train_backend != "megatron"
+                or self.qkv_format != "thd"
+                or self.backend.context_parallel_size != 1
+                or self.backend.pipeline_model_parallel_size != 1
+            ):
+                raise ValueError("Compact prefix budgets require Megatron THD with CP=PP=1")
+        return self
+
+    @model_validator(mode="after")
     def _validate_backend_name(self) -> Self:
         assert self.train_backend == self.backend.backend_name, "train_backend must match backend.backend_name"
         return self

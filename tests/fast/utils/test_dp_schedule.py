@@ -460,3 +460,33 @@ def test_flops_workloads_size_from_the_hf_checkpoint_of_either_config(quadratic_
     config = config_cls.model_construct(hf_checkpoint="unused")
 
     assert dp_schedule._calculate_workloads([1, 2, 3], config) == [11.0, 23.0, 36.0]
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_prefix_budget_splits_low_sharing_batches_before_dp_distribution(shared):
+    tokens = [[1 if shared else index + 10] * 24 + [index] * 8 for index in range(16)]
+    args = make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=128)
+    args = args.model_copy(
+        update={
+            "prefix_tree_attention": True,
+            "prefix_tree_max_tokens_per_gpu": 63,
+            "tensor_model_parallel_size": 2,
+            "data_pad_size_multiplier": 1,
+        }
+    )
+    schedule = build_dp_schedule(
+        args,
+        make_tp(dp_size=4),
+        [32] * 16,
+        global_batch_size=16,
+        rollout_indices=list(range(16)),
+        tokens=tokens,
+    )
+    assert_invariants(
+        *schedule[:3],
+        dp_size=4,
+        expected_global_sample_indices=range(16),
+        total_lengths=[32] * 16,
+        max_per_bin=128,
+    )
+    assert schedule.num_microbatches == ([1] if shared else [4])

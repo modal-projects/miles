@@ -19,6 +19,10 @@ class TrainConfig(BaseConfig):
             help="Enable the native provider's tree-attention specification; the caller supplies packed tree metadata."
         ),
     ] = False
+    prefix_tree_max_tokens_per_gpu: A[
+        int | None,
+        Arg(help="Maximum compact model rows per prefix microbatch, in addition to --max-tokens-per-gpu."),
+    ] = None
     qkv_format: A[str, Arg(choices=["thd", "bshd"], help="The qkv layout.")] = "thd"
     linear_attention_backend: A[
         str,
