@@ -9,7 +9,7 @@ from miles.utils.seqlen_balancing import expand_bins_by_splitting
 def test_variable_prefixes_stay_within_both_budgets_after_dp_alignment(shared, slots):
     sequences = [[1 if shared else index + 10] * 24 + [index] * (8 + index) for index in range(8)]
     bins = split_prefix_microbatches(
-        [list(range(8))], sequences, slots, expanded_limit=160, compact_limit=84, alignment=2, pad_size=8
+        [list(range(8))], sequences, slots, expanded_limit=160, compact_limit=84, alignment=8, pad_size=8
     )
     if shared and len(set(slots)) == 1:
         assert any(len(batch) > 1 for batch in bins)
@@ -24,9 +24,10 @@ def test_variable_prefixes_stay_within_both_budgets_after_dp_alignment(shared, s
             [sequences[index] for index in batch],
             [slots[index] for index in batch],
             padded_rows=padded,
-            alignment=2,
+            alignment=8,
             num_adapters=2,
         )
+        assert len(transport.plan.tokens) % 8 == 0
         assert len(transport.plan.tokens) <= 84
         for index, path in zip(batch, transport.plan.sample_nodes, strict=False):
             assert [transport.plan.tokens[row] for row in path] == sequences[index]

@@ -143,7 +143,7 @@ def build_dp_schedule(
                     [slots[index] for index in sample_indices],
                     expanded_limit=max_per_bin,
                     compact_limit=args.prefix_tree_max_tokens_per_gpu,
-                    alignment=args.tensor_model_parallel_size,
+                    alignment=args.tensor_model_parallel_size * args.data_pad_size_multiplier,
                     pad_size=args.tensor_model_parallel_size * args.data_pad_size_multiplier,
                 )
             # Grow the micro-batch count to a multiple of align_to by splitting multi-sample micro-batches.

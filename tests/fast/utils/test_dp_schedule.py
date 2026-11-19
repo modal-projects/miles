@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from miles.backends.training_utils.prefix_tree.packed import prepare_packed_tree
 from miles.utils import dp_schedule
 from miles.utils.args.runtime import RolloutConfig, TrainerConfig
 from miles.utils.dp_schedule import TrainParallelConfig, build_dp_schedule
@@ -490,3 +491,39 @@ def test_prefix_budget_splits_low_sharing_batches_before_dp_distribution(shared)
         max_per_bin=128,
     )
     assert schedule.num_microbatches == ([1] if shared else [4])
+
+
+def test_prefix_schedule_reserves_native_alignment_within_model_budget():
+    tokens = [[1] * 23 + [index + 10] * (9 + index % 2) for index in range(16)]
+    args = make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=160).model_copy(
+        update={
+            "prefix_tree_attention": True,
+            "prefix_tree_max_tokens_per_gpu": 70,
+            "tensor_model_parallel_size": 2,
+            "data_pad_size_multiplier": 4,
+        }
+    )
+    schedule = build_dp_schedule(
+        args,
+        make_tp(),
+        list(map(len, tokens)),
+        global_batch_size=16,
+        rollout_indices=list(range(16)),
+        tokens=tokens,
+    )
+    seen = []
+    for local_indices in schedule.micro_batch_indices[0]:
+        indices = [schedule.partitions[0][index] for index in local_indices]
+        seen.extend(indices)
+        sequences = [tokens[index] for index in indices]
+        rows = sum(map(len, sequences))
+        transport = prepare_packed_tree(
+            sequences,
+            [0] * len(sequences),
+            padded_rows=(rows + 7) // 8 * 8,
+            alignment=8,
+            num_adapters=1,
+        )
+        assert len(transport.plan.tokens) <= 70
+        assert len(transport.plan.tokens) % 8 == 0
+    assert sorted(seen) == list(range(16))

@@ -685,7 +685,7 @@ def _prefix_microbatch_schedule(args, rollout_data, local_batch_size, num_steps)
                 slots[start:end],
                 expanded_limit=args.max_tokens_per_gpu,
                 compact_limit=args.prefix_tree_max_tokens_per_gpu,
-                alignment=state.tp.size,
+                alignment=state.tp.size * args.data_pad_size_multiplier,
                 pad_size=state.tp.size * args.data_pad_size_multiplier,
             )
         except ValueError as error:
