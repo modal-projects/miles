@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from miles.backends.megatron_utils.lora.native.config import LoRAConfig
 from miles.backends.megatron_utils.lora.native.modules import expert_slots
@@ -82,12 +83,28 @@ def test_expert_major_forward_and_gradients_match_per_token_reference(
         expected.append((6 / (slot + 1)) * delta)
     reference = torch.stack(expected) if expected else actual.new_empty(actual.shape)
     torch.testing.assert_close(actual, reference)
-    actual.sum().backward()
+    # A grouped host can return a view whose storage its backward still owns.
+    host = F.linear(x, torch.randn(2 * actual.shape[-1], x.shape[-1]))
+    out, _ = host.chunk(2, dim=-1)
+    before = out.detach().clone()
+    expected_sum = out + reference
+    summed = adapter.add_delta(out, actual)
+    torch.testing.assert_close(summed, expected_sum)
+    torch.testing.assert_close(out, before, rtol=0, atol=0)
+    assert summed.data_ptr() == actual.data_ptr()
+    inputs = (x, *adapter.parameters())
+    gradient = torch.randn_like(summed)
+    actual_gradients = torch.autograd.grad(summed, inputs, gradient, retain_graph=True)
+    expected_gradients = torch.autograd.grad(expected_sum, inputs, gradient, allow_unused=True)
+    for value, actual_gradient, expected_gradient in zip(inputs, actual_gradients, expected_gradients, strict=True):
+        expected_gradient = torch.zeros_like(value) if expected_gradient is None else expected_gradient
+        torch.testing.assert_close(actual_gradient, expected_gradient)
+    gradients = {id(value): gradient for value, gradient in zip(inputs, actual_gradients, strict=True)}
     for single in adapter.adapters:
         for name, parameter in single.named_parameters():
-            assert parameter.grad is not None
+            grad = gradients[id(parameter)]
             rank = adapter.lora_ranks_by_slot[list(adapter.adapters).index(single)]
-            padded = parameter[..., rank:, :] if name.endswith("_A") else parameter[..., rank:]
+            padded = grad[..., rank:, :] if name.endswith("_A") else grad[..., rank:]
             assert torch.count_nonzero(padded) == 0
 
 
