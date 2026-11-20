@@ -446,6 +446,8 @@ def split_train_data_by_dp_scheduled_raw(
         total_lengths,
         global_batch_size=global_batch_size,
         rollout_indices=data["rollout_ids"],
+        tokens=data["tokens"],
+        adapter_slots=data.get("adapter_slots"),
     )
 
     _log_dp_schedule_trim(args=args, data=data, partitions=partitions)

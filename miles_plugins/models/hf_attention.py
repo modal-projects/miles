@@ -174,6 +174,10 @@ class HuggingfaceAttention(MegatronModule, ABC):
                 output, group=mpu.get_tensor_model_parallel_group()
             )
 
+        if output.shape[1] == 1:
+            # A singleton's inherited sequence-length stride otherwise specializes downstream compiled kernels.
+            output = output.squeeze(1).unsqueeze(1)
+
         return output, bias
 
     @abstractmethod

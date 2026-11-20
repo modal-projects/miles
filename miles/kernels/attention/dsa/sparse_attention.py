@@ -158,8 +158,14 @@ def _cudnn_backward(q, kv, out, grad_out, indices, lse, attn_sink, sm_scale):
         grad_out.view(-1, heads, out.shape[-1]),
     )
     padded_heads = heads
-    if torch.cuda.get_device_capability(q.device)[0] == 10 and not (heads == 16 and head_dim == 576):
-        padded_heads = -(-heads // _CUDNN_SM100_HEAD_TILE) * _CUDNN_SM100_HEAD_TILE
+    if torch.cuda.get_device_capability(q.device)[0] == 10:
+        if heads <= 32 and torch.are_deterministic_algorithms_enabled():
+            # cuDNN's deterministic SM100 kernels accept H16 and H32.
+            # Rounding these small head counts up to H64 duplicates the
+            # long-context Q/O/dO tensors and allocates a larger dQ backing.
+            padded_heads = 16 if heads <= 16 else 32
+        elif not (heads == 16 and head_dim == 576):
+            padded_heads = -(-heads // _CUDNN_SM100_HEAD_TILE) * _CUDNN_SM100_HEAD_TILE
     if padded_heads != heads:
         pad = (0, 0, 0, padded_heads - heads)
         q, out, grad_out = (torch.nn.functional.pad(t, pad) for t in (q, out, grad_out))
@@ -175,6 +181,7 @@ def _cudnn_backward(q, kv, out, grad_out, indices, lse, attn_sink, sm_scale):
         compact["indices"].clamp_min_(0),
         softmax_scale=sm_scale,
         topk_length=topk_length.clamp_min(1),
+        deterministic=torch.are_deterministic_algorithms_enabled(),
     )
     dq = grads["dq"][:, :heads].reshape(*indices.shape[:2], heads, head_dim)
     d_sink = None if attn_sink is None else grads["d_sink"][:heads].to(attn_sink.dtype)

@@ -6,6 +6,7 @@ import functools
 import logging
 from typing import NamedTuple
 
+from miles.backends.training_utils.prefix_tree.batching import split_prefix_microbatches
 from miles.utils.args.runtime import RolloutConfig, TrainerConfig
 from miles.utils.flops_utils import ModelFlops, model_flops_from_hf_config
 from miles.utils.hf_utils.config import load_hf_config
@@ -60,6 +61,8 @@ def build_dp_schedule(
     *,
     global_batch_size: int,
     rollout_indices: list[int],
+    tokens: list[list[int]] | None = None,
+    adapter_slots: list[int] | None = None,
 ) -> DPSchedule:
     """Compute ``DPSchedule``;
     ``global_batch_size`` counts rollouts, not training samples."""
@@ -130,6 +133,19 @@ def build_dp_schedule(
                     step_micro_batches = get_seqlen_balanced_partitions(workloads, micro_batch_count, equal_size=False)
             else:
                 step_micro_batches = first_fit_decreasing_pack(step_lengths, max_per_bin)
+            if args.prefix_tree_max_tokens_per_gpu is not None:
+                if tokens is None:
+                    raise ValueError("Compact prefix scheduling requires input tokens")
+                slots = adapter_slots if adapter_slots is not None else [0] * len(total_lengths)
+                step_micro_batches = split_prefix_microbatches(
+                    step_micro_batches,
+                    [tokens[index] for index in sample_indices],
+                    [slots[index] for index in sample_indices],
+                    expanded_limit=max_per_bin,
+                    compact_limit=args.prefix_tree_max_tokens_per_gpu,
+                    alignment=args.tensor_model_parallel_size * args.data_pad_size_multiplier,
+                    pad_size=args.tensor_model_parallel_size * args.data_pad_size_multiplier,
+                )
             # Grow the micro-batch count to a multiple of align_to by splitting multi-sample micro-batches.
             target = max((len(step_micro_batches) + align_to - 1) // align_to * align_to, align_to)
             if target != len(step_micro_batches):

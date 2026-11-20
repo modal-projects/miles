@@ -15,8 +15,9 @@ from miles.backends.megatron_utils.lora.native.modules.linear import NativeMulti
 
 @dataclass(frozen=True)
 class ExpertSlotRouting:
-    permutation: torch.Tensor
-    inverse: torch.Tensor
+    # None denotes the identity ordering of a single adapter slot.
+    permutation: torch.Tensor | None
+    inverse: torch.Tensor | None
     counts: tuple[tuple[int, ...], ...]
 
 
@@ -41,14 +42,19 @@ def _co_permute_slot_ids(dispatcher, slot_ids: torch.Tensor, num_experts: int) -
 
 
 def build_expert_slot_routing(dispatcher, per_expert, counts, context, device) -> ExpertSlotRouting:
+    local_tokens = dispatcher.hidden_shape_before_permute[0]
+    total_tokens = sum(counts)
+    assert total_tokens == local_tokens or (
+        context.sequence_parallel and total_tokens == local_tokens * context.tp_size
+    ), f"{total_tokens} routed tokens cannot cover {local_tokens} local MoE tokens"
+    if len(counts) == 1:
+        # The dispatcher already groups rows by expert; one slot cannot change
+        # that ordering, including when tokens arrive from other EP ranks.
+        return ExpertSlotRouting(None, None, (tuple(torch.as_tensor(per_expert).tolist()),))
     slot_ids = torch.repeat_interleave(
         torch.arange(len(counts), device=device, dtype=torch.int32), torch.tensor(counts, device=device)
     )
-    local_tokens = dispatcher.hidden_shape_before_permute[0]
     if len(slot_ids) != local_tokens:
-        assert (
-            context.sequence_parallel and len(slot_ids) == local_tokens * context.tp_size
-        ), f"{len(slot_ids)} routed tokens cannot cover {local_tokens} local MoE tokens"
         slot_ids = slot_ids.narrow(0, context.tp_rank * local_tokens, local_tokens)
     num_experts = len(per_expert)
     slot_ids = _co_permute_slot_ids(dispatcher, slot_ids, num_experts)
@@ -75,6 +81,12 @@ class NativeMultiLoRAExpertAdapter(NativeMultiLoRAAdapter):
     def forward(self, x: torch.Tensor, base_module: nn.Module, *_host_args) -> torch.Tensor:
         routing = self.routing
         assert routing is not None, "routed expert adapters need the MoE slot-routing hook"
+        if routing.permutation is None:
+            assert routing.inverse is None and len(self.adapters) == len(routing.counts) == 1
+            delta = self.adapters[0](x, base_module, routing.counts[0])
+            scale = self.lora_alphas_by_slot[0] / self.lora_ranks_by_slot[0]
+            return delta if scale == 1 else delta * scale
+        assert routing.inverse is not None
         rows = x.index_select(0, routing.permutation)
         segments = rows.split([sum(counts) for counts in routing.counts])
         deltas = [
@@ -86,6 +98,10 @@ class NativeMultiLoRAExpertAdapter(NativeMultiLoRAAdapter):
         return torch.cat(deltas).index_select(0, routing.inverse)
 
     def add_delta(self, out: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+        # Expert deltas end in a fresh projection/concatenation, unused by their backward.
+        reusable = delta._base is None and not (delta.is_leaf and delta.requires_grad)
+        if reusable and out.shape == delta.shape and out.dtype == delta.dtype:
+            return delta.add_(out)
         return out + delta
 
 

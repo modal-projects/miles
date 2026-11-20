@@ -163,6 +163,7 @@ class Glm5NextDSAAttention(DSAMLASelfAttention):
             pool_cu_seqlens=pool_cu_seqlens,
             index_topk=self.index_topk,
             kpool=self.index_kpool,
+            topk_backend=self.topk_backend,
         )
 
     def forward(

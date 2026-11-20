@@ -19,6 +19,7 @@ from miles.backends.training_utils.data.token_space_media_process import (
     resolved_multimodal_train_inputs,
 )
 from miles.backends.training_utils.parallel import get_parallel_state
+from miles.backends.training_utils.prefix_tree.batching import split_prefix_microbatches
 from miles.platforms import current_platform
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.data import get_minimum_num_micro_batch_size, padded_token_count, process_rollout_data
@@ -26,7 +27,11 @@ from miles.utils.dp_schedule import TrainParallelConfig
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 from miles.utils.object_store import ObjectStoreGetResult
 from miles.utils.ray_utils import Box
-from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
+from miles.utils.seqlen_balancing import (
+    expand_bins_by_splitting,
+    first_fit_decreasing_pack,
+    get_seqlen_balanced_partitions,
+)
 from miles.utils.types import RolloutBatch
 
 logger = logging.getLogger(__name__)
@@ -611,6 +616,9 @@ def get_data_iterator(
         data_iterator = _generate_data_iterator(rollout_data, args.backend.micro_batch_size)
     else:
         assert args.max_tokens_per_gpu is not None
+        if args.prefix_tree_max_tokens_per_gpu is not None:
+            indices, counts = _prefix_microbatch_schedule(args, rollout_data, num_local_gbs, num_steps_per_rollout)
+            return _generate_data_iterator(rollout_data, None, indices), counts
         # calculate the number of mirobatches for each step
         samples = rollout_data["total_lengths"]
         assert len(samples) == num_local_samples
@@ -660,6 +668,45 @@ def get_data_iterator(
         data_iterator,
         num_microbatches,
     )
+
+
+def _prefix_microbatch_schedule(args, rollout_data, local_batch_size, num_steps):
+    state = get_parallel_state()
+    sequences = [tokens.tolist() for tokens in rollout_data["tokens"]]
+    slots = rollout_data.get("adapter_slots", [0] * len(sequences))
+    lengths = rollout_data["total_lengths"]
+    steps, errors = [], []
+    for step in range(num_steps):
+        start, end = step * local_batch_size, (step + 1) * local_batch_size
+        try:
+            bins = split_prefix_microbatches(
+                first_fit_decreasing_pack(lengths[start:end], args.max_tokens_per_gpu),
+                sequences[start:end],
+                slots[start:end],
+                expanded_limit=args.max_tokens_per_gpu,
+                compact_limit=args.prefix_tree_max_tokens_per_gpu,
+                alignment=state.tp.size * args.data_pad_size_multiplier,
+                pad_size=state.tp.size * args.data_pad_size_multiplier,
+            )
+        except ValueError as error:
+            errors.append(str(error))
+            bins = []
+        steps.append(bins)
+    # All ranks reject together before any peer can enter the training collectives.
+    counts = torch.tensor(
+        [int(bool(errors)), *map(len, steps)], dtype=torch.int, device=current_platform.current_device()
+    )
+    GeneralPGUtil.create(state.effective_dp.group).all_reduce(counts, state.effective_dp.group, op=dist.ReduceOp.MAX)
+    if counts[0].item():
+        raise ValueError("Prefix token budget exceeded on a DP rank: " + "; ".join(errors))
+    indices, num_microbatches = [], counts[1:].tolist()
+    for step, (bins, count) in enumerate(zip(steps, num_microbatches, strict=True)):
+        start = step * local_batch_size
+        expand_bins_by_splitting(bins, count, lengths[start : start + local_batch_size])
+        if len(bins) != count:
+            raise ValueError("Cannot align compact prefix microbatches across DP ranks")
+        indices.extend([sorted((index + start for index in batch), key=lambda index: slots[index]) for batch in bins])
+    return indices, num_microbatches
 
 
 def _num_microbatches_within_cap(lengths: list[int], max_tokens: int) -> int:

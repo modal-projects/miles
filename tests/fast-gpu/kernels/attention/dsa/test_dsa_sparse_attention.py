@@ -136,6 +136,52 @@ def test_backward_matches_autograd(case, backend, backward_backend):
         assert reference.rel_diff(sink_ref.grad, sink_tl.grad) < 0.05
 
 
+@pytest.mark.skipif(cudnn_dsa is None, reason="cuDNN frontend not installed")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="cuDNN deterministic DSA requires SM100",
+)
+@pytest.mark.parametrize("heads,expected_heads", [(8, 16), (16, 16), (24, 32), (32, 32), (64, 64), (128, 128)])
+@pytest.mark.parametrize("d_tail", [0, 64])
+def test_cudnn_backward_respects_deterministic_algorithms(heads, expected_heads, d_tail, monkeypatch):
+    torch.manual_seed(7)
+    q, kv, _, _ = _inputs(1, 512, heads, 1, 512, d_tail, 128, 128, False)
+    indices = torch.arange(128, device="cuda", dtype=torch.int32).expand(1, 512, 1, -1).contiguous()
+    gradient = torch.randn(1, 512, heads, 512, device="cuda", dtype=torch.bfloat16)
+    config = SparseAttentionConfig(forward_backend="tilelang", backward_backend="cudnn")
+    actual_heads = []
+    backward = cudnn_dsa.sparse_attention_backward_wrapper
+
+    def record_heads(query, *args, **kwargs):
+        actual_heads.append(query.shape[1])
+        return backward(query, *args, **kwargs)
+
+    monkeypatch.setattr(cudnn_dsa, "sparse_attention_backward_wrapper", record_heads)
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(True)
+        gradients = []
+        for _ in range(3):
+            query = q.detach().clone().requires_grad_()
+            keys = kv.detach().clone().requires_grad_()
+            output = sparse_attention(query, keys, indices, (512 + d_tail) ** -0.5, d_v=512, config=config)
+            gradients.append(torch.autograd.grad(output, (query, keys), gradient))
+        for actual in gradients[1:]:
+            for expected, value in zip(gradients[0], actual, strict=True):
+                assert torch.isfinite(value).all()
+                torch.testing.assert_close(value, expected, rtol=0, atol=0)
+        assert actual_heads == [expected_heads] * 3
+        query = q.float().requires_grad_()
+        keys = kv.float().requires_grad_()
+        expected = reference.sparse_attention_ref(query, keys, indices, (512 + d_tail) ** -0.5, 512, None)
+        expected_grads = torch.autograd.grad(expected, (query, keys), gradient.float())
+        for expected_grad, actual_grad in zip(expected_grads, gradients[0], strict=True):
+            assert reference.rel_diff(expected_grad, actual_grad) < 0.05
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
 @pytest.mark.skipif(len(BACKENDS) < 2, reason="FlashMLA not installed")
 @pytest.mark.parametrize("case", MQA_CASES + MLA_CASES, ids=IDS(MQA_CASES + MLA_CASES))
 def test_forward_backends_agree(case):

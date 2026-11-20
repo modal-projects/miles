@@ -106,3 +106,47 @@ class TestComponentTransport:
         config = parse_megatron_test_config()
         with pytest.raises(ValueError, match="extra_forbidden"):
             AllConfig.model_validate(config.model_dump(mode="python") | {"unknown_option": True})
+
+
+@pytest.mark.parametrize(
+    "overrides,backend_overrides,message",
+    [
+        ({"prefix_tree_max_tokens_per_gpu": 0}, {}, "must be positive"),
+        ({"prefix_tree_attention": False}, {}, "tree attention and dynamic batching"),
+        ({"use_dynamic_batch_size": False}, {}, "tree attention and dynamic batching"),
+        ({"qkv_format": "bshd"}, {}, "Megatron THD with CP=PP=1"),
+        ({}, {"context_parallel_size": 2}, "Megatron THD with CP=PP=1"),
+        ({}, {"pipeline_model_parallel_size": 2}, "Megatron THD with CP=PP=1"),
+    ],
+)
+def test_compact_prefix_budget_rejects_unsupported_launch_configuration(overrides, backend_overrides, message):
+    config = parse_megatron_test_config()
+    trainer = compute_trainer_config(config, config.raw_megatron.trainers[0])
+    payload = trainer.model_dump(mode="python") | {
+        "prefix_tree_attention": True,
+        "use_dynamic_batch_size": True,
+        "prefix_tree_max_tokens_per_gpu": 86016,
+        "qkv_format": "thd",
+        **overrides,
+    }
+    payload["backend"] = MegatronArgsNamespace(
+        **(vars(trainer.backend) | {"context_parallel_size": 1, "pipeline_model_parallel_size": 1} | backend_overrides)
+    )
+    with pytest.raises(ValueError, match=message):
+        TrainerConfig.model_validate(payload)
+
+
+def test_compact_prefix_budget_survives_trainer_json_transport():
+    config = parse_megatron_test_config()
+    trainer = compute_trainer_config(config, config.raw_megatron.trainers[0])
+    payload = trainer.model_dump(mode="python") | {
+        "prefix_tree_attention": True,
+        "use_dynamic_batch_size": True,
+        "prefix_tree_max_tokens_per_gpu": 86016,
+        "qkv_format": "thd",
+    }
+    payload["backend"] = MegatronArgsNamespace(
+        **(vars(trainer.backend) | {"context_parallel_size": 1, "pipeline_model_parallel_size": 1})
+    )
+    restored = TrainerConfig.model_validate_json(TrainerConfig.model_validate(payload).model_dump_json())
+    assert restored.prefix_tree_max_tokens_per_gpu == 86016
