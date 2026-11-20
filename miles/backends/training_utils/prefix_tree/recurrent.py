@@ -20,34 +20,6 @@ class TreeLevel:
 
 
 @dataclass(frozen=True)
-class ConvolutionTreeLayout:
-    kernel_size: int
-    rows: torch.Tensor
-    sequence_ids: torch.Tensor
-    restore_rows: torch.Tensor
-
-    @classmethod
-    def from_plan(cls, plan, *, device, kernel_size):
-        if kernel_size < 1:
-            raise ValueError("Convolution kernel size must be positive")
-        rows, sequence_ids, restore = [], [], []
-        for segment, (start, end) in enumerate(zip(plan.kv_offsets[:-1], plan.kv_offsets[1:], strict=True)):
-            length = plan.segment_offsets[segment + 1] - plan.segment_offsets[segment]
-            path = plan.kv_indices[start:end]
-            context = path[-min(len(path), length + kernel_size - 1) :]
-            halo = len(context) - length
-            restore.extend(range(len(rows) + halo, len(rows) + len(context)))
-            rows.extend(context)
-            sequence_ids.extend([segment] * len(context))
-        return cls(
-            kernel_size,
-            torch.tensor(rows, device=device, dtype=torch.long),
-            torch.tensor([sequence_ids], device=device, dtype=torch.int32),
-            torch.tensor(restore, device=device, dtype=torch.long),
-        )
-
-
-@dataclass(frozen=True)
 class RecurrentTreeLayout:
     plan: PrefixTreePlan
     levels: tuple[TreeLevel, ...]
@@ -56,10 +28,9 @@ class RecurrentTreeLayout:
     recurrent_levels: tuple[TreeLevel, ...]
     recurrent_restore_rows: torch.Tensor
     chunk_size: int = NATIVE_CHUNK_SIZE
-    convolution: ConvolutionTreeLayout | None = None
 
     @classmethod
-    def from_plan(cls, plan: PrefixTreePlan, *, device, chunk_size=NATIVE_CHUNK_SIZE, convolution_kernel_size=None):
+    def from_plan(cls, plan: PrefixTreePlan, *, device, chunk_size=NATIVE_CHUNK_SIZE):
         segments = tuple(
             tuple(range(a, b)) for a, b in zip(plan.segment_offsets[:-1], plan.segment_offsets[1:], strict=True)
         )
@@ -72,12 +43,7 @@ class RecurrentTreeLayout:
             torch.tensor(plan.kv_indices[a:b], device=device, dtype=torch.long)
             for a, b in zip(plan.kv_offsets[:-1], plan.kv_offsets[1:], strict=True)
         )
-        convolution = (
-            ConvolutionTreeLayout.from_plan(plan, device=device, kernel_size=convolution_kernel_size)
-            if convolution_kernel_size is not None
-            else None
-        )
-        return cls(plan, levels, restore, paths, recurrent_levels, recurrent_restore, chunk_size, convolution)
+        return cls(plan, levels, restore, paths, recurrent_levels, recurrent_restore, chunk_size)
 
 
 def _recurrent_segments(plan, chunk_size):

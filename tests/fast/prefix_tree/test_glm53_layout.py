@@ -7,6 +7,7 @@ import torch
 
 from miles.backends.training_utils.prefix_tree.glm53.dsa import tree_kpool_select
 from miles.backends.training_utils.prefix_tree.glm53.layout import GlmTreeLayout
+from miles.backends.training_utils.prefix_tree.megatron import MegatronTreeSFTBatch
 from miles.backends.training_utils.prefix_tree.plan import build_prefix_tree
 
 
@@ -51,33 +52,36 @@ def test_dsa_pool_phase_tail_and_compact_rebasing():
 
 
 def test_multilora_counts_compact_rows_and_refuses_cross_adapter_sharing():
-    from miles.backends.training_utils.prefix_tree.glm53.sft import GlmTreeSFTBatch
-
     sequences = [[1, 2, 3], [1, 2, 4], [1, 2, 5]]
     plan = build_prefix_tree(sequences, sharing_keys=[0, 0, 1])
-    batch = GlmTreeSFTBatch.from_plan(
+    batch = MegatronTreeSFTBatch.from_plan(
         plan,
         sequences,
         device="cpu",
+        layout=GlmTreeLayout.from_plan(plan, device="cpu"),
         adapter_slots=[0, 0, 1],
         num_adapter_slots=3,
         slot_router=SimpleNamespace(route_tokens=lambda counts: None),
     )
     assert batch.slot_counts.tolist() == [4, 3, 0]
+    unsafe_plan = build_prefix_tree(sequences)
     with pytest.raises(ValueError, match="shared across adapters"):
-        GlmTreeSFTBatch.from_plan(
-            build_prefix_tree(sequences),
+        MegatronTreeSFTBatch.from_plan(
+            unsafe_plan,
             sequences,
             device="cpu",
+            layout=GlmTreeLayout.from_plan(unsafe_plan, device="cpu"),
             adapter_slots=[0, 0, 1],
             num_adapter_slots=2,
             slot_router=SimpleNamespace(route_tokens=lambda counts: None),
         )
+    unordered_plan = build_prefix_tree(sequences, sharing_keys=[1, 0, 0])
     with pytest.raises(ValueError, match="Group samples"):
-        GlmTreeSFTBatch.from_plan(
-            build_prefix_tree(sequences, sharing_keys=[1, 0, 0]),
+        MegatronTreeSFTBatch.from_plan(
+            unordered_plan,
             sequences,
             device="cpu",
+            layout=GlmTreeLayout.from_plan(unordered_plan, device="cpu"),
             adapter_slots=[1, 0, 0],
             num_adapter_slots=2,
             slot_router=SimpleNamespace(route_tokens=lambda counts: None),

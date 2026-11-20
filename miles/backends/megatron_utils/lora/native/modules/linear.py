@@ -110,17 +110,6 @@ class NativeLoRAAdapter(nn.Module):
                 self, f"{projection.param_prefix}_B"
             ), f"native LoRA projection {projection.hf_leaf!r} has no complete A/B parameter pair"
 
-    def _linear(self, value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        if self.context.lora.kernel_policy == "native":
-            return F.linear(value, weight)
-        if self.context.lora.kernel_policy != "rowwise":
-            raise ValueError(f"Unknown native LoRA linear backend: {self.context.lora.kernel_policy}")
-        # Optional numerical control; native projection behavior stays the default.
-        from miles.backends.training_utils.prefix_tree.operators import rowwise_linear
-
-        rows = value.reshape(-1, value.shape[-1])
-        return rowwise_linear(rows, weight).reshape(*value.shape[:-1], weight.shape[0])
-
     def add_delta(self, out: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
         return torch.add(out, delta, alpha=self.context.lora.scale)
 
@@ -252,7 +241,7 @@ class LoRALinear(PhasedLoRAAdapter):
         return apply_lora_dropout(x, self.context, base_module.training)
 
     def project_down(self, x: torch.Tensor) -> torch.Tensor:
-        return self._linear(
+        return F.linear(
             x, getattr(self, f"{self.param_prefix}_A")
         )  # config-access-exempt: the projection prefix selects its registered A parameter
 
@@ -260,7 +249,7 @@ class LoRALinear(PhasedLoRAAdapter):
         return reduce_row_parallel(down, self.context) if self.layout == ShardLayout.ROW else down
 
     def project_up(self, down: torch.Tensor) -> torch.Tensor:
-        return self._linear(
+        return F.linear(
             down, getattr(self, f"{self.param_prefix}_B")
         )  # config-access-exempt: the projection prefix selects its registered B parameter
 
@@ -328,13 +317,9 @@ class LoRAGroupedColumnLinear(LoRALinear):
         return apply_lora_dropout(x, self.context, base_module.training)
 
     def project_up(self, down: torch.Tensor) -> torch.Tensor:
-        weight = getattr(
-            self, f"{self.param_prefix}_B"
-        )  # config-access-exempt: adapter parameter names follow projection prefixes
-        if self.context.lora.kernel_policy == "native":
-            return grouped_matmul(down, weight)
-        groups = weight.view(down.shape[-2], -1, weight.shape[-1])
-        return torch.stack([self._linear(down[..., i, :], w) for i, w in enumerate(groups)], dim=-2)
+        return grouped_matmul(
+            down, getattr(self, f"{self.param_prefix}_B")
+        )  # config-access-exempt: the projection prefix selects its registered B parameter
 
     def weight_deltas(self):
         (weight,) = self._host_weight
@@ -439,14 +424,14 @@ class LoRASplitAdapter(PhasedLoRAAdapter):
         return self._branch_input(x, base_module)
 
     def project_down(self, x: torch.Tensor) -> torch.Tensor:
-        return self._linear(
+        return F.linear(
             x, torch.cat([getattr(self, f"{name}_A") for name in self._active], dim=0)
         )  # config-access-exempt: the registered projection name selects its A parameter
 
     def project_up(self, down: torch.Tensor) -> torch.Tensor:
         rank = self.context.lora.rank
         active_delta = {
-            name: self._linear(
+            name: F.linear(
                 down[..., index * rank : (index + 1) * rank], getattr(self, f"{name}_B")
             )  # config-access-exempt: the registered projection name selects its B parameter
             for index, name in enumerate(self._active)

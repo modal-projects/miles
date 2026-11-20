@@ -141,7 +141,6 @@ def _validate_until_the_model(args, monkeypatch):
 def _single_lora_args(**overrides):
     args = dict(
         lora_type="lora",
-        lora_kernel_policy="native",
         multi_lora_n_adapters=0,
         lora_rank=8,
         lora_alpha=16.0,
@@ -285,7 +284,6 @@ def _bridge_args_without_layout(monkeypatch, *, multi_lora=False, **overrides):
         lora_alpha=16.0,
         lora_adapter_path=None,
         lora_type="lora",
-        lora_kernel_policy="native",
         experts_shared_outer_loras=False,
         lora_adapter_convert_save=None,
         debug_rollout_only=False,
@@ -390,7 +388,6 @@ def _gpt_oss_export_args(monkeypatch, **overrides):
         hf_checkpoint="/hf",
         megatron_to_hf_mode="bridge",
         lora_type="lora",
-        lora_kernel_policy="native",
         hf_lora_targets=["gate_up_proj", "down_proj"],
         lora_rank=4,
         lora_alpha=8.0,

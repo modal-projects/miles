@@ -27,13 +27,6 @@ def apply_native_lora(model, args):
 
     for parameter in model.parameters():
         parameter.requires_grad = False
-    if context.lora.kernel_policy == "rowwise":
-        # Install base operators before native LoRA captures and wraps their forwards.
-        from miles.backends.training_utils.prefix_tree.kernel_policy import install_frozen_expert_math
-        from miles.backends.training_utils.prefix_tree.normalization import install_row_math
-
-        install_row_math(model)
-        install_frozen_expert_math(model)
     hooked_embedding = _require_grad_on_first_activation(model)
 
     wrapped = sum(_attach_layer(layer, arch_spec, context) for layer in model.decoder.layers)

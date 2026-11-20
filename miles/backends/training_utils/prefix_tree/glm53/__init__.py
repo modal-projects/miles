@@ -2,6 +2,4 @@
 
 from miles.backends.training_utils.prefix_tree.glm53.layout import GlmTreeLayout
 
-from miles.backends.training_utils.prefix_tree.glm53.sft import GlmTreeSFTBatch
-
-__all__ = ["GlmTreeLayout", "GlmTreeSFTBatch"]
+__all__ = ["GlmTreeLayout"]

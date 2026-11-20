@@ -41,11 +41,9 @@ class _Host(nn.Module):
         return x @ self.weight.t(), None
 
 
-def _context(*, rank, alpha=8.0, num_slots=None, tp_size=1, tp_rank=0, kernel_policy="native"):
+def _context(*, rank, alpha=8.0, num_slots=None, tp_size=1, tp_rank=0):
     return AttachContext(
-        lora=LoRAConfig(
-            rank=rank, alpha=alpha, dropout=0.0, target_modules=None, num_slots=num_slots, kernel_policy=kernel_policy
-        ),
+        lora=LoRAConfig(rank=rank, alpha=alpha, dropout=0.0, target_modules=None, num_slots=num_slots),
         transformer_config=SimpleNamespace(hidden_size=HIDDEN, sequence_parallel=tp_size > 1),
         tp_size=tp_size,
         tp_rank=tp_rank,
@@ -128,8 +126,8 @@ def _attached(build, context, base_weight):
     return _Chunk(host, adapter)
 
 
-def _single(build, *, rank, alpha, base_weight, seed, kernel_policy="native"):
-    chunk = _attached(build, _context(rank=rank, alpha=alpha, kernel_policy=kernel_policy), base_weight)
+def _single(build, *, rank, alpha, base_weight, seed):
+    chunk = _attached(build, _context(rank=rank, alpha=alpha), base_weight)
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for param in chunk.adapter.parameters():
@@ -168,14 +166,13 @@ def _assert_bitwise(actual, expected):
 @pytest.mark.parametrize("build", ADAPTER_BUILDS.values(), ids=ADAPTER_BUILDS)
 @pytest.mark.parametrize("slot", [0, 2])
 @pytest.mark.parametrize("rank", [MAX_RANK, 2])
-@pytest.mark.parametrize("kernel_policy", ["native", "rowwise"])
-def test_one_routed_slot_equals_single_lora(build, slot, rank, kernel_policy):
+def test_one_routed_slot_equals_single_lora(build, slot, rank):
     """Bitwise at the max rank; below it the slot's GEMMs also reduce over its zero padding, so the values match
     (in float64, to the dtype's own tolerance) and the bits need not."""
     check = _assert_bitwise if rank == MAX_RANK else torch.testing.assert_close
     base_weight, alpha = _base_weight(torch.float64), 6.0
-    single = _single(build, rank=rank, alpha=alpha, base_weight=base_weight, seed=7, kernel_policy=kernel_policy)
-    multi = _attached(build, _context(rank=MAX_RANK, num_slots=NUM_SLOTS, kernel_policy=kernel_policy), base_weight)
+    single = _single(build, rank=rank, alpha=alpha, base_weight=base_weight, seed=7)
+    multi = _attached(build, _context(rank=MAX_RANK, num_slots=NUM_SLOTS), base_weight)
     for other in range(NUM_SLOTS):
         other_single = _single(build, rank=rank, alpha=3.0, base_weight=base_weight, seed=other)
         _load_slot(multi.adapter, other, other_single.adapter, rank=rank, alpha=3.0)
