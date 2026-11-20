@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def apply_native_lora(model, args):
     """Attach native LoRA to one model chunk before Float16Module/DDP wrapping."""
-    model_type, arch_spec = resolve_checkpoint_spec(args.hf_checkpoint)
+    model_type, arch_spec = resolve_checkpoint_spec(args.hf_checkpoint, hf_targets=args.hf_lora_targets)
     context = _resolve_attach_context(args, model.config, arch_spec)
     arch_spec.validate(context)
 
