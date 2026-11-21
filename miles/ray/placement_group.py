@@ -435,7 +435,7 @@ async def update_weights(
 
     if output.weight_version is not None:
         if args.rollout_external_url is not None:
-            metrics = await inference_controller.update_external_rollout(output.weight_version)
+            metrics = await inference_controller.update_external_rollout(output.weight_version, output.publication)
             if rollout_id is not None:
                 metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
                 tracking.log(args, metrics, step_key="rollout/step")

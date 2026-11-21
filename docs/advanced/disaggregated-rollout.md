@@ -235,6 +235,15 @@ miles calls three endpoints on `--rollout-external-control-url`:
 | `GET /status?start=S&start_id=...&head=S` | After `/start`, until a replica serves `S` | `{"serving": {"<version>": <replicas>}}` |
 | `POST /versions {"version": N, "base_version": B, "start": S, "start_id": ...}` | After publishing each later version; `B` is the version miles saw served last, which `N` builds on | Once every replica taking traffic serves `N`: `{"seconds": ..., "engines": {...}}` |
 
+With `--update-weight-transfer-mode gpu-delta`, a version's files are not found
+by its number: `/start` and `/versions` also carry `"publication"`, the
+publication's fields of the receiver's `/update_weights_from_gpu_delta`
+request (`manifest_sha256`, `stream_id`, `base_stream_id`, `base_version`,
+`target_version`, `plan_digest`, `payload_checksum_format`) and `manifest`, its
+path under `--update-weight-disk-dir`. A replica applies it only from the
+publication's base, `(base_stream_id, base_version)`; a resume starts a new
+stream rather than deleting versions.
+
 `S` is the trainer's weight version when it starts or resumes. Before `/start`,
 a resume deletes the versions published after `S`, so the service retires any
 replica past `S`; every later call names this start, and the service
