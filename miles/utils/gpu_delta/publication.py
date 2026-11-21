@@ -329,6 +329,16 @@ def configured_skip_payload_hash() -> bool:
         raise ValueError("GPU_DELTA_SKIP_PAYLOAD_HASH must be 0 or 1")
 
 
+def configured_keep_hf_base() -> bool:
+    value = os.environ.get("GPU_DELTA_KEEP_HF_BASE", "1")
+    if value == "0":
+        return False
+    elif value == "1":
+        return True
+    else:
+        raise ValueError("GPU_DELTA_KEEP_HF_BASE must be 0 or 1")
+
+
 def validate_frame_bytes(frame_bytes) -> None:
     if type(frame_bytes) is not int or not 0 < frame_bytes <= MAX_FRAME_BYTES:
         raise ValueError("GPU-delta frame_bytes must be a positive integer at most 4 MiB")

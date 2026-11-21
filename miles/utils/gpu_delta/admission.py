@@ -3,7 +3,12 @@
 import os
 
 from miles.backends.sglang_utils.arguments import collect_eval_sglang_overrides
-from miles.utils.gpu_delta.publication import ADMITTED_LOAD_FORMATS, configured_codec, configured_skip_payload_hash
+from miles.utils.gpu_delta.publication import (
+    ADMITTED_LOAD_FORMATS,
+    configured_codec,
+    configured_keep_hf_base,
+    configured_skip_payload_hash,
+)
 
 
 def _validate_load_formats(load_format, draft_load_format=None):
@@ -45,6 +50,7 @@ def validate_gpu_delta_args(args):
     configured_codec(initial_sync=True)
     # The writer records this policy in every publication, and requesters follow the publication.
     configured_skip_payload_hash()
+    configured_keep_hf_base()
     assert not args.mtp_num_layers, "GPU delta requires a static receiver MTP draft"
     target_format = args.sglang_load_format
     draft_format = args.sglang_speculative_draft_load_format

@@ -874,6 +874,40 @@ def test_checkpoint_target_reuse_and_healthy_updates_skip_recovery_encoding(tmp_
     assert exports == [True] and protocol._recovery_payload.raw["w"] == bytes([4, 4, 4, 12])
 
 
+def test_without_a_kept_hf_base_the_first_commit_recycles_it_and_companions_read_the_checkpoint(
+    tmp_path, single_rank, monkeypatch
+):
+    monkeypatch.setenv("GPU_DELTA_KEEP_HF_BASE", "0")
+    protocol = _ready_protocol(tmp_path, monkeypatch)
+
+    async def activate(clients, cohort, publication, weight_version=None, **options):
+        return _activation_result(cohort)
+
+    monkeypatch.setattr(gpu_delta.gpu_delta_session, "activate_publication", activate)
+    first = tmp_path / "iter_0000001"
+    protocol.prepare_checkpoint(first, 0, 1, _buckets)
+    protocol.finalize_checkpoint()
+    hf_base = protocol._snapshot["w"]
+    assert protocol._hf_snapshot is None and hf_base.tolist() == [1, 2, 3, 4]
+    assert (first / "gpu_delta/owner-00000.bin").read_bytes() == bytes([4, 4, 4, 12])
+    assert protocol.begin_sync(1, _buckets, rollout_id=0)
+    protocol.after_base_weights()
+    protocol.finalize(1)
+    # Two pinned copies: the committed target and the recycled HF allocation for the next one.
+    assert protocol._next_snapshot["w"] is hf_base
+
+    assert protocol.begin_sync(2, _buckets, rollout_id=1)
+    protocol.send_bucket([("w", torch.tensor([9, 10, 11, 12], dtype=torch.uint8))])
+    protocol.after_base_weights()
+    protocol.finalize(2)
+    assert protocol._snapshot["w"] is hf_base
+    second = tmp_path / "iter_0000002"
+    protocol.prepare_checkpoint(second, 1, 2, _buckets)
+    protocol.finalize_checkpoint()
+    # Relative to the checkpoint's bytes, not to the allocation that once held them.
+    assert (second / "gpu_delta/owner-00000.bin").read_bytes() == bytes([8, 8, 8, 8])
+
+
 def test_completed_update_logs_only_on_connected_metrics_rank(tmp_path, single_rank, monkeypatch):
     protocol = _ready_protocol(tmp_path, monkeypatch, connect=False)
     parallel_state = SimpleNamespace(is_metrics_rank=False)
