@@ -10,7 +10,9 @@ attention-sink TP cache and BF16 norm caches. The V4.1 compressor and indexer mi
 A best-effort placeholder until end-to-end tests cover it. The admitted checkpoint quantizes only its routed
 experts (the receiver README's contract), as an RL run's checkpoint does: BF16 attention, shared-expert,
 indexer and Engram projections bind like any unquantized linear (``wo_a`` too, which SGLang keeps as the
-checkpoint's BF16 weight), and ModelOpt NVFP4 routed experts bind through the layout ``kernel_backends``
+checkpoint's BF16 weight). Norm and Engram weights a checkpoint keeps in F32 while SGLang builds their
+parameters in BF16 bind to canonical shadows that computed images round into the parameters, as the loader's
+copy does. ModelOpt NVFP4 routed experts bind through the layout ``kernel_backends``
 identifies for their runner: FlashInfer's TRTLLM (W4A4) or MegaMoE (W4A16); SGLang main's swap-AB CuTe DSL
 layout on SM100 and SM103 is rejected. DeepSeek-V4.1's released checkpoint is not admitted: SGLang renames
 its block-FP8 dense and MXFP4 expert ``.scale`` tensors to ``weight_scale_inv``, which ``route`` leaves
@@ -30,6 +32,7 @@ from typing import NamedTuple
 import torch
 
 from miles.backends.sglang_utils.gpu_delta.bindings import (
+    ComputedImage,
     ConsumerSnapshot,
     DerivedImage,
     ParameterBindings,
@@ -63,16 +66,16 @@ _LAYER_ROUTES = MappingProxyType(
         "self_attn.wo_b.weight": "plain",
         "self_attn.compressor.wkv.weight": "compressor",
         "self_attn.compressor.wgate.weight": "compressor",
-        "self_attn.compressor.norm.weight": "plain",
+        "self_attn.compressor.norm.weight": "rounded",
         "self_attn.indexer.wq_b.weight": "plain",
         "self_attn.indexer.weights_proj.weight": "plain",
         "self_attn.indexer.wk.weight": "plain",
-        "self_attn.indexer.k_norm.weight": "plain",
+        "self_attn.indexer.k_norm.weight": "rounded",
         "mlp.gate.weight": "plain",
         "mlp.gate.e_score_correction_bias": "plain",
         "engram.wkv.weight": "plain",
-        "engram.q_weight": "plain",
-        "engram.k_weight": "plain",
+        "engram.q_weight": "rounded",
+        "engram.k_weight": "rounded",
         **{f"mlp.shared_experts.{proj}_proj.weight": "shared" for proj in ("gate", "up", "down")},
     }
 )
@@ -81,7 +84,7 @@ _LAYER_ROUTES = MappingProxyType(
 def route(name):
     """How the mapping binds one DeepSeek-V4.1 canonical tensor, from its served SGLang name.
 
-    ``name`` is ``remap_weight_name_to_dpsk_hf_format``'s result. One of plain, attn_sink, q_kv_a,
+    ``name`` is ``remap_weight_name_to_dpsk_hf_format``'s result. One of plain, rounded, attn_sink, q_kv_a,
     compressor, shared or routed; raises for anything else, which includes every name the shared static
     policy excludes and every scale of a quantized dense projection. Pure.
     """
@@ -161,12 +164,6 @@ def _check_runtime(model):
             "GPU delta does not admit DeepSeek-V4.1 shared-expert fusion, which serves the shared expert from the "
             "routed experts' buffers"
         )
-    if not hasattr(
-        model, "use_npu_arch35_mxfp8_wo_a"
-    ):  # config-access-exempt: Only SGLang main's DeepseekV4ForCausalLM records whether its NPU MXFP8 wo_a GEMM is on.
-        raise ValueError(
-            "GPU delta maps DeepSeek-V4.1 on SGLang main's DeepseekV4ForCausalLM, which this tree predates"
-        )
     mega = sorted(
         prefix
         for prefix, module in model.named_modules()
@@ -244,6 +241,11 @@ def _attn_sink_copy(prefix, attn):
     return DerivedImage(f"{prefix}.self_attn._attn_sink_local", local, attn.attn_sink[attn._attn_sink_local_slice])
 
 
+def _round_to_bf16(value):
+    # The loader's copy_ of an F32 checkpoint tensor into a BF16 parameter.
+    return (value.to(torch.bfloat16),)
+
+
 class DeepseekV4Mapping:
     """DeepSeek-V4.1 served by ``DeepseekV4ForCausalLM`` (model type ``deepseek_v41``)."""
 
@@ -258,6 +260,7 @@ class DeepseekV4Mapping:
         self.derived = []
         self._layers = {}  # layer index -> _Layer
         self._sinks = {}  # layer prefix -> attention whose sink feeds an attention-TP cache
+        self._rounded = {}  # canonical name -> (its F32 shadow, the BF16 parameter the loader rounds it into)
 
     def bind(self, name, meta):
         live = self._remap(name)
@@ -268,6 +271,8 @@ class DeepseekV4Mapping:
             # Unquantized linears, norms, mHC and router parameters, and routed experts; generic binding rejects
             # a quantized dense module and identifies each MoE layer's expert layout.
             return self.parameters.bind(name, meta, live)
+        elif kind == "rounded":
+            return self._bind_rounded(name, meta, live)
         elif kind == "attn_sink":
             return self._bind_attn_sink(name, meta, live, layer)
         elif kind == "q_kv_a":
@@ -282,6 +287,8 @@ class DeepseekV4Mapping:
     def finish(self):
         for prefix, attn in self._sinks.items():
             self.derived.append(_attn_sink_copy(prefix, attn))
+        for name, (shadow, weight) in self._rounded.items():
+            self.derived.append(ComputedImage(name, (shadow,), (weight,), _round_to_bf16))
 
     def _layer(self, index):
         """Admit one decoder layer at its first canonical tensor and pin its layer-wide consumers."""
@@ -306,6 +313,21 @@ class DeepseekV4Mapping:
             self.consumers.append(router_bias_consumer(f"{prefix}.mlp.gate.e_score_correction_bias", mlp.topk, bias))
             self._layers[index] = _Layer(prefix, attn, mlp)
         return self._layers[index]
+
+    def _bind_rounded(self, name, meta, live):
+        """A norm or Engram weight the checkpoint may keep in F32 while SGLang builds its parameter in BF16: the
+        loader rounds it on copy, so it binds to a canonical shadow that a computed image rounds into the parameter;
+        a parameter in the checkpoint's dtype binds plainly."""
+        module_name, leaf = live.rsplit(".", 1)
+        weight = self.parameters.module(module_name)._parameters[leaf]
+        if (meta["dtype"], weight.dtype) != ("F32", torch.bfloat16):
+            return self.parameters.bind(name, meta, live)
+        if list(weight.shape) != list(meta["shape"]):
+            raise ValueError(f"unsupported DeepSeek-V4.1 rounded tensor geometry: {name}")
+        rows = [0, meta["shape"][0]]
+        shadow = self.parameters.shadow(name, meta, rows, weight.device)
+        self._rounded[name] = shadow, weight
+        return self.parameters.bind_view(name, meta, None, shadow, [rows, *([0, n] for n in meta["shape"][1:])])
 
     def _bind_attn_sink(self, name, meta, live, layer):
         """The replicated FP32 sink; at attention TP above one, ``_local_attn_sink`` keeps this rank's heads in a
