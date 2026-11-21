@@ -77,6 +77,7 @@ def _setup(tmp_path, fail=False, eval_models=()):
             update_weight_engine_request_timeout=1,
             ft_components=[],
             pause_generation_mode="retract",
+            rollout_external_url=None,
         )
     )
     protocol.get_export_plan()  # Read locally before any engine exists.
@@ -724,6 +725,40 @@ def test_failed_activation_keeps_baseline_and_forbids_replay(tmp_path, single_ra
     assert protocol._snapshot is old and protocol._next_snapshot is target and protocol._uncommitted
     with pytest.raises(RuntimeError, match="automatic replay is forbidden"):
         protocol.begin_sync(2, _buckets, rollout_id=1)
+
+
+def test_an_external_fleet_is_published_to_without_contact_and_told_the_publication(
+    tmp_path, single_rank, monkeypatch
+):
+    """An external rollout service drives its own engines; it finds a version's files only through the publication."""
+    protocol = _ready_protocol(tmp_path, monkeypatch, connect=False)
+    protocol.args.rollout_external_url = "https://rollout"
+    contact = Mock(side_effect=AssertionError("an external fleet's engines are not Miles' to contact"))
+    monkeypatch.setattr(protocol, "_describe", contact)
+    monkeypatch.setattr(gpu_delta.gpu_delta_session, "activate_engine", contact)
+    protocol.connect([], [], [], [], _PARALLEL_STATE, None, None)
+    protocol._error, protocol._seen = None, set()
+    protocol._capture_baseline(_buckets)
+
+    assert protocol.begin_sync(1, _buckets, rollout_id=0)
+    protocol.send_bucket(next(_buckets(True)))
+    protocol.after_base_weights()
+    protocol.finalize(1)
+
+    contact.assert_not_called()
+    assert not protocol._uncommitted and protocol._publication_version == 1
+    manifest = tmp_path / "delta" / protocol.publication["manifest"]
+    sealed = json.loads(manifest.read_bytes())
+    assert protocol.publication == {
+        "manifest": f"{protocol._stream_id}/weight_v000001/manifest.json",
+        "manifest_sha256": gpu_delta_publication.sha256(manifest.read_bytes()),
+        **{
+            key: sealed[key]
+            for key in ("stream_id", "base_stream_id", "base_version", "target_version", "plan_digest")
+        },
+        "payload_checksum_format": sealed["payload_checksum_format"],
+    }
+    assert (protocol.publication["base_stream_id"], protocol.publication["base_version"]) == (None, 0)
 
 
 @pytest.mark.parametrize("site", ["plan", "reused-target"])

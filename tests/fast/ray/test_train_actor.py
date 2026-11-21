@@ -398,6 +398,35 @@ class TestWeightUpdateOutputMerge:
         assert merged.weight_version == 5
         assert set(merged.failed_cell_ids) == {"rollout-1", "rollout-3", "rollout-4"}
 
+    def test_the_publication_the_trainer_cells_agree_on_is_kept(self):
+        """An external rollout service finds a gpu-delta version's files only through it."""
+        publication = {"stream_id": "s", "target_version": 2}
+        outputs = [
+            WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication=publication),
+            WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication=dict(publication)),
+        ]
+
+        assert WeightUpdateOutput.merge(outputs).publication == publication
+
+    def test_equal_reports_with_a_publication_collapse_in_a_set(self):
+        """Every rank of a trainer cell reports the same output, and the cell keeps one."""
+        publication = {"stream_id": "s", "target_version": 2}
+        first = WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication=publication)
+        second = WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication=dict(publication))
+        other = WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication={"target_version": 3})
+
+        assert {first, second} == {first}
+        assert len({first, other}) == 2
+
+    def test_trainer_cells_naming_different_publications_are_rejected(self):
+        outputs = [
+            WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication={"target_version": 2}),
+            WeightUpdateOutput(weight_version=5, failed_cell_ids=(), publication={"target_version": 3}),
+        ]
+
+        with pytest.raises(AssertionError, match="disagree on the publication"):
+            WeightUpdateOutput.merge(outputs)
+
     def test_one_rollout_cell_blamed_by_two_trainer_cells_is_rejected(self):
         """The targets are split disjointly, so the same id twice means the split leaked."""
         outputs = [
