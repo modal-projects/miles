@@ -7,6 +7,7 @@ implicit size discovery, host scalar reads or wrapper-added synchronization.
 The nvCOMP DE backend and Bitcomp batched decoder may wait for earlier work on
 the calling stream before submitting decompression, despite the Async API name.
 CUDA decoding uses two compressed device slots so H2D can overlap decode/apply.
+Gap frames take the same plan through ``GapDecoder``, whose decode call is a Triton kernel.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from functools import cache
 import numpy as np
 import torch
 
-from miles.utils.gpu_delta import profiling
-from miles.utils.gpu_delta.nvcomp import _load_library, _NvcompApi
+from miles.utils.gpu_delta import gap, profiling
+from miles.utils.gpu_delta.nvcomp import _Alignments, _load_library, _NvcompApi
 from miles.utils.gpu_delta.publication import MAX_FRAME_BYTES
 
 
@@ -75,10 +76,10 @@ class DecodeWorkspace:
 
 @cache
 def decoder_backend(device, inner_codec):
-    """Hardware DE for Snappy/LZ4 on SM100/SM103; CUDA decoding for Bitcomp and on other devices."""
+    """Hardware DE for Snappy/LZ4 on SM100/SM103; CUDA decoding for Bitcomp, gap and on other devices."""
     if inner_codec in {"snappy", "lz4"}:
         return "hardware" if torch.cuda.get_device_capability(device) in {(10, 0), (10, 3)} else "cuda"
-    elif inner_codec == "bitcomp":
+    elif inner_codec in {"bitcomp", "gap"}:
         return "cuda"
     else:
         raise ValueError(f"unsupported GPU delta inner codec: {inner_codec}")
@@ -239,6 +240,60 @@ class NvcompDecoder(_NvcompApi):
             output_remainders=remainders,
             input_frames=table[:2],
         )
+
+
+class GapDecoder(NvcompDecoder):
+    """Gap frames through nvCOMP's batched decompression call, on CUDA SMs.
+
+    The prepared plan, compressed input slots, output binding and status checks are NvcompDecoder's;
+    only the call is a Triton kernel. Frames hold whole changes, at most one per decoded byte, and
+    decode into 16-byte aligned outputs.
+    """
+
+    def __init__(self, device: torch.device):
+        self.device = torch.device(device)
+        if self.device.type != "cuda" or self.device.index is None:
+            raise ValueError("Delta decoder requires an explicit CUDA device")
+        self.inner_codec, self.backend, self.hardware = "gap", decoder_backend(self.device, "gap"), False
+        self._label, self._options = "gap/cuda", None
+        self.maximum_chunk_bytes = _INT64_MAX
+        self.alignments = _Alignments(input=1, output=gap.ALIGNMENT, temp=1)
+        self._decode_kernel = gap.compiled_decode(self.device.index)
+
+    def temporary_bytes(self, geometry, cuda_stream) -> int:
+        return 0
+
+    def _frame_geometry(self, table, counts, input_base, input_bytes):
+        geometry = super()._frame_geometry(table, counts, input_base, input_bytes)
+        encoded, decoded = table[1], table[2]
+        if np.any(encoded % gap.CHANGE_BYTES) or np.any(encoded > gap.CHANGE_BYTES * decoded):
+            raise ValueError("Gap frames hold four bytes per change and at most one change per decoded byte")
+        return geometry
+
+    def _decode(
+        self,
+        inputs,
+        encoded_sizes,
+        decoded_sizes,
+        actual_sizes,
+        count,
+        temporary,
+        temporary_bytes,
+        outputs,
+        options,
+        statuses,
+        stream,
+    ):
+        """Launch only, as nvCOMP: a corrupt frame reports a nonzero status."""
+        self._decode_kernel[(count, 1, 1)](
+            inputs, encoded_sizes, decoded_sizes, actual_sizes, outputs, statuses, stream=stream
+        )
+        return 0
+
+
+def create_decoder(device, inner_codec):
+    """The receiver's decoder of one inner codec."""
+    return GapDecoder(device) if inner_codec == "gap" else NvcompDecoder(device, inner_codec)
 
 
 def _pack_inputs(inputs, sizes, alignment):

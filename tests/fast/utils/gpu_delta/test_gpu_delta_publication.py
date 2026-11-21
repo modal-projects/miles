@@ -129,6 +129,23 @@ def test_framed_publication_preserves_payload_ranges_and_final_file_hash(tmp_pat
     assert unhashed == hashed
 
 
+def test_learned_updates_default_to_gap_zstd_and_hf_relative_publications_to_bitcomp_zstd(monkeypatch):
+    assert publication.CODECS["gap-zstd"] == ("gap", "zstd")
+    monkeypatch.delenv("GPU_DELTA_CODEC", raising=False)
+    monkeypatch.delenv("GPU_DELTA_INITIAL_SYNC_CODEC", raising=False)
+    assert publication.configured_codec() == "gap-zstd"
+    assert publication.configured_codec(initial_sync=True) == "bitcomp-zstd"
+    monkeypatch.setenv("GPU_DELTA_CODEC", "bitcomp-zstd")
+    monkeypatch.setenv("GPU_DELTA_INITIAL_SYNC_CODEC", "gap-zstd")
+    assert publication.configured_codec() == "bitcomp-zstd"
+    assert publication.configured_codec(initial_sync=True) == "gap-zstd"
+    for variable, initial_sync in (("GPU_DELTA_CODEC", False), ("GPU_DELTA_INITIAL_SYNC_CODEC", True)):
+        monkeypatch.setenv(variable, "gap-lz4")
+        with pytest.raises(ValueError, match=variable):
+            publication.configured_codec(initial_sync=initial_sync)
+        monkeypatch.delenv(variable)
+
+
 def test_concurrent_shards_merge_interleaved_tensor_and_frame_rows(tmp_path):
     first, empty, last = [_writer(tmp_path, i) for i in range(3)]
     size = publication.FRAME_BYTES
