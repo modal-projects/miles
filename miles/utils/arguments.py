@@ -1662,9 +1662,9 @@ def miles_validate_args(args):
         assert (
             args.rollout_external_url is not None and args.rollout_external_control_url is not None
         ), "--rollout-external-url and --rollout-external-control-url name one external rollout: set both."
-        assert args.update_weight_transfer_mode == "disk-delta", (
+        assert args.update_weight_transfer_mode in ("disk-delta", "gpu-delta"), (
             "An external rollout service loads each version from --update-weight-disk-dir: it needs "
-            "--update-weight-transfer-mode disk-delta."
+            "--update-weight-transfer-mode disk-delta or gpu-delta."
         )
         assert args.fully_async, (
             "An external rollout service serves fully async runs only: the other rollout loops abort every "

@@ -839,7 +839,7 @@ class _RecordingWeightUpdater:
         self.conn_status = ConnStatusManager()
         self.connect_calls: list[dict[str, Any]] = []
         self.update_weights_calls: int = 0
-        self.protocol = SimpleNamespace(cell_updaters_of_cell_id={})
+        self.protocol = SimpleNamespace(cell_updaters_of_cell_id={}, publication=None)
         self.active_receiver_pool: str | None = None
         self.receiver_pool_calls: list[str] = []
         self.mark_trainer_stale_calls = 0

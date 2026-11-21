@@ -128,6 +128,11 @@ class UpdateWeightFromGpuDelta(WeightTransferProtocol):
         self.group_name = "miles-gpu-delta"
         self._is_metrics_rank = parallel_state.is_metrics_rank
         self.initialize_export(parallel_state, placement)
+        if self.args.rollout_external_url is not None:
+            # An external rollout service drives its own engines: Miles only publishes.
+            self._receivers = gpu_delta_session.EngineIdentities((), ())
+            self._committed_incarnations = {}
+            return
         descriptions = _on_root(lambda: self._describe(engine_ids))
         active = [i for i, description in enumerate(descriptions) if description is not None]
         self.rollout_engines = [self.rollout_engines[i] for i in active]
@@ -916,6 +921,7 @@ class UpdateWeightFromGpuDelta(WeightTransferProtocol):
 
     def finalize(self, weight_version):
         publication = self._publish()
+        self.publication = _announcement(publication, self.args.update_weight_disk_dir)
         incarnations = self._incarnations()
         ordinary = tuple(
             engine_id
@@ -1001,6 +1007,21 @@ class UpdateWeightFromGpuDelta(WeightTransferProtocol):
         gpu_delta_metrics.log_completed_update(
             self.args, self.pop_metrics(), rollout_id=self._rollout_id, is_primary_rank=self._is_metrics_rank
         )
+
+
+def _announcement(publication, publication_root):
+    """The receiver request's publication fields, the manifest named under the shared publication directory."""
+    fields = (
+        "manifest_sha256",
+        "stream_id",
+        "base_stream_id",
+        "base_version",
+        "target_version",
+        "plan_digest",
+        "payload_checksum_format",
+    )
+    manifest = Path(publication["manifest_path"]).relative_to(Path(publication_root).resolve())
+    return {key: publication[key] for key in fields} | {"manifest": str(manifest)}
 
 
 def _gather_all(value):
