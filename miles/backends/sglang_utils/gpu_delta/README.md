@@ -283,7 +283,15 @@ The receiver takes the codec and frame size (a positive integer of at most 4 MiB
 environment variable or default (the user guide lists the codecs). Frames for the
 decompression engine (DE) must fit the device's compressed and decoded limits, and all
 paths validate geometry, alignment and capacity. Streams can change codec
-without changing their canonical plan; native decoders are cached by inner codec.
+without changing their canonical plan; decoders are cached by inner codec.
+
+Gap frames decode on CUDA SMs, through a Triton kernel behind nvCOMP's batched
+decompression call (`codec.GapDecoder`), never on DE. Preparation refuses a gap frame
+that is not whole four-byte changes, holds more changes than decoded bytes, or decodes
+to an output that is not 16-byte aligned. In the pause the kernel zeroes each frame's
+output, then stores each change's value at its position; a change past the frame, a
+repeated position or a zero value sets that frame's status, no store leaves the frame,
+and the status kernel turns the status into the sticky error before any apply.
 
 Wrapped matrix frames use independent GPU-compressed outer Zstd chunks with at
 most 1 MiB output. CPU workers unwrap them into shared host storage. Plain
@@ -384,7 +392,7 @@ CUDA, one compute stream decodes and applies while a copy stream prefetches the 
 batch's compressed input into one of two slots. `receiver.py` documents the ordering.
 
 Only omitted frame gaps/tails are zeroed. A fully covered batch skips zeroing; one
-status kernel checks native sizes/statuses before each grouped XOR. Source binding
+status kernel checks decoder sizes/statuses before each grouped XOR. Source binding
 requires 16-byte aligned decoded slots, patches the prepared pointer slab and uploads
 it once; a misaligned slot is rejected because there is no fallback descriptor path.
 Derived consumer copies are gated by the sticky error. Computed images run in the

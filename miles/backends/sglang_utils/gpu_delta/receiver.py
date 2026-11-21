@@ -17,7 +17,7 @@ from miles.backends.sglang_utils.gpu_delta.derived import prepare_updates
 from miles.backends.sglang_utils.gpu_delta.layout import GpuDeltaLayout
 from miles.backends.sglang_utils.gpu_delta.session import PreparationDrainError
 from miles.utils.gpu_delta import profiling
-from miles.utils.gpu_delta.codec import NvcompDecoder
+from miles.utils.gpu_delta.codec import create_decoder
 from miles.utils.gpu_delta.host import HostArena
 from miles.utils.gpu_delta.host_worker import copy_bytes
 from miles.utils.gpu_delta.publication import CODECS, catalog_entry, plan_digest, tensor_metadata
@@ -258,7 +258,7 @@ class PreparedDelta:
         self.codec = publication.header["codec"]
         inner_codec = CODECS[self.codec][0]
         if inner_codec not in backend.decoders:
-            backend.decoders[inner_codec] = NvcompDecoder(self.device, inner_codec)
+            backend.decoders[inner_codec] = create_decoder(self.device, inner_codec)
         self.decoder = backend.decoders[inner_codec]
         self.hardware = self.decoder.hardware
         self.target_version = publication.header["target_version"]

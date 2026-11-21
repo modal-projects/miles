@@ -14,7 +14,7 @@ These `GPU_DELTA_*` variables are development/debug controls, not a stable confi
 
 | Development variable | Meaning |
 | --- | --- |
-| `GPU_DELTA_CODEC=bitcomp-zstd` | Trainer codec for ordinary learned updates, one of the [user guide's codecs](../../../docs/advanced/gpu-delta-weight-transfer.md#usage). Read once at launch; receivers take the codec from each authenticated publication. |
+| `GPU_DELTA_CODEC=gap-zstd` | Trainer codec for ordinary learned updates, one of the [user guide's codecs](../../../docs/advanced/gpu-delta-weight-transfer.md#usage). Read once at launch; receivers take the codec from each authenticated publication. |
 | `GPU_DELTA_INITIAL_SYNC_CODEC=bitcomp-zstd` | Trainer codec for initial sync, engine recovery, checkpoint companions and eval snapshots. |
 | `GPU_DELTA_SKIP_PAYLOAD_HASH=0` | `1` makes the trainer write publications without owner-file SHA256 (`payload_checksum_format="none"`), which [requesters follow](../../../docs/advanced/gpu-delta-weight-transfer.md#activation-and-failures). A trainer-only variable: launch validation and each trainer reject values other than `0` and `1`. See the receiver's [payload verification](../../../miles/backends/sglang_utils/gpu_delta/README.md#configuration-and-observations). |
 
@@ -40,12 +40,14 @@ python tests/e2e/megatron/test_glm5_2_744b_a40b_5layer_nvfp4_w4a16.py
 CPU mocks do not prove CUDA/native behavior. Each test's docstring states its hardware and package
 prerequisites; without CUDA the layout and apply tests skip, and any other missing prerequisite fails.
 `nvcomp_oracle.py` round-trips native nvCOMP compression through independent CPU decoders and checks
-asynchronous submission; the encoder test applies its `decode()` oracle. From the Miles checkout, run
+asynchronous submission; the encoder test applies its `decode()` oracle, which also decodes gap frames.
+`test_gap.py` checks gap frames against a CPU reference, decodes them through the receiver's CUDA schedule
+and feeds the decoder corrupt and truncated frames. From the Miles checkout, run
 each command in a fresh process:
 
 ```bash
 python tests/manual/gpu_delta/nvcomp_oracle.py
-for test in test_gpu_delta_encoder test_gpu_delta_layout_cuda test_host_cuda test_apply_cuda; do
+for test in test_gpu_delta_encoder test_gap test_gpu_delta_layout_cuda test_host_cuda test_apply_cuda; do
   python -m pytest -q "tests/manual/gpu_delta/$test.py"
 done
 # DE allocation and decoding, once per ambient allocator mode.

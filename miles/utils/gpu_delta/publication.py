@@ -1,6 +1,6 @@
 """Immutable, independently framed canonical publications for direct GPU apply.
 
-All mutable tensors carry XOR masks. Matrix masks use GPU Snappy/LZ4/Bitcomp
+All mutable tensors carry XOR masks. Matrix masks use GPU Snappy/LZ4/Bitcomp/gap
 frames with optional GPU Zstd wrapping; scalar and vector masks are uncompressed.
 These publications are not checkpoint patches for the disk-delta loader.
 """
@@ -36,6 +36,7 @@ CODECS = {
     "lz4": ("lz4", None),
     "bitcomp": ("bitcomp", None),
     "bitcomp-zstd": ("bitcomp", "zstd"),
+    "gap-zstd": ("gap", "zstd"),
 }
 DTYPE_BYTES = {
     "BOOL": 1,
@@ -302,8 +303,11 @@ def sha256(data) -> str:
 
 
 def configured_codec(initial_sync: bool = False) -> str:
-    variable = "GPU_DELTA_INITIAL_SYNC_CODEC" if initial_sync else "GPU_DELTA_CODEC"
-    codec = os.environ.get(variable, "bitcomp-zstd")
+    """Learned updates default to gap-zstd; HF-relative publications to bitcomp-zstd."""
+    variable, default = (
+        ("GPU_DELTA_INITIAL_SYNC_CODEC", "bitcomp-zstd") if initial_sync else ("GPU_DELTA_CODEC", "gap-zstd")
+    )
+    codec = os.environ.get(variable, default)
     if codec not in CODECS:
         raise ValueError(f"Expected {variable} to be one of {tuple(CODECS)}")
     return codec

@@ -48,11 +48,14 @@ owns development variables, the manual checks, the five-layer E2E test and the b
   Rollout weights must stay resident (no `--offload-rollout`). Supported serving layouts
   and parallelism are part of the receiver contract.
 
-The codecs are `snappy-zstd`, `lz4-zstd`, `lz4`, `bitcomp-zstd` (default) and `bitcomp`.
-`*-zstd` wraps the inner codec with GPU Zstd on the trainer and CPU Zstd on the receiver;
-`lz4` and `bitcomp` skip both outer stages. Bitcomp always uses the sparse algorithm with
-lossless U8 bytes and no quantization; LZ4 uses byte input with bitshuffle disabled.
-Neither adds a weight-layout transform. Scalars and vectors carry uncompressed XOR masks;
+The codecs are `gap-zstd` (default for learned updates), `bitcomp-zstd` (default for
+initial sync), `bitcomp`, `snappy-zstd`, `lz4-zstd` and `lz4`. `*-zstd` wraps the inner codec
+with GPU Zstd on the trainer and CPU Zstd on the receiver; `lz4` and `bitcomp` skip both
+outer stages. Gap, which Miles encodes and decodes on CUDA SMs, writes each changed byte of a
+frame as its distance from the previous change, in three byte planes, followed by the changed
+values: four bytes per changed byte. Bitcomp always uses the sparse algorithm with lossless U8
+bytes and no quantization; LZ4 uses byte input with bitshuffle disabled. None adds a
+weight-layout transform. Scalars and vectors carry uncompressed XOR masks;
 the `overwrite` encoding belongs to disk-delta. The trainer reads `GPU_DELTA_CODEC` and
 `GPU_DELTA_INITIAL_SYNC_CODEC` once at launch (see the development guide); receivers take
 the codec from each authenticated manifest. GPU-delta does not require Blackwell: only
@@ -78,8 +81,9 @@ fresh HF receiver receives an HF-relative publication for the same target.
 Receivers ahead of the restored checkpoint cannot join that branch in place.
 A checkpoint without saved ancestry uses the HF startup path.
 
-Initial and learned publications both default to Bitcomp-Zstd. Phase-specific codec
-overrides follow the initial-sync call, not transfer-version arithmetic. Encoder setup is
+Learned publications default to gap-zstd; the initial sync, engine recovery, checkpoint
+companions and eval snapshots, which are HF-relative, default to Bitcomp-Zstd. Phase-specific
+codec overrides follow the initial-sync call, not transfer-version arithmetic. Encoder setup is
 lazy and cached before publication or export; receivers cache decoders by the manifest
 codec during preparation. The canonical plan and version-stream identity do not depend on
 the codec. The startup delta may be large: it reuses the ordinary transport and
@@ -104,7 +108,8 @@ export bucket; queued batches upload their pinned current snapshots, so retained
 exporter allocations stay bounded to one encoding batch.
 
 The encoder compresses all independent inner-codec frames of a batch in one call while
-later exports continue. Unchanged frames are omitted; incompressible changed frames keep
+later exports continue; gap first counts each frame's changes and reads the counts back to
+size its compact output. Unchanged frames are omitted; incompressible changed frames keep
 the selected codec. Compact, 16-byte-aligned inner-codec arenas stay in HBM across
 batches. Wrapped codecs then compress all of an owner's inner arenas together with GPU
 Zstd, in independent outer chunks of at most 1 MiB that preserve tensor boundaries. Both

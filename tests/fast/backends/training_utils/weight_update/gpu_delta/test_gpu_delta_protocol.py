@@ -231,7 +231,7 @@ def test_initial_delta_publishes_loaded_trainer_then_switches_to_cached_update_c
     if codec is None:
         monkeypatch.delenv("GPU_DELTA_CODEC", raising=False)
         monkeypatch.delenv("GPU_DELTA_INITIAL_SYNC_CODEC", raising=False)
-        initial_codec = codec = "bitcomp-zstd"
+        initial_codec, codec = "bitcomp-zstd", "gap-zstd"
     else:
         monkeypatch.setenv("GPU_DELTA_CODEC", codec)
         monkeypatch.setenv("GPU_DELTA_INITIAL_SYNC_CODEC", initial_codec)
