@@ -169,8 +169,8 @@ class TestCanonicalCheckpointHeaders(unittest.TestCase):
         self.config({"architectures": ["Qwen3MoeForCausalLM"], "num_hidden_layers": 1})
         admitted = re.escape(
             "admitted checkpoint architectures: ['DeepseekV2ForCausalLM', 'DeepseekV32ForCausalLM', "
-            "'DeepseekV3ForCausalLM', 'DeepseekV41ForCausalLM', 'GlmMoeDsaForCausalLM', "
-            "'KimiK3ForConditionalGeneration', 'Qwen3_5ForConditionalGeneration', "
+            "'DeepseekV3ForCausalLM', 'DeepseekV41ForCausalLM', 'Glm5NextForConditionalGeneration', "
+            "'GlmMoeDsaForCausalLM', 'KimiK3ForConditionalGeneration', 'Qwen3_5ForConditionalGeneration', "
             "'Qwen3_5MoeForConditionalGeneration']"
         )
         message = (
