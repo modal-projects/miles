@@ -135,6 +135,8 @@ class StaticPolicy:
 _MTP_DRAFT = re.compile(r"^mtp\.")
 # Vision tower: Miles trains and exports the text model only.
 _QWEN3_5_FROZEN = re.compile(r"^model\.visual\.")
+# Vision tower: Miles exports GLM-5.3-Flash's text decoder only.
+_GLM5_NEXT_FROZEN = re.compile(r"^model\.visual\.")
 # Vision tower and multimodal projector.
 _KIMI_K3_FROZEN = re.compile(r"^(?:vision_tower|mm_projector)\.")
 # Vision tower, aligner, image tokens, vision routing bias and Engram hash tables.
@@ -152,6 +154,11 @@ def _qwen3_5_policy(config):
     return StaticPolicy(
         num_hidden_layers=config["text_config"]["num_hidden_layers"], draft=_MTP_DRAFT, frozen=_QWEN3_5_FROZEN
     )
+
+
+def _glm5_next_policy(config):
+    # The bundled MTP layer is numbered from the decoder depth: model.language_model.layers.<num_hidden_layers>.
+    return StaticPolicy(num_hidden_layers=config["text_config"]["num_hidden_layers"], frozen=_GLM5_NEXT_FROZEN)
 
 
 def _kimi_k3_policy(config):
@@ -174,6 +181,7 @@ _STATIC_POLICIES = MappingProxyType(
         "DeepseekV3ForCausalLM": _deepseek_v2_family_policy,
         "DeepseekV32ForCausalLM": _deepseek_v2_family_policy,
         "GlmMoeDsaForCausalLM": _deepseek_v2_family_policy,
+        "Glm5NextForConditionalGeneration": _glm5_next_policy,
         "KimiK3ForConditionalGeneration": _kimi_k3_policy,
         "Qwen3_5ForConditionalGeneration": _qwen3_5_policy,
         "Qwen3_5MoeForConditionalGeneration": _qwen3_5_policy,
