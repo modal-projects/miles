@@ -170,7 +170,8 @@ class TestCanonicalCheckpointHeaders(unittest.TestCase):
         admitted = re.escape(
             "admitted checkpoint architectures: ['DeepseekV2ForCausalLM', 'DeepseekV32ForCausalLM', "
             "'DeepseekV3ForCausalLM', 'DeepseekV41ForCausalLM', 'GlmMoeDsaForCausalLM', "
-            "'KimiK3ForConditionalGeneration']"
+            "'KimiK3ForConditionalGeneration', 'Qwen3_5ForConditionalGeneration', "
+            "'Qwen3_5MoeForConditionalGeneration']"
         )
         message = (
             f"GPU delta has no static-tensor policy for checkpoint architecture 'Qwen3MoeForCausalLM'; {admitted}$"
