@@ -20,10 +20,14 @@ class ExternalRollout:
         self._start: dict | None = None
         self._served: int | None = None
 
-    async def serve(self, version: int) -> dict[str, float]:
-        """The first version starts the run and waits for one engine; later ones, for every engine taking traffic."""
+    async def serve(self, version: int, publication: dict | None = None) -> dict[str, float]:
+        """The first version starts the run and waits for one engine; later ones, for every engine taking traffic.
+
+        ``publication`` names the files of a version the service cannot find by its number alone (gpu-delta).
+        """
+        publication_field = {} if publication is None else {"publication": publication}
         if self._start is None:
-            reply = await self._call("/start", {"version": version})
+            reply = await self._call("/start", {"version": version, **publication_field})
             self._start = {"start": version, "start_id": reply["start_id"]}
             logger.info(f"waiting for the external rollout to serve version {version}")
             # A control service restarted before any version learns the run from this poll.
@@ -33,7 +37,9 @@ class ExternalRollout:
             logger.info(f"the external rollout serves version {version}")
             self._served = version
             return {}
-        reply = await self._call("/versions", {"version": version, "base_version": self._served, **self._start})
+        reply = await self._call(
+            "/versions", {"version": version, "base_version": self._served, **self._start, **publication_field}
+        )
         self._served = version
         stats = [engine["stats"] or {} for engine in reply["engines"].values()]
         metrics = {

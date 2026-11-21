@@ -1882,13 +1882,15 @@ async def test_the_controller_hands_each_published_version_to_the_external_rollo
     controller = InferenceController(
         make_args(rollout_external_control_url="https://control"), engine_provider=None, router_providers=[]
     )
-    served: list[int] = []
+    served: list = []
 
-    async def serve(version: int) -> dict[str, float]:
-        served.append(version)
+    async def serve(version: int, publication: dict | None) -> dict[str, float]:
+        served.append((version, publication))
         return {"perf/update_weights_external_s": 1.0}
 
     monkeypatch.setattr(controller._external_rollout, "serve", serve)
 
-    assert await controller.update_external_rollout(4) == {"perf/update_weights_external_s": 1.0}
-    assert served == [4]
+    assert await controller.update_external_rollout(4, {"target_version": 2}) == {
+        "perf/update_weights_external_s": 1.0
+    }
+    assert served == [(4, {"target_version": 2})]
