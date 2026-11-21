@@ -824,7 +824,7 @@ def test_a_failed_reclaim_leaks_the_dead_cohort_and_never_fails_the_attach(tmp_p
     assert sorted(path.name for path in tmp_path.iterdir() if path.is_dir()) == ["dead", "own"]
 
 
-@pytest.mark.parametrize("codec", ["snappy-zstd", "lz4-zstd", "lz4"])
+@pytest.mark.parametrize("codec", ["snappy-zstd", "lz4-zstd", "lz4", "gap-zstd"])
 def test_bounded_jobs_decode_raw_and_compressed_bytes_exactly(codec, tmp_path):
     expected = {f"t{i}": bytes([i % 251]) * (31 + i * 31) for i in range(97)}
     expected["t33"] = bytes(j % 251 for j in range(len(expected["t33"])))
