@@ -133,6 +133,8 @@ class StaticPolicy:
 
 
 _MTP_DRAFT = re.compile(r"^mtp\.")
+# Vision tower: Miles trains and exports the text model only.
+_QWEN3_5_FROZEN = re.compile(r"^model\.visual\.")
 # Vision tower and multimodal projector.
 _KIMI_K3_FROZEN = re.compile(r"^(?:vision_tower|mm_projector)\.")
 # Vision tower, aligner, image tokens, vision routing bias and Engram hash tables.
@@ -144,6 +146,12 @@ _DEEPSEEK_V41_FROZEN = re.compile(
 def _deepseek_v2_family_policy(config):
     # Checkpoints SGLang serves on its DeepSeek-V2 implementation number their bundled drafts from the decoder depth.
     return StaticPolicy(num_hidden_layers=config["num_hidden_layers"])
+
+
+def _qwen3_5_policy(config):
+    return StaticPolicy(
+        num_hidden_layers=config["text_config"]["num_hidden_layers"], draft=_MTP_DRAFT, frozen=_QWEN3_5_FROZEN
+    )
 
 
 def _kimi_k3_policy(config):
@@ -167,6 +175,8 @@ _STATIC_POLICIES = MappingProxyType(
         "DeepseekV32ForCausalLM": _deepseek_v2_family_policy,
         "GlmMoeDsaForCausalLM": _deepseek_v2_family_policy,
         "KimiK3ForConditionalGeneration": _kimi_k3_policy,
+        "Qwen3_5ForConditionalGeneration": _qwen3_5_policy,
+        "Qwen3_5MoeForConditionalGeneration": _qwen3_5_policy,
         "DeepseekV41ForCausalLM": _deepseek_v41_policy,
     }
 )
