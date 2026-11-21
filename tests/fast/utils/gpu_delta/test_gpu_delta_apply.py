@@ -231,6 +231,52 @@ def test_source_bounds_empty_plans_and_missing_destinations(planner):
     assert empty.bind_launch(None, None, None) is None
 
 
+def test_layer_plans_reuse_each_bindings_geometry_and_equal_a_fresh_plan(planner, monkeypatch):
+    import numpy as np
+
+    from miles.backends.sglang_utils.gpu_delta import bindings as byte_layout
+    from miles.backends.sglang_utils.gpu_delta import receiver
+
+    storage = torch.zeros(1024, dtype=torch.uint8)
+    names, sizes = ["model.layers.0.a", "model.layers.0.b", "model.layers.1.a", "lm_head.weight"], [24, 7, 40, 16]
+    bindings = [
+        byte_layout._direct_binding(
+            name, {"dtype": "U8", "shape": [size], "encoding": "xor_bytes"}, storage[64 * row : 64 * row + size]
+        )
+        for row, (name, size) in enumerate(zip(names, sizes, strict=True))
+    ]
+    table = receiver._BindingTable(
+        SimpleNamespace(bindings=bindings, derived=[], computed=[]),
+        {b.name: (row, {"nbytes": size}) for row, (b, size) in enumerate(zip(bindings, sizes, strict=True))},
+    )
+    built, geometry = [], planner.apply_geometry
+    monkeypatch.setattr(
+        planner, "apply_geometry", lambda binding, size: built.append(binding.name) or geometry(binding, size)
+    )
+    monkeypatch.setitem(sys.modules, "miles.utils.gpu_delta.apply", planner)
+    backend = SimpleNamespace(batch_plan=None, layers_per_batch=1)
+    # Each update activates another set of rows; every binding's geometry is built once, at its first.
+    for rows in ([0, 1, 2, 3], [1, 2, 3], [0, 3]):
+        for (active, offsets), size, group in receiver._plan_layers(backend, table, np.asarray(rows)):
+            assert offsets.tolist() == [
+                sum((sizes[r] + 15) // 16 * 16 for r in active[:i]) for i in range(len(active))
+            ]
+            assert size == offsets[-1] + sizes[active[-1]]
+            fresh = planner.group_apply(
+                [
+                    (geometry(bindings[row], sizes[row]), int(offset))
+                    for row, offset in zip(active, offsets, strict=True)
+                ]
+            )
+            assert (group.sources, group.targets, group.contracts, group.cpu_targets) == (
+                fresh.sources,
+                fresh.targets,
+                fresh.contracts,
+                fresh.cpu_targets,
+            )
+    assert sorted(built) == sorted(names)
+
+
 def test_cpu_views_share_one_mirror_and_require_fresh_paused_binding(planner):
     from miles.backends.sglang_utils.gpu_delta.bindings import TensorBinding
 

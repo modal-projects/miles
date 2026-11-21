@@ -114,6 +114,18 @@ class _BindingTable:
             for row in storage_rows.get(pointer, ())
         ]
         self.image_rows, self.image_indices = np.asarray(pairs, np.int64).reshape(-1, 2).T
+        self._apply_geometry = [None] * len(self.bindings)
+
+    def apply_geometry(self, row):
+        """Each apply view's geometry of one binding: built at its first update, reused while the layout lives."""
+        geometry = self._apply_geometry[row]
+        if geometry is None:
+            from miles.utils.gpu_delta.apply import apply_geometry
+
+            nbytes = int(self.nbytes[row])
+            geometry = tuple(apply_geometry(view, nbytes) for view in self.bindings[row].apply_bindings())
+            self._apply_geometry[row] = geometry
+        return geometry
 
     def select(self, tensors):
         local = tensors[self.ordinals]
@@ -136,7 +148,7 @@ def _plan_layers(backend, table, rows):
     """Cache membership, canonical offsets and apply geometry, never wire frames."""
     key = rows.tobytes()
     if backend.batch_plan is None or backend.batch_plan[0] != key:
-        from miles.utils.gpu_delta.apply import plan_apply
+        from miles.utils.gpu_delta.apply import group_apply
 
         active = np.zeros(len(table.bindings), dtype=bool)
         active[rows] = True
@@ -151,19 +163,19 @@ def _plan_layers(backend, table, rows):
         )
         plans = []
         for group in groups:
-            outputs, size = [], 0
-            for row in group:
-                offset = (size + 15) // 16 * 16
-                binding, nbytes = table.bindings[row], int(table.nbytes[row])
-                outputs.append((binding, offset, nbytes))
-                size = offset + nbytes
+            # 16-byte aligned decoded offsets of the group's tensors, in row order.
+            aligned = (table.nbytes[group] + 15) // 16 * 16
+            offsets = np.cumsum(aligned) - aligned
+            size = int(offsets[-1] + table.nbytes[group[-1]])
             # Segment views share one decoded canonical payload. Only the apply
             # plan expands them; DE membership and output offsets stay unique.
-            apply_outputs = [
-                (view, offset, nbytes) for binding, offset, nbytes in outputs for view in binding.apply_bindings()
+            placed = [
+                (geometry, offset)
+                for row, offset in zip(group.tolist(), offsets.tolist(), strict=True)
+                for geometry in table.apply_geometry(row)
             ]
-            tensor_offsets = np.stack((table.ordinals[group], [offset for _, offset, _ in outputs]))
-            plans.append((tensor_offsets, size, plan_apply(apply_outputs)))
+            tensor_offsets = np.stack((table.ordinals[group], offsets))
+            plans.append((tensor_offsets, size, group_apply(placed)))
         backend.batch_plan = (key, plans)
     return backend.batch_plan[1]
 

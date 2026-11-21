@@ -346,7 +346,11 @@ class TestReceiverPreparation(unittest.TestCase):
         # This test checks grouping/cache ownership, not Triton launch plans.
         with patch.dict(
             sys.modules,
-            {"miles.utils.gpu_delta.apply": SimpleNamespace(plan_apply=lambda outputs: None)},
+            {
+                "miles.utils.gpu_delta.apply": SimpleNamespace(
+                    apply_geometry=lambda binding, size: None, group_apply=lambda placed: None
+                )
+            },
         ):
             previous = receiver._plan_layers(backend, table, rows)
             self.assertIs(receiver._plan_layers(backend, table, rows), previous)

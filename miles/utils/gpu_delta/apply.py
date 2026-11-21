@@ -750,36 +750,60 @@ class ByteApplyGroup:
         return partial(self._launch_cpu_bound if self.cpu_targets else _launch_prebound, calls)
 
 
-def plan_apply(outputs):
-    """One affine batch with runtime contracts, without model names."""
+@dataclass(frozen=True)
+class ApplyGeometry:
+    """One binding's affine pieces relative to its decoded canonical bytes: everything but where they sit in a batch.
+
+    ``pieces`` are ``(contract, source offset, target)`` per destination; a CUDA target is its pointer, a CPU target
+    ``(storage key, byte offset)`` into ``cpu_storages``.
+    """
+
+    pieces: tuple
+    cpu_storages: tuple
+
+
+def apply_geometry(binding, size):
+    """The geometry of ``binding`` over a decoded canonical tensor of ``size`` bytes."""
+    if not binding.destinations:
+        raise ValueError("GPU delta apply requires affine byte destinations")
+    canonical = torch.empty(size, dtype=torch.uint8, device="meta")
+    source = binding.selected_bytes(canonical)
+    ss, st = _normalize(source.shape, source.stride())
+    pieces, cpu_storages = [], {}
+    for target in binding.destinations:
+        ts, tt = _normalize(target.shape, target.stride())
+        contract = (math.prod(ss), ss, st, ts, tt)
+        if target.device.type == "cpu":
+            storage = target.untyped_storage()
+            key = target.device, storage.data_ptr()
+            if key not in cpu_storages:
+                cpu_storages[key] = torch.empty(0, dtype=torch.uint8, device="cpu").set_(
+                    storage, 0, (storage.nbytes(),), (1,)
+                )
+            pieces.append((contract, source.storage_offset(), (key, target.data_ptr() - storage.data_ptr())))
+        elif target.device.type == "cuda":
+            pieces.append((contract, source.storage_offset(), target.data_ptr()))
+        else:
+            raise ValueError(f"unsupported GPU delta destination device: {target.device}")
+    return ApplyGeometry(tuple(pieces), tuple(cpu_storages.items()))
+
+
+def group_apply(placed):
+    """One affine batch from ``(geometry, offset)`` pairs: each geometry's decoded bytes start at ``offset``."""
     groups, cpu_storages = {}, {}
-    for binding, offset, size in outputs:
-        if not binding.destinations:
-            raise ValueError("GPU delta apply requires affine byte destinations")
-        canonical = torch.empty(size, dtype=torch.uint8, device="meta")
-        source = binding.selected_bytes(canonical)
-        ss, st = _normalize(source.shape, source.stride())
-        for target in binding.destinations:
-            ts, tt = _normalize(target.shape, target.stride())
-            contract = (math.prod(ss), ss, st, ts, tt)
+    for geometry, offset in placed:
+        cpu_storages.update(geometry.cpu_storages)
+        for contract, source, target in geometry.pieces:
             sources, targets, cpu_targets = groups.setdefault(contract, ([], [], []))
-            sources.append(offset + source.storage_offset())
-            if target.device.type == "cpu":
-                storage = target.untyped_storage()
-                key = target.device, storage.data_ptr()
-                byte_offset = target.data_ptr() - storage.data_ptr()
-                if key not in cpu_storages:
-                    cpu_storages[key] = torch.empty(0, dtype=torch.uint8, device="cpu").set_(
-                        storage, 0, (storage.nbytes(),), (1,)
-                    )
+            sources.append(offset + source)
+            if type(target) is tuple:
+                key, byte_offset = target
                 cpu_targets.append((len(targets), key, byte_offset))
                 # Mirrors have aligned CUDA bases. This placeholder preserves
                 # offset alignment for preparation but cannot be launched.
                 targets.append(16 + byte_offset)
-            elif target.device.type == "cuda":
-                targets.append(target.data_ptr())
             else:
-                raise ValueError(f"unsupported GPU delta destination device: {target.device}")
+                targets.append(target)
     if not groups:
         return None
     sources, targets, contracts, cpu_targets = [], [], [], []
@@ -791,3 +815,8 @@ def plan_apply(outputs):
     return ByteApplyGroup(
         sources, targets, tuple(contracts), cpu_targets=tuple(cpu_targets), cpu_storages=cpu_storages
     )
+
+
+def plan_apply(outputs):
+    """One affine batch with runtime contracts, without model names."""
+    return group_apply([(apply_geometry(binding, size), offset) for binding, offset, size in outputs])
