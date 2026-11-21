@@ -8,6 +8,7 @@ update does, and every served parameter, buffer and post-load copy must equal wh
 checkpoint. On CUDA the experts take the path the device selects (TRT-LLM on SM10x) and admission runs in full.
 """
 
+import importlib.util
 import re
 from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
@@ -57,14 +58,17 @@ _RANKS = {
     "tp4-kv-replicas": ((4, 3), (4, 3), (1, 0)),
 }
 _GATE_RANKS = _RANKS["dp-attention-ep4"]
-_EXPERT_PATHS = ("trtllm", "triton", "torch")
 _CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+_FLASHINFER = pytest.mark.skipif(
+    importlib.util.find_spec("flashinfer") is None, reason="the TRT-LLM BF16 path shuffles the experts with FlashInfer"
+)
+_EXPERT_PATHS = (pytest.param("trtllm", marks=_FLASHINFER), "triton", "torch")
 # On CPU each expert path prepare_trtllm_weights can take; on CUDA the device's own.
 _CASES = [
     *(
-        pytest.param(ranks, "cpu", path, id=f"{name}-{path}")
+        pytest.param(ranks, "cpu", path, id=f"{name}-{path}", marks=_FLASHINFER if path == "trtllm" else ())
         for name, ranks in _RANKS.items()
-        for path in _EXPERT_PATHS
+        for path in ("trtllm", "triton", "torch")
     ),
     *(pytest.param(ranks, "cuda", "native", id=f"{name}-cuda", marks=_CUDA) for name, ranks in _RANKS.items()),
 ]
@@ -142,7 +146,9 @@ def _expert_path(path):
     with ExitStack() as stack:
         if path != "native":
             supported = {"trtllm": (True, False), "triton": (False, True), "torch": (False, False)}[path]
-            for probe, value in zip(("_trtllm_bf16_moe_supported", "_triton_bf16_moe_supported"), supported):
+            for probe, value in zip(
+                ("_trtllm_bf16_moe_supported", "_triton_bf16_moe_supported"), supported, strict=True
+            ):
                 stack.enter_context(patch.object(muse_spark_bf16_moe, probe, lambda device, value=value: value))
         yield
 
@@ -380,7 +386,7 @@ def test_an_update_through_the_bindings_serves_what_the_loader_loads(tmp_path, r
     plan.check_identity()
 
 
-@pytest.mark.parametrize("path", ["trtllm", "triton", "torch"])
+@pytest.mark.parametrize("path", _EXPERT_PATHS)
 def test_each_expert_path_binds_its_own_layout(tmp_path, path):
     ranks = _GATE_RANKS
     model = _loaded(ranks, "cpu", path, _checkpoint(0))
@@ -401,7 +407,7 @@ def test_each_expert_path_binds_its_own_layout(tmp_path, path):
 def test_megamoe_and_other_expert_formats_are_refused(tmp_path):
     ranks = _GATE_RANKS
     base = _checkpoint(0)
-    model = _loaded(ranks, "cpu", "trtllm", base)
+    model = _loaded(ranks, "cpu", "torch", base)
     model.model.language_model.layers[2].mlp.experts.use_megamoe = True
     with pytest.raises(ValueError, match="does not map Muse Spark's MegaMoE expert weights"):
         _admit(model, tmp_path, base)
