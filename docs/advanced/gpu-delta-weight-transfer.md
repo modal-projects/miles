@@ -115,6 +115,9 @@ fallback.
 `--update-weight-buffer-size` bounds each canonical input batch; a larger single tensor
 stands alone. An owner's complete compact inner-codec payload must fit in HBM through
 finalization, and host snapshots must fit in RAM; there is no out-of-memory fallback.
+Each owner pins its committed target, the next target and the HF base;
+`GPU_DELTA_KEEP_HF_BASE=0` (development guide) drops the HF base after the first commit,
+and HF-relative publications then read it from `--hf-checkpoint`.
 Inner frames are 1 MiB; the receiver checks actual encoded and decoded lengths against
 its device limit.
 
