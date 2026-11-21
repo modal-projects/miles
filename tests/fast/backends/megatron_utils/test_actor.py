@@ -278,7 +278,7 @@ class _FakeWeightUpdater:
         self.error = error
         self.weight_versions: list[int] = []
         self.conn_status = SimpleNamespace(needs_reconnect=lambda snapshot: False)
-        self.protocol = SimpleNamespace(cell_updaters_of_cell_id={})
+        self.protocol = SimpleNamespace(cell_updaters_of_cell_id={}, publication=None)
 
     def receiver_pool(self, pool: str):
         assert pool == "rollout"

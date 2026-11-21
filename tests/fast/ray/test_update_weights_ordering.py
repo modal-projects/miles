@@ -224,7 +224,8 @@ async def test_an_external_rollout_serves_each_version_before_the_rollout_takes_
     order: list[str] = []
     inference_controller = _OrderRecordingInferenceController(order)
     inference_controller.update_external_rollout = AsyncMock(
-        side_effect=lambda version: order.append("update_external_rollout") or {"perf/update_weights_external_s": 2.0}
+        side_effect=lambda version, publication: order.append("update_external_rollout")
+        or {"perf/update_weights_external_s": 2.0}
     )
     executor = MagicMock(set_weight_version=AsyncMock(side_effect=lambda *a, **k: order.append("set_weight_version")))
 
@@ -238,7 +239,7 @@ async def test_an_external_rollout_serves_each_version_before_the_rollout_takes_
         )
 
     assert order[2:] == ["end_update_weights", "update_external_rollout", "set_weight_version"]
-    inference_controller.update_external_rollout.assert_awaited_once_with(11)
+    inference_controller.update_external_rollout.assert_awaited_once_with(11, None)
     tracking.log.assert_called_once_with(
         ANY, {"perf/update_weights_external_s": 2.0, "rollout/step": 3}, step_key="rollout/step"
     )

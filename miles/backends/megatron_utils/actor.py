@@ -1167,7 +1167,11 @@ class MegatronTrainRayActor(TrainRayActor):
         if process_groups_are_temporary:
             destroy_process_groups()
 
-        return WeightUpdateOutput(weight_version=weight_version, failed_cell_ids=failed_cell_ids)
+        return WeightUpdateOutput(
+            weight_version=weight_version,
+            failed_cell_ids=failed_cell_ids,
+            publication=self.weight_updater.protocol.publication,
+        )
 
     @with_logs
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:
