@@ -17,6 +17,7 @@ from miles.backends.sglang_utils.gpu_delta.models.base import ModelMapping
 from miles.backends.sglang_utils.gpu_delta.models.deepseek_v2 import DeepseekV2Mapping
 from miles.backends.sglang_utils.gpu_delta.models.deepseek_v4 import DeepseekV4Mapping
 from miles.backends.sglang_utils.gpu_delta.models.kimi_k3 import KimiK3Mapping
+from miles.backends.sglang_utils.gpu_delta.models.qwen3_5 import Qwen3_5Mapping
 
 _MODEL_MAPPINGS = {
     "DeepseekV2ForCausalLM": DeepseekV2Mapping,
@@ -24,6 +25,8 @@ _MODEL_MAPPINGS = {
     "DeepseekV32ForCausalLM": DeepseekV2Mapping,
     "GlmMoeDsaForCausalLM": DeepseekV2Mapping,
     "KimiK3ForConditionalGeneration": KimiK3Mapping,
+    "Qwen3_5ForConditionalGeneration": Qwen3_5Mapping,
+    "Qwen3_5MoeForConditionalGeneration": Qwen3_5Mapping,
     # SGLang serves DeepSeek-V4.1 checkpoints (DeepseekV41ForCausalLM) under this name; the mapping
     # admits model type deepseek_v41 only.
     "DeepseekV4ForCausalLM": DeepseekV4Mapping,
@@ -32,7 +35,14 @@ _MODEL_MAPPINGS = {
 
 def model_mapping(model, shadows) -> ModelMapping:
     """The listed mapping of ``model``'s exact architecture, given the session's ``CanonicalShadows``."""
-    architecture = model.config.architectures[0]
+    architecture = _served_architecture(model)
     if architecture not in _MODEL_MAPPINGS:
         raise ValueError(f"unsupported GPU delta model mapping: {architecture}; supported: {sorted(_MODEL_MAPPINGS)}")
     return _MODEL_MAPPINGS[architecture](model, shadows)
+
+
+def _served_architecture(model):
+    """The architecture SGLang serves ``model`` as: its config's, or, for a model that keeps only its text model's
+    config (Qwen3.5's vision-language classes), its own class's exact name, which SGLang registers it under."""
+    architectures = model.config.architectures
+    return architectures[0] if architectures else type(model).__name__
