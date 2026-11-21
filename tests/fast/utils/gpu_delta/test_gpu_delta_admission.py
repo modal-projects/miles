@@ -78,6 +78,10 @@ def test_unsupported_launch_configuration_fails_before_startup(tmp_path, monkeyp
     with pytest.raises(ValueError, match="SKIP_PAYLOAD_HASH"):
         validate_gpu_delta_args(_args(tmp_path))
     monkeypatch.setenv("GPU_DELTA_SKIP_PAYLOAD_HASH", "1")
+    monkeypatch.setenv("GPU_DELTA_KEEP_HF_BASE", "no")
+    with pytest.raises(ValueError, match="KEEP_HF_BASE"):
+        validate_gpu_delta_args(_args(tmp_path))
+    monkeypatch.setenv("GPU_DELTA_KEEP_HF_BASE", "0")
     monkeypatch.setenv("GPU_DELTA_INITIAL_SYNC_CODEC", "invalid")
     with pytest.raises(ValueError, match="CODEC"):
         validate_gpu_delta_args(_args(tmp_path))
