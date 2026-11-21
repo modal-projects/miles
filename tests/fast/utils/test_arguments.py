@@ -2260,6 +2260,15 @@ class TestMtpTrainingValidation:
     def test_mtp_training_keeps_the_layers(self):
         assert self._validate(["--enable-mtp-training", "--mtp-num-layers", "1"]).mtp_num_layers == 1
 
+    def test_gpu_delta_admission_sees_the_resolved_mtp_layers(self, monkeypatch):
+        """gpu-delta refuses a trained MTP draft, not a model script's layer count that builds none."""
+        from miles.utils import arguments
+
+        seen = []
+        monkeypatch.setattr(arguments, "validate_gpu_delta_args", lambda args: seen.append(args.mtp_num_layers))
+        self._validate(["--mtp-num-layers", "1"])
+        assert seen == [None]
+
     def test_mtp_training_needs_layers_to_train(self):
         with pytest.raises(AssertionError, match="needs --mtp-num-layers > 0"):
             self._validate(["--enable-mtp-training"])

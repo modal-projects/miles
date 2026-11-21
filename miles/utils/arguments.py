@@ -1683,7 +1683,6 @@ def miles_validate_args(args):
             f"An external rollout service serves one policy, and --megatron-config names {model_ids}: its "
             "weight API carries one version stream."
         )
-    validate_gpu_delta_args(args)
 
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (
@@ -2041,6 +2040,8 @@ def miles_validate_args(args):
                 "output layer and hidden states, so the MTP loss also trains the policy"
             )
     resolve_mtp_num_layers(args)
+    # After resolving MTP: a model script's --mtp-num-layers without --enable-mtp-training builds no MTP layer.
+    validate_gpu_delta_args(args)
 
     if args.use_rollout_routing_replay:
         args.use_routing_replay = True
