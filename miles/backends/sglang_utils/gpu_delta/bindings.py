@@ -534,6 +534,56 @@ def merged_column_target(param, module, shard, canonical_shape):
     return _loader_view(param, dim, sum(sizes[:shard]) // size, width, slices), slices
 
 
+def repeated_column_target(param, module, shard, canonical_shape):
+    """Mirror ``MergedColumnParallelRepeatedLinear.weight_loader`` for one shard; returns ``(live view, slices)``.
+
+    Shard ``s`` fills ``width = output_partition_sizes[s]`` local rows from ``sum(output_partition_sizes[:s])``: a
+    column-parallel shard (``s < num_column_parallel``) with canonical rows ``[rank * width, (rank + 1) * width)``,
+    a repeated shard with all of its rows on every rank.
+    """
+    from sglang.srt.distributed.utils import get_group_rank_size
+    from sglang.srt.layers.linear import MergedColumnParallelRepeatedLinear
+
+    if type(module) is not MergedColumnParallelRepeatedLinear:
+        raise ValueError(f"unclassified repeated column projection: {type(module).__name__}")
+    sizes = list(module.output_partition_sizes)
+    if type(shard) is not int or not 0 <= shard < len(sizes):
+        raise ValueError(f"unsupported repeated column shard: {shard!r}")
+    rank, size = get_group_rank_size(module.tp_group)
+    dim, width = _output_dim(param), sizes[shard]
+    column = shard < module.num_column_parallel
+    if (
+        len(canonical_shape) != param.ndim
+        or param.shape[dim] != sum(sizes)
+        or canonical_shape[dim] != (width * size if column else width)
+    ):
+        raise ValueError("repeated column projection geometry differs from its loader")
+    slices = _full_slices(canonical_shape)
+    if column:
+        slices[dim] = [rank * width, (rank + 1) * width]
+    return _loader_view(param, dim, sum(sizes[:shard]), width, slices), slices
+
+
+def batched_column_target(module, batch, canonical_shape):
+    """Mirror ``ColumnParallelBatchedLinear.weight_loader`` for one batch; returns ``(live view, slices)``.
+
+    Batch ``b`` of the ``(batch, rows, cols)`` weight holds canonical rows ``[rank * rows, (rank + 1) * rows)``.
+    """
+    from sglang.srt.distributed.utils import get_group_rank_size
+    from sglang.srt.layers.linear import ColumnParallelBatchedLinear
+
+    if type(module) is not ColumnParallelBatchedLinear:
+        raise ValueError(f"unclassified batched column projection: {type(module).__name__}")
+    weight = module.weight
+    if type(batch) is not int or not 0 <= batch < weight.shape[0]:
+        raise ValueError(f"unsupported batched column shard: {batch!r}")
+    rank, size = get_group_rank_size(module.tp_group)
+    rows, cols = weight.shape[1:]
+    if list(canonical_shape) != [rows * size, cols]:
+        raise ValueError("batched column projection geometry differs from its loader")
+    return weight[batch], [[rank * rows, (rank + 1) * rows], [0, cols]]
+
+
 def _byte_extent(tensor):
     # Half-open byte range of its storage that a strided view can address.
     start = tensor.storage_offset() * tensor.element_size()
