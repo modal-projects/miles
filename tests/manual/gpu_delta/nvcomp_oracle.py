@@ -2,7 +2,8 @@
 
 python tests/manual/gpu_delta/nvcomp_oracle.py
 Requires nvCOMP 6, zstandard, python-snappy and lz4. decode() is a byte-exact
-test oracle, never a production fallback; test_gpu_delta_encoder.py imports it.
+test oracle, never a production fallback, and also decodes gap frames;
+test_gpu_delta_encoder.py imports it.
 """
 
 import ctypes
@@ -28,8 +29,20 @@ def _bitcomp_host_decoder():
     return library
 
 
+def _decode_gap(encoded, decoded_bytes):
+    planes = np.frombuffer(encoded, dtype=np.uint8).reshape(4, -1)
+    gaps = planes[0].astype(np.int64) | planes[1].astype(np.int64) << 8 | planes[2].astype(np.int64) << 16
+    positions = np.cumsum(gaps)
+    assert positions[-1] < decoded_bytes and np.all(gaps[1:]) and np.all(planes[3])
+    decoded = np.zeros(decoded_bytes, dtype=np.uint8)
+    decoded[positions] = planes[3]
+    return decoded.tobytes()
+
+
 def decode(codec, encoded, decoded_bytes):
-    """Independent CPU byte oracle for the native GPU compressor."""
+    """Independent CPU byte oracle for the native GPU compressor and the gap compressor."""
+    if codec == "gap":
+        return _decode_gap(encoded, decoded_bytes)
     if codec == "lz4":
         return lz4.block.decompress(encoded, uncompressed_size=decoded_bytes)
     if codec == "snappy":
