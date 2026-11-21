@@ -88,6 +88,32 @@ def test_each_later_version_names_the_start_and_reports_the_wait_and_the_slowest
     assert requests[-1][:3] == ("POST", "/versions", {"version": 4, "base_version": 3, "start": 3, "start_id": "s1"})
 
 
+def test_a_publication_rides_on_the_start_and_on_each_later_version(service):
+    """gpu-delta's files are not found by the version's number, so the service gets the publication with it."""
+    replies, requests = service
+    replies.update(
+        {
+            "/start": [(200, {"start_id": "s1"})],
+            "/status": [(200, {"serving": {"3": 1}})],
+            "/versions": [(200, {"seconds": 1, "engines": {}})],
+        }
+    )
+    first, second = {"stream_id": "a", "target_version": 1}, {"stream_id": "a", "target_version": 2}
+
+    async def serve_both():
+        rollout = ExternalRollout("https://control")
+        await rollout.serve(3, first)
+        await rollout.serve(4, second)
+
+    asyncio.run(serve_both())
+    assert requests[0][:3] == ("POST", "/start", {"version": 3, "publication": first})
+    assert requests[-1][:3] == (
+        "POST",
+        "/versions",
+        {"version": 4, "base_version": 3, "start": 3, "start_id": "s1", "publication": second},
+    )
+
+
 def test_a_call_the_platform_lost_is_sent_again_and_a_refusal_stops_the_run(service):
     replies, requests = service
     replies.update(

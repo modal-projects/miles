@@ -4,7 +4,7 @@ import logging
 import os
 import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
@@ -60,6 +60,8 @@ logger = logging.getLogger(__name__)
 class WeightUpdateOutput:
     weight_version: int | None
     failed_cell_ids: tuple[str, ...]
+    # Compared but not hashed: the trainer's ranks report equal outputs, which a set collapses.
+    publication: dict | None = field(default=None, hash=False)
     debug_trainer_load_state_timestamp: float | None = None
     debug_weight_update_id: str | None = None
 
@@ -74,7 +76,15 @@ class WeightUpdateOutput:
             set(failed_cell_ids)
         ), f"a cell failed under more than one trainer cell: {failed_cell_ids}"
         [weight_version] = weight_versions or {None}
-        return cls(weight_version=weight_version, failed_cell_ids=tuple(failed_cell_ids))
+        publications = [output.publication for output in outputs if output.publication is not None]
+        assert all(
+            publication == publications[0] for publication in publications
+        ), "trainer cells disagree on the publication"
+        return cls(
+            weight_version=weight_version,
+            failed_cell_ids=tuple(failed_cell_ids),
+            publication=publications[0] if publications else None,
+        )
 
 
 def _held_gpu_ids() -> list[int]:
