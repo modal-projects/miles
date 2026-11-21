@@ -8,6 +8,7 @@ import torch
 from miles.backends.sglang_utils.gpu_delta.bindings import CanonicalShadows
 from miles.backends.sglang_utils.gpu_delta.models import model_mapping
 from miles.backends.sglang_utils.gpu_delta.models.deepseek_v2 import DeepseekV2Mapping
+from miles.backends.sglang_utils.gpu_delta.models.qwen3_5 import Qwen3_5Mapping
 
 
 def _model(architecture):
@@ -23,6 +24,14 @@ def test_registered_architecture_builds_its_runtime_mapping():
     assert isinstance(mapping, DeepseekV2Mapping)
     # Every mapping is constructed with the session's shadows, which reach its binding context.
     assert mapping.parameters.shadows is shadows
+
+
+def test_a_model_keeping_only_its_text_config_is_mapped_by_its_exact_class():
+    """SGLang's Qwen3.5 vision-language classes keep text_config, which names no architecture."""
+    model = type("Qwen3_5MoeForConditionalGeneration", (torch.nn.Module,), {})()
+    model.config = SimpleNamespace(architectures=None)
+
+    assert isinstance(model_mapping(model, None), Qwen3_5Mapping)
 
 
 # MistralLarge3 subclasses DeepseekV3ForCausalLM but renames checkpoint tensors, and Glm4MoeLite
