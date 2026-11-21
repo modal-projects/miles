@@ -139,6 +139,8 @@ _QWEN3_5_FROZEN = re.compile(r"^model\.visual\.")
 _GLM5_NEXT_FROZEN = re.compile(r"^model\.visual\.")
 # Vision tower and multimodal projector.
 _KIMI_K3_FROZEN = re.compile(r"^(?:vision_tower|mm_projector)\.")
+# Vision and audio towers with the vision adapter and projection: Miles exports Muse Spark's language model only.
+_MUSE_SPARK_FROZEN = re.compile(r"^model\.(?:vision_tower|vision_adapter|vision_projection|audio_tower)\.")
 # Vision tower, aligner, image tokens, vision routing bias and Engram hash tables.
 _DEEPSEEK_V41_FROZEN = re.compile(
     r"^(?:vision|aligner)\.|^image_(?:start|end|newline)$|\.ffn\.gate\.bias_vl$|\.engram\.embed\."
@@ -165,6 +167,10 @@ def _kimi_k3_policy(config):
     return StaticPolicy(num_hidden_layers=config["text_config"]["num_hidden_layers"], frozen=_KIMI_K3_FROZEN)
 
 
+def _muse_spark_policy(config):
+    return StaticPolicy(num_hidden_layers=config["text_config"]["num_hidden_layers"], frozen=_MUSE_SPARK_FROZEN)
+
+
 def _deepseek_v41_policy(config):
     return StaticPolicy(
         num_hidden_layers=config["text_config"]["num_hidden_layers"],
@@ -183,6 +189,7 @@ _STATIC_POLICIES = MappingProxyType(
         "GlmMoeDsaForCausalLM": _deepseek_v2_family_policy,
         "Glm5NextForConditionalGeneration": _glm5_next_policy,
         "KimiK3ForConditionalGeneration": _kimi_k3_policy,
+        "MuseSparkForConditionalGeneration": _muse_spark_policy,
         "Qwen3_5ForConditionalGeneration": _qwen3_5_policy,
         "Qwen3_5MoeForConditionalGeneration": _qwen3_5_policy,
         "DeepseekV41ForCausalLM": _deepseek_v41_policy,
