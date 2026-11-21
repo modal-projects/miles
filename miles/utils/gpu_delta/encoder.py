@@ -15,6 +15,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miles.utils.gpu_delta.gap import GapCompressor
 from miles.utils.gpu_delta.nvcomp import NvcompCompressor
 from miles.utils.gpu_delta.publication import CODECS, FRAME_BYTES, PublicationWriter, validate_frame_bytes
 
@@ -86,8 +87,9 @@ def _select_payloads(tensors, frames, owners, batch, sizes, counts):
     descriptions, groups = [[] for _ in tensors], [[] for _ in tensors]
     changed = [0] * len(tensors)
     for (owner, offset), frame, output, size, count in zip(owners, frames, batch.outputs, sizes, counts, strict=True):
-        if not 0 < size <= output.numel() or not 0 <= count <= frame.numel():
-            raise RuntimeError("nvCOMP output size or changed-byte count is outside the frame")
+        # An unchanged frame is dropped whatever its output: gap encodes it to nothing.
+        if not 0 <= count <= frame.numel() or (count and not 0 < size <= output.numel()):
+            raise RuntimeError("Inner codec output size or changed-byte count is outside the frame")
         changed[owner] += count
         if count == 0:
             continue
@@ -203,13 +205,15 @@ class GpuBatchEncoder:
         self.device, self.codec, self.frame_bytes = torch.device(device), codec, frame_bytes
         self.stream = torch.cuda.Stream(device=self.device)
         inner_codec, outer_codec = CODECS[codec]
-        self.compressor = NvcompCompressor(inner_codec, self.device)
+        self.compressor = (
+            GapCompressor(self.device) if inner_codec == "gap" else NvcompCompressor(inner_codec, self.device)
+        )
         self.outer_compressor = NvcompCompressor(outer_codec, self.device) if outer_codec else None
         self.finalization_metrics = {}
         with torch.cuda.device(self.device), torch.cuda.stream(self.stream):
             self._alignment_padding = torch.zeros(15, dtype=torch.uint8, device=self.device)
         if frame_bytes % self.compressor.alignments.input:
-            raise ValueError("GPU delta frame_bytes must preserve nvCOMP input alignment")
+            raise ValueError("GPU delta frame_bytes must preserve the inner codec's input alignment")
         if self.outer_compressor is not None and 16 % self.outer_compressor.alignments.input:
             raise RuntimeError("GPU outer Zstd input alignment exceeds the wire contract")
 

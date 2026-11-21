@@ -1,7 +1,7 @@
 """Native host-arena and complete receiver checks.
 
 Manual-only: Linux, CUDA, nvCOMP 6, Torch, Snappy, LZ4 and Zstandard are required.
-Bitcomp uses one GPU and the Miles producer, without requiring DE. The two-engine
+Bitcomp and gap use one GPU and the Miles producer, without requiring DE. The two-engine
 DE test requires two SM100/SM103 GPUs; its barriers coordinate the oracle, not
 production preparation.
 """
@@ -122,9 +122,9 @@ def publish(
         writer.close()
 
 
-@pytest.mark.parametrize("codec", ["bitcomp", "bitcomp-zstd"])
+@pytest.mark.parametrize("codec", ["bitcomp", "bitcomp-zstd", "gap-zstd"])
 @pytest.mark.parametrize("residency", ["cuda", "mixed"])
-def test_bitcomp_receiver_double_buffer_exact_updates_and_stale_target(codec, residency, monkeypatch):
+def test_cuda_decoder_receiver_double_buffer_exact_updates_and_stale_target(codec, residency, monkeypatch):
     """Real producer/receiver, five batches, omitted frames and small XOR masks."""
     import torch
 

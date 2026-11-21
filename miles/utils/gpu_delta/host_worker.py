@@ -66,12 +66,12 @@ def retryable_prepare_errno(error):
 def validate_codec(manifest):
     """Admit the authenticated publication codec before examining any tensor payload."""
     if (
-        manifest.get("codec") not in {"snappy-zstd", "lz4-zstd", "lz4", "bitcomp", "bitcomp-zstd"}
+        manifest.get("codec") not in {"snappy-zstd", "lz4-zstd", "lz4", "bitcomp", "bitcomp-zstd", "gap-zstd"}
         or type(manifest.get("frame_bytes")) is not int
         or not 0 < manifest["frame_bytes"] <= 4 << 20
     ):
         raise ValueError(
-            "GPU delta requires snappy-zstd, lz4-zstd, lz4, bitcomp or bitcomp-zstd "
+            "GPU delta requires snappy-zstd, lz4-zstd, lz4, bitcomp, bitcomp-zstd or gap-zstd "
             "and an integer frame size in (0, 4 MiB]"
         )
 
@@ -364,7 +364,7 @@ def _prepare_arena(destination, tensors, raw, backing, file_spans, columns, orde
     jobs = active[~raw[active]]
     if codec in {"lz4", "bitcomp"}:
         worker, phase = _copy_group, "host_rank_encoded_copy_s"
-    elif codec in {"snappy-zstd", "lz4-zstd", "bitcomp-zstd"}:
+    elif codec in {"snappy-zstd", "lz4-zstd", "bitcomp-zstd", "gap-zstd"}:
         worker, phase = _decode_zstd_group, "host_rank_outer_zstd_decode_s"
     else:
         raise ValueError(f"unsupported GPU-delta codec: {codec}")

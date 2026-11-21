@@ -1,4 +1,4 @@
-"""CPU nvCOMP ABI, codec admission, outer payload integrity and prepared metadata ownership."""
+"""CPU nvCOMP ABI, codec admission, outer payload integrity and prepared metadata ownership, for nvCOMP and gap."""
 
 import ctypes
 import sys
@@ -11,7 +11,7 @@ import pytest
 import torch
 import zstandard as zstd
 
-from miles.utils.gpu_delta import codec, memory, nvcomp
+from miles.utils.gpu_delta import codec, encoder, gap, memory, nvcomp
 from miles.utils.gpu_delta.host_worker import HostPayloadPool, validate_codec
 
 P, S = ctypes.c_void_p, ctypes.c_size_t
@@ -434,6 +434,110 @@ def test_host_input_plans_reject_invalid_geometry_before_device_work(monkeypatch
         assert not plan.decoded_slots
 
 
+def _gap_decoder(monkeypatch, launches):
+    """A gap decoder whose compiled kernel records each launch instead of running."""
+
+    class Kernel:
+        def __getitem__(self, grid):
+            return lambda *arguments, stream: launches.append((grid, arguments, stream))
+
+    monkeypatch.setattr(gap, "compiled_decode", lambda device_index: Kernel())
+    return codec.create_decoder(torch.device("cuda", 0), "gap")
+
+
+def test_gap_frames_hold_whole_changes_and_decode_into_aligned_outputs(monkeypatch):
+    decoder = _gap_decoder(monkeypatch, [])
+    assert isinstance(decoder, codec.GapDecoder)
+    assert (decoder.inner_codec, decoder.backend, decoder.hardware) == ("gap", "cuda", False)
+    assert decoder.temporary_bytes((3, 64, 192), 7) == 0
+    table, counts = _frame_table([[(0, 8, 64, 0), (16, 256, 64, 64)], [(272, 4, 1, 0)]])
+    assert decoder._frame_geometry(table, counts, 0, 512) == ([(2, 64, 128), (1, 1, 1)], [128, 1], [0, 0])
+    for rows, error in (
+        ([(0, 7, 64, 0)], "four bytes per change"),
+        ([(0, 260, 64, 0)], "at most one change per decoded byte"),
+        ([(0, 0, 64, 0)], "positive lengths"),
+        ([(0, 8, (4 << 20) + 1, 0)], "positive lengths"),
+        ([(0, 8, 64, 0), (16, 8, 64, 72)], "Misaligned decoded"),
+    ):
+        with pytest.raises(ValueError, match=error):
+            decoder._frame_geometry(*_frame_table([rows]), 0, 512)
+    # One frame at a misaligned output offset passes geometry and is refused when its slot is bound.
+    assert decoder._frame_geometry(*_frame_table([[(0, 8, 64, 8)]]), 0, 512)[2] == [8, None]
+    decoder.device = torch.device("cpu")
+    plan = object.__new__(codec.PreparedDecodePlan)
+    plan.decoder, plan.decoded_slots = decoder, []
+    plan.output_bounds, plan.output_remainders = [72, 0], [8, None]
+    with pytest.raises(ValueError, match="Misaligned decoded"):
+        plan.bind_outputs([torch.empty(128, dtype=torch.uint8) for _ in range(2)])
+
+
+def test_gap_decode_is_nvcomps_batched_call_one_program_per_frame(monkeypatch):
+    launches = []
+    decoder = _gap_decoder(monkeypatch, launches)
+    decoder.device = torch.device("cpu")
+    decoder._record_stream = lambda tensor, stream: None
+    monkeypatch.setattr(torch.cuda, "device", lambda _: nullcontext())
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    stream = SimpleNamespace(device=decoder.device, cuda_stream=5)
+    table, counts = _frame_table([[(0, 8, 64, 0), (16, 4, 48, 64)], [], [(32, 12, 32, 16)]])
+    geometry, bounds, remainders = decoder._frame_geometry(table, counts, 0, 64)
+    metadata = torch.from_numpy(table.copy())
+    plan = codec.PreparedDecodePlan(
+        decoder,
+        counts=counts,
+        host_input=torch.zeros(64, dtype=torch.uint8),
+        workspace=decoder._allocate_workspace(geometry, stream.cuda_stream),
+        host_metadata=metadata.clone(),
+        metadata=metadata,
+        stream=stream,
+        output_offsets=table[3].copy(),
+        output_bounds=bounds,
+        output_remainders=remainders,
+        input_frames=table[:2],
+    )
+    assert plan.workspace.temporary.numel() == 0
+    outputs = [torch.empty(128, dtype=torch.uint8) for _ in range(2)]
+    batches = plan.bind_outputs(outputs)
+    for batch in batches:
+        batch.enqueue()
+    # An empty batch launches nothing; nvCOMP's argument order maps onto the kernel's addresses.
+    assert [grid for grid, _, _ in launches] == [(2, 1, 1), (1, 1, 1)]
+    for (_, arguments, launch_stream), batch in zip(launches, (batches[0], batches[2]), strict=True):
+        rows = batch.metadata
+        assert arguments == (
+            rows[0].data_ptr(),
+            rows[1].data_ptr(),
+            batch.expected_sizes.data_ptr(),
+            batch.actual_sizes.data_ptr(),
+            rows[3].data_ptr(),
+            batch.statuses.data_ptr(),
+        )
+        assert launch_stream == stream.cuda_stream
+    assert metadata[3].tolist() == [outputs[0].data_ptr(), outputs[0].data_ptr() + 64, outputs[0].data_ptr() + 16]
+    assert metadata[1:3].tolist() == table[1:3].tolist()
+
+
+def test_unchanged_frames_are_dropped_whatever_their_inner_output():
+    # Gap encodes an unchanged frame to nothing; nvCOMP to some bytes. Neither reaches the publication.
+    tensors = [(torch.zeros(48, dtype=torch.uint8), torch.zeros(48, dtype=torch.uint8))]
+    frames = list(torch.zeros(48, dtype=torch.uint8).split(16))
+    owners = [(0, 0), (0, 16), (0, 32)]
+    output = torch.arange(32, dtype=torch.uint8)
+    batch = SimpleNamespace(outputs=[output[:0], output[:8], output[16:20]])
+    descriptions, groups, changed = encoder._select_payloads(tensors, frames, owners, batch, [0, 8, 4], [0, 2, 1])
+    assert descriptions == [
+        [
+            dict(decoded_offset=16, decoded_bytes=16, encoded_bytes=8),
+            dict(decoded_offset=32, decoded_bytes=16, encoded_bytes=4),
+        ]
+    ]
+    assert [payload.data_ptr() for payload in groups[0]] == [output.data_ptr(), output.data_ptr() + 16]
+    assert changed == [3]
+    for sizes, counts in (([0, 0, 4], [0, 2, 1]), ([0, 8, 4], [0, 17, 1]), ([0, 9, 4], [0, 2, 1])):
+        with pytest.raises(RuntimeError, match="outside the frame"):
+            encoder._select_payloads(tensors, frames, owners, batch, sizes, counts)
+
+
 def test_cuda_input_packing_preserves_frame_bytes_and_alignment():
     # Reordered, duplicate and disjoint frames must share merged H2D spans
     # without copying large holes in the persistent host arena.
@@ -455,12 +559,13 @@ def test_cuda_input_packing_preserves_frame_bytes_and_alignment():
 class TestOuterZstd(unittest.TestCase):
     def test_manifest_codec_and_frame_geometry_admission(self):
         admitted = dict(codec="snappy-zstd", frame_bytes=1 << 20)
-        for codec_name in ("snappy-zstd", "lz4-zstd", "lz4", "bitcomp", "bitcomp-zstd"):
+        for codec_name in ("snappy-zstd", "lz4-zstd", "lz4", "bitcomp", "bitcomp-zstd", "gap-zstd"):
             for size in (1 << 16, 192 << 10, 1 << 19, 1 << 20, 2 << 20, 4 << 20):
                 with self.subTest(codec=codec_name, size=size):
                     validate_codec(admitted | {"codec": codec_name, "frame_bytes": size})
         for patch_value in (
             {"codec": "zstd"},
+            {"codec": "gap-lz4"},
             {"codec": None},
             {"frame_bytes": 0},
             {"frame_bytes": -1},
