@@ -53,6 +53,18 @@ _PLAIN_FLOAT_DTYPE_BY_SAFETENSORS_DTYPE = {
 }
 
 
+class _CheckpointBase:
+    """Each canonical tensor's HF base, read from the checkpoint as an encoder batch asks for it."""
+
+    def __init__(self, checkpoint, plan):
+        self._read = gpu_delta_publication.make_checkpoint_reader(checkpoint)
+        self._plan = plan
+
+    def __getitem__(self, name):
+        original = gpu_delta_publication.read_canonical_tensor(self._read, name, self._plan[name])
+        return torch.from_numpy(original).pin_memory()
+
+
 class UpdateWeightFromGpuDelta(WeightTransferProtocol):
     """Publish owner-local GPU deltas and commit baselines after activation."""
 
@@ -64,6 +76,7 @@ class UpdateWeightFromGpuDelta(WeightTransferProtocol):
         self._initial_sync_codec = gpu_delta_publication.configured_codec(initial_sync=True)
         # Trainer-only (--train-env-vars) values never reach driver admission; reject them before baseline capture.
         gpu_delta_publication.configured_skip_payload_hash()
+        self._keep_hf_base = gpu_delta_publication.configured_keep_hf_base()
         self.codec = self._initial_sync_codec
         self._snapshot = {}
         self._next_snapshot = {}
@@ -314,7 +327,8 @@ class UpdateWeightFromGpuDelta(WeightTransferProtocol):
         self._stream_dir = Path(self.args.update_weight_disk_dir) / self._stream_id
         # Rolling and immutable snapshots share the startup allocation until
         # the first commit, which must not recycle this storage for a new target.
-        self._hf_snapshot = self._snapshot
+        # Without GPU_DELTA_KEEP_HF_BASE it does, and HF-relative payloads read the base from the checkpoint.
+        self._hf_snapshot = self._snapshot if self._keep_hf_base else None
         self._baseline_captured = True
         if dist.get_rank() == 0:
             logger.info(
@@ -589,11 +603,12 @@ class UpdateWeightFromGpuDelta(WeightTransferProtocol):
         if self._recovery_step == source_step:
             return
         started = time.monotonic()
+        base = self._hf_snapshot if self._keep_hf_base else _CheckpointBase(self.args.hf_checkpoint, self._plan)
         self._recovery_payload = gpu_delta_encoder.RecoveryPayload.encode(
             self._gpu_encoders[self._initial_sync_codec],
             self._gpu_batch_names,
             self._raw_names,
-            self._hf_snapshot,
+            base,
             target,
         )
         self._recovery_step = source_step

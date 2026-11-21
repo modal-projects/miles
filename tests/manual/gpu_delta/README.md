@@ -17,6 +17,7 @@ These `GPU_DELTA_*` variables are development/debug controls, not a stable confi
 | `GPU_DELTA_CODEC=bitcomp-zstd` | Trainer codec for ordinary learned updates, one of the [user guide's codecs](../../../docs/advanced/gpu-delta-weight-transfer.md#usage). Read once at launch; receivers take the codec from each authenticated publication. |
 | `GPU_DELTA_INITIAL_SYNC_CODEC=bitcomp-zstd` | Trainer codec for initial sync, engine recovery, checkpoint companions and eval snapshots. |
 | `GPU_DELTA_SKIP_PAYLOAD_HASH=0` | `1` makes the trainer write publications without owner-file SHA256 (`payload_checksum_format="none"`), which [requesters follow](../../../docs/advanced/gpu-delta-weight-transfer.md#activation-and-failures). A trainer-only variable: launch validation and each trainer reject values other than `0` and `1`. See the receiver's [payload verification](../../../miles/backends/sglang_utils/gpu_delta/README.md#configuration-and-observations). |
+| `GPU_DELTA_KEEP_HF_BASE=1` | `0` makes the trainer drop its pinned copy of the HF base after the first commit, so it keeps two pinned canonical copies instead of three; checkpoint companions, eval snapshots and engine recovery then read the base from `--hf-checkpoint` when they encode. A trainer-only variable, validated like `GPU_DELTA_SKIP_PAYLOAD_HASH`. |
 
 Receiver variables are in the receiver's
 [configuration table](../../../miles/backends/sglang_utils/gpu_delta/README.md#configuration-and-observations).
