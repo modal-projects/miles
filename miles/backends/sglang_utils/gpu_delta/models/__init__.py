@@ -18,6 +18,7 @@ from miles.backends.sglang_utils.gpu_delta.models.deepseek_v2 import DeepseekV2M
 from miles.backends.sglang_utils.gpu_delta.models.deepseek_v4 import DeepseekV4Mapping
 from miles.backends.sglang_utils.gpu_delta.models.glm5_next import Glm5NextMapping
 from miles.backends.sglang_utils.gpu_delta.models.kimi_k3 import KimiK3Mapping
+from miles.backends.sglang_utils.gpu_delta.models.muse_spark import MuseSparkMapping
 from miles.backends.sglang_utils.gpu_delta.models.qwen3_5 import Qwen3_5Mapping
 
 _MODEL_MAPPINGS = {
@@ -27,6 +28,7 @@ _MODEL_MAPPINGS = {
     "GlmMoeDsaForCausalLM": DeepseekV2Mapping,
     "Glm5NextForConditionalGeneration": Glm5NextMapping,
     "KimiK3ForConditionalGeneration": KimiK3Mapping,
+    "MuseSparkForConditionalGeneration": MuseSparkMapping,
     "Qwen3_5ForConditionalGeneration": Qwen3_5Mapping,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5Mapping,
     # SGLang serves DeepSeek-V4.1 checkpoints (DeepseekV41ForCausalLM) under this name; the mapping
