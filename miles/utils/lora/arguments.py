@@ -108,6 +108,12 @@ def add_lora_arguments(parser):
         help="Maximum number of concurrent adapter slots for multi-LoRA. Set to 0 to disable multi-LoRA (default: 0)",
     )
     parser.add_argument(
+        "--lora-batch-invariant",
+        action="store_true",
+        default=False,
+        help="Use per-adapter padded GEMM shapes for dense single-rank BF16 multi-LoRA with a frozen output head.",
+    )
+    parser.add_argument(
         "--check-lora-weight-equal",
         action="store_true",
         default=False,
@@ -220,6 +226,13 @@ def validate_multi_lora_args(args: Any) -> None:
     """Set ``args.multi_lora``, then validate the trainer-side constraints of
     the slot machinery. A no-op for normal runs."""
     args.multi_lora = getattr(args, "multi_lora_n_adapters", 0) > 0
+    if getattr(args, "lora_batch_invariant", False):
+        if not args.multi_lora:
+            raise ValueError("--lora-batch-invariant requires --multi-lora-n-adapters")
+        # Keep the optional Megatron implementation off unrelated launch paths.
+        from miles.backends.megatron_utils.lora.batch_invariant import validate_args
+
+        validate_args(args)
     if not args.multi_lora:
         return
 

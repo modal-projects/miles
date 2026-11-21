@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from miles.backends.megatron_utils.lora import batch_invariant as invariant  # noqa: E402
+
+
+class Head(torch.nn.Module):
+    def __init__(self, external_weight: bool = False) -> None:
+        super().__init__()
+        weight = torch.arange(91, dtype=torch.float64).reshape(13, 7) / 100
+        self.register_buffer("external_weight", weight)
+        self.weight = None if external_weight else torch.nn.Parameter(weight, requires_grad=False)
+        self.shapes = []
+
+    def forward(self, inputs: torch.Tensor, weight: torch.Tensor | None = None) -> tuple[torch.Tensor, None]:
+        self.shapes.append(tuple(inputs.shape))
+        return torch.nn.functional.linear(inputs, self.weight if weight is None else weight), None
+
+
+def _fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wrapped_reader: bool = False,
+    external_weight: bool = False,
+) -> tuple[invariant.Partition, SimpleNamespace, SimpleNamespace, Head]:
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+    layout = invariant.partition([1, 3, 4], [3, 5, 7], [0, 3, 0, 5, 8], 8, 16)
+
+    def get_batch(
+        data_iterator: object,
+        keys: Sequence[str],
+        pad_multiplier: int = 128,
+        qkv_format: str = "thd",
+        get_position_ids: bool = False,
+        allgather_cp: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "adapter_slots": [1, 3, 4],
+            "unconcat_tokens": [torch.zeros(n) for n in (3, 5, 7)],
+            "adapter_token_counts": torch.tensor(layout.counts),
+            "tokens": torch.zeros(1, 16),
+        }
+
+    if wrapped_reader:
+        original = cast(Callable[..., dict[str, Any]], get_batch)
+
+        def get_batch(
+            data_iterator: object,
+            keys: Sequence[str],
+            *args: object,
+            allgather_cp: bool = False,
+            **kwargs: object,
+        ) -> dict[str, Any]:
+            return original(data_iterator, keys, *args, allgather_cp=allgather_cp, **kwargs)
+
+    def mm(
+        x: torch.Tensor,
+        stacked_weights: torch.Tensor,
+        *,
+        token_splits: Sequence[int],
+        offsets: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return torch.cat(
+            [torch.nn.functional.linear(z, w) for z, w in zip(x.split(token_splits), stacked_weights, strict=True)]
+        )
+
+    layers = SimpleNamespace(_dense_multi_lora_mm=mm)
+    model = SimpleNamespace(get_batch=get_batch)
+    head = Head(external_weight)
+    chunk = torch.nn.Module()
+    chunk.add_module("output_layer", head)
+    invariant.install(model, [chunk], layers=layers)
+    invariant.install(model, [chunk], layers=layers)
+    return layout, model, layers, head
+
+
+@pytest.mark.parametrize("wrapped_reader", [False, True])
+@pytest.mark.parametrize("external_weight", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.bfloat16])
+def test_packed_projection_and_frozen_head_match_independent_solo_gradients(
+    monkeypatch: pytest.MonkeyPatch, wrapped_reader: bool, external_weight: bool, dtype: torch.dtype
+) -> None:
+    layout, model, layers, head = _fixture(monkeypatch, wrapped_reader=wrapped_reader, external_weight=external_weight)
+    head.to(dtype=dtype)
+    generator = torch.Generator().manual_seed(19)
+    x = torch.randn(16, 11, generator=generator, dtype=dtype, requires_grad=True)
+    a = torch.randn(5, 3, 11, generator=generator, dtype=dtype, requires_grad=True)
+    b = torch.randn(5, 7, 3, generator=generator, dtype=dtype, requires_grad=True)
+    upstream = torch.randn(16, 1, 13, generator=generator, dtype=dtype)
+    upstream[15:] = 0
+    kwargs = {"weight": head.external_weight} if external_weight else {}
+    with invariant.work_unit(True):
+        model.get_batch(None, ["tokens"], pad_multiplier=8)
+
+        # Checkpoint recomputation may execute the same path on an autograd thread.
+        def forward() -> torch.Tensor:
+            mid = layers._dense_multi_lora_mm(x, a, token_splits=layout.counts, offsets=None)
+            out = layers._dense_multi_lora_mm(mid, b, token_splits=layout.counts, offsets=None)
+            return head(out.unsqueeze(1), **kwargs)[0]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            actual = pool.submit(forward).result()
+        actual_grads = torch.autograd.grad((actual * upstream).sum(), (x, a, b))
+    assert head.shapes == [(8, 1, 7)] * 3 + [(1, 1, 7)]
+    expected = []
+    for slot, span in enumerate(layout.spans):
+        if not span.rows:
+            continue
+        inputs = torch.cat(
+            (
+                x[span.start : span.start + span.rows],
+                x.new_zeros((span.padded_rows - span.rows, 11)),
+            )
+        )
+        mid = torch.nn.functional.linear(inputs, a[slot])
+        out = torch.nn.functional.linear(mid, b[slot])
+        logits = torch.nn.functional.linear(out.unsqueeze(1), head.external_weight)
+        expected.append(logits[: span.rows])
+    expected = torch.cat(expected)
+    expected_grads = torch.autograd.grad((expected * upstream[:15]).sum(), (x, a, b))
+    torch.testing.assert_close(actual[:15], expected, rtol=0, atol=0)
+    for got, want in zip(actual_grads, expected_grads, strict=True):
+        torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("projection", ["head", "lora"])
+def test_padding_gradient_is_rejected_and_failed_unit_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+    projection: str,
+) -> None:
+    layout, model, layers, head = _fixture(monkeypatch)
+    with pytest.raises(RuntimeError, match="nonzero upstream"):
+        with invariant.work_unit(True):
+            model.get_batch(None, ["tokens"], pad_multiplier=8)
+            x = torch.ones(16, 7, dtype=torch.float64, requires_grad=True)
+            if projection == "head":
+                head(x.unsqueeze(1))[0].sum().backward()
+            else:
+                weights = torch.ones(5, 3, 7, dtype=torch.float64, requires_grad=True)
+                layers._dense_multi_lora_mm(x, weights, token_splits=layout.counts, offsets=None).sum().backward()
+    assert invariant._active_unit is None
+    with invariant.work_unit(True):
+        model.get_batch(None, ["tokens"], pad_multiplier=8)
+        head(torch.zeros(16, 1, 7, dtype=torch.float64))
+        with pytest.raises(RuntimeError, match="serialized"):
+            with invariant.work_unit(True):
+                pass
+
+
+@pytest.mark.parametrize("counts,total", [([0, 3, 0, 5, 7], 15), ([0, 4, 0, 5, 7], 16)])
+def test_partition_rejects_unproven_padding(counts: list[int], total: int) -> None:
+    with pytest.raises(ValueError, match="padding"):
+        invariant.partition([1, 3, 4], [3, 5, 7], counts, 8, total)
+
+
+def test_disabled_path_preserves_calls_and_missing_head_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, model, layers, head = _fixture(monkeypatch)
+    with invariant.work_unit(False):
+        x = torch.ones(5, 3)
+        weights = torch.ones(2, 2, 3)
+        out = layers._dense_multi_lora_mm(x, weights, token_splits=(2, 3), offsets=None)
+        assert out.tolist() == [[3.0, 3.0]] * 5
+    with pytest.raises(RuntimeError, match="frozen head"):
+        with invariant.work_unit(True):
+            model.get_batch(None, ["tokens"], pad_multiplier=8)
+
+
+def test_option_and_topology_are_validated_before_model_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = SimpleNamespace(
+        tensor_model_parallel_size=1,
+        context_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        expert_model_parallel_size=1,
+        deterministic_mode=True,
+        bf16=True,
+        qkv_format="thd",
+        allgather_cp=False,
+        lora_dropout=0.0,
+        attention_dropout=0.0,
+        hidden_dropout=0.0,
+        enable_mtp_training=False,
+        num_experts=None,
+    )
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    invariant.validate_args(args)
+    for key, bad in (
+        ("tensor_model_parallel_size", 2),
+        ("context_parallel_size", 2),
+        ("pipeline_model_parallel_size", 2),
+        ("expert_model_parallel_size", 2),
+        ("lora_dropout", 0.1),
+        ("deterministic_mode", False),
+        ("qkv_format", "bshd"),
+    ):
+        changed = SimpleNamespace(**{**vars(args), key: bad})
+        with pytest.raises(ValueError):
+            invariant.validate_args(changed)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    with pytest.raises(ValueError, match="one initialized rank"):
+        invariant.install(SimpleNamespace(), [])
+
+
+def test_launch_parser_exposes_opt_in_without_importing_gpu_runtime() -> None:
+    import argparse
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).parents[2] / "miles/utils/lora/arguments.py"
+    tree = ast.parse(source.read_text())
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "add_lora_arguments")
+    namespace: dict[str, Any] = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+    parser = namespace["add_lora_arguments"](argparse.ArgumentParser())
+    assert parser.parse_args([]).lora_batch_invariant is False
+    assert parser.parse_args(["--lora-batch-invariant"]).lora_batch_invariant is True
+
+
+@pytest.mark.parametrize("failure", ["head", "signature"])
+def test_install_rejects_trainable_head_and_changed_bridge_signature(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    _, model, layers, head = _fixture(monkeypatch)
+    chunk = torch.nn.Module()
+    chunk.add_module("output_layer", head)
+    if failure == "head":
+        head.weight.requires_grad_(True)
+        error, message = ValueError, "frozen output layer"
+    else:
+        layers._dense_multi_lora_mm = lambda x: x
+        error, message = RuntimeError, "signature"
+    with pytest.raises(error, match=message):
+        invariant.install(model, [chunk], layers=layers)
