@@ -38,6 +38,8 @@ class WeightTransferProtocol(ABC):
         self.group_name = "miles"
         self.update_weight_metrics: dict[str, float] = {}
         self.cell_updaters_of_cell_id: dict[str, _RolloutCellUpdater] = {}
+        # What an external rollout service needs to apply the last sync's version, beyond its number.
+        self.publication: dict | None = None
 
     @abstractmethod
     def connect(

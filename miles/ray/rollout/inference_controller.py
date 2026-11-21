@@ -289,8 +289,8 @@ class InferenceController:
         return checksum_results
 
     @with_lock
-    async def update_external_rollout(self, weight_version: int) -> dict[str, float]:
-        return await self._external_rollout.serve(weight_version)
+    async def update_external_rollout(self, weight_version: int, publication: dict | None) -> dict[str, float]:
+        return await self._external_rollout.serve(weight_version, publication)
 
     @requires_lock
     async def _collect_update_checksums(

@@ -4249,6 +4249,7 @@ class TestMilesValidateArgsExternalRollout:
             (["--rollout-external-url", "https://rollout"], "set both"),
             (_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode disk-delta"),
             ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "disk-delta"], "fully async runs only"),
+            ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "gpu-delta"], "fully async runs only"),
             ([*_EXTERNAL_DISK_DELTA_ARGS, "--rollout-external-engine-addrs", "host:1"], "runs its own engines"),
             (
                 [
@@ -4278,6 +4279,7 @@ class TestMilesValidateArgsExternalRollout:
             "one_url",
             "not_a_delta_mode",
             "not_fully_async",
+            "gpu_delta_not_fully_async",
             "external_engines",
             "eval",
             "opd_student_scores",
