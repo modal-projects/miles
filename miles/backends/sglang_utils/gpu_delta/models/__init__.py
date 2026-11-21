@@ -16,6 +16,7 @@ from __future__ import annotations
 from miles.backends.sglang_utils.gpu_delta.models.base import ModelMapping
 from miles.backends.sglang_utils.gpu_delta.models.deepseek_v2 import DeepseekV2Mapping
 from miles.backends.sglang_utils.gpu_delta.models.deepseek_v4 import DeepseekV4Mapping
+from miles.backends.sglang_utils.gpu_delta.models.glm5_next import Glm5NextMapping
 from miles.backends.sglang_utils.gpu_delta.models.kimi_k3 import KimiK3Mapping
 from miles.backends.sglang_utils.gpu_delta.models.qwen3_5 import Qwen3_5Mapping
 
@@ -24,6 +25,7 @@ _MODEL_MAPPINGS = {
     "DeepseekV3ForCausalLM": DeepseekV2Mapping,
     "DeepseekV32ForCausalLM": DeepseekV2Mapping,
     "GlmMoeDsaForCausalLM": DeepseekV2Mapping,
+    "Glm5NextForConditionalGeneration": Glm5NextMapping,
     "KimiK3ForConditionalGeneration": KimiK3Mapping,
     "Qwen3_5ForConditionalGeneration": Qwen3_5Mapping,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5Mapping,
