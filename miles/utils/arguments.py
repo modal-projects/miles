@@ -51,7 +51,7 @@ from miles.utils.hf_utils.config import is_dsa, load_hf_config
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.lora.arguments import validate_lora_args, validate_lora_args_after_megatron
 from miles.utils.lora.hf_lora_targets import unembed_lora_targets
-from miles.utils.lora.utils import is_lora_enabled, lora_sync_sends_base
+from miles.utils.lora.utils import is_lora_enabled, lora_rollout_enabled, lora_sync_sends_base
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp, pp_layer_splits
 from miles.utils.object_store_config import (
     MOONCAKE_MASTER_ADDRESS_KEY,
@@ -1195,7 +1195,16 @@ def miles_validate_args(args):
 
     validate_length_penalty_args(args)
     mode = args.update_weight_transfer_mode
-    if mode not in ("broadcast", "broadcast_packed", "p2p", "disk-delta", "ici", "http-lora", "gpu-delta"):
+    if mode not in (
+        "broadcast",
+        "broadcast_packed",
+        "p2p",
+        "disk-delta",
+        "ici",
+        "http-lora",
+        "gpu-delta",
+        "disk-lora",
+    ):
         raise ValueError(f"Unknown --update-weight-transfer-mode {mode!r}")
     if mode == "broadcast_packed" and (args.train_backend != "megatron" or args.colocate):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
@@ -1662,9 +1671,9 @@ def miles_validate_args(args):
         assert (
             args.rollout_external_url is not None and args.rollout_external_control_url is not None
         ), "--rollout-external-url and --rollout-external-control-url name one external rollout: set both."
-        assert args.update_weight_transfer_mode in ("disk-delta", "gpu-delta"), (
+        assert args.update_weight_transfer_mode in ("disk-delta", "gpu-delta", "disk-lora"), (
             "An external rollout service loads each version from --update-weight-disk-dir: it needs "
-            "--update-weight-transfer-mode disk-delta or gpu-delta."
+            "--update-weight-transfer-mode disk-delta, gpu-delta or disk-lora."
         )
         assert args.fully_async, (
             "An external rollout service serves fully async runs only: the other rollout loops abort every "
@@ -1738,6 +1747,24 @@ def miles_validate_args(args):
             f"ICI weight transfer of a MoE model needs --sglang-ep-size {args.rollout_num_gpus_per_engine} (one EP "
             f"rank per engine device), got {args.sglang_ep_size}; other expert splits would keep stale experts."
         )
+
+    if args.update_weight_transfer_mode == "disk-lora":
+        assert lora_rollout_enabled(args) and not args.multi_lora, (
+            "--update-weight-transfer-mode=disk-lora publishes the single LoRA adapter the rollout serves: it "
+            "needs --lora-rank > 0, without --lora-train-only, --lora-merge-for-rollout or multi-LoRA."
+        )
+        assert not args.colocate, "--update-weight-transfer-mode=disk-lora is for non-colocated engines"
+        assert args.update_weight_disk_dir, (
+            "--update-weight-transfer-mode=disk-lora writes each adapter version under --update-weight-disk-dir, "
+            "which the engines read (or --custom-update-weight-post-write-path copies there)."
+        )
+        assert args.pause_generation_mode in (
+            "in_place",
+            "retract",
+        ), "disk-lora switches the adapter through /update_lora_adapter, which pauses in_place or retract."
+        assert args.prefill_num_servers is None, "disk-lora has not been tested when PD is enabled."
+        assert not args.indep_dp, "disk-lora writes one directory per version from a single trainer group."
+        assert args.disk_lora_keep_versions >= 1, "--disk-lora-keep-versions keeps at least the newest version"
 
     if args.update_weight_transfer_mode == "http-lora":
         assert is_lora_enabled(args) and not args.multi_lora, (
