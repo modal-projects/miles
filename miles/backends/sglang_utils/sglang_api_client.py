@@ -345,6 +345,21 @@ class SGLangApiClient:
             "load_lora_adapter", {"lora_name": lora_name, "lora_path": lora_path, "pinned": pinned, "upsert": upsert}
         )
 
+    async def update_lora_adapter(
+        self, lora_name: str, lora_path: str, weight_version: str, pause_mode: str, pinned: bool = False
+    ):
+        """Switch ``lora_name`` to the adapter at ``lora_path``, read while serving, and its weight version with it."""
+        return await self._make_request(
+            "update_lora_adapter",
+            {
+                "lora_name": lora_name,
+                "lora_path": lora_path,
+                "weight_version": weight_version,
+                "pause_mode": pause_mode,
+                "pinned": pinned,
+            },
+        )
+
     async def release_memory_occupation(self, tags: list[str] = None):
         """Release memory occupation. Available tags: weights, kv_cache."""
         await self.flush_cache()
