@@ -282,7 +282,16 @@ class RolloutRelatedConfig(BaseConfig):
         str,
         Arg(
             type_parser=None,
-            choices=["broadcast", "broadcast_packed", "p2p", "disk-delta", "ici", "http-lora", "gpu-delta"],
+            choices=[
+                "broadcast",
+                "broadcast_packed",
+                "p2p",
+                "disk-delta",
+                "ici",
+                "http-lora",
+                "gpu-delta",
+                "disk-lora",
+            ],
             help=(
                 "The method to transfer weights to remote rollout engines during update weight. "
                 "'disk-delta' diffs each sync against a CPU snapshot of the previous one and publishes "
@@ -295,7 +304,10 @@ class RolloutRelatedConfig(BaseConfig):
                 "HTTP (see --http-lora-ship), so the trainer and the engines need not share a vendor, an "
                 "interconnect, or a host. "
                 "'gpu-delta' publishes canonical GPU-encoded frames using the publication-selected codec "
-                "for streaming SGLang GPU apply."
+                "for streaming SGLang GPU apply. "
+                "'disk-lora' is LoRA-only: each version of the adapter is a directory under "
+                "--update-weight-disk-dir that the trainer's ranks write in parallel; each engine reads it "
+                "while serving and switches to it at a step boundary (/update_lora_adapter)."
             ),
         ),
     ] = "broadcast"
@@ -317,14 +329,25 @@ class RolloutRelatedConfig(BaseConfig):
             ),
         ),
     ] = "tensors"
+    disk_lora_keep_versions: A[
+        int,
+        Arg(
+            help=(
+                "How many of this run's newest adapter versions disk-lora keeps under "
+                "--update-weight-disk-dir; older ones are deleted after each sync. Copies made by "
+                "--custom-update-weight-post-write-path are its own to manage."
+            ),
+        ),
+    ] = 3
     update_weight_disk_dir: A[
         str | None,
         Arg(
             help=(
                 "Filesystem directory disk-delta weight sync publishes to: one delta directory "
                 "(changed tensors only) per sync, written by the trainer and read by every "
-                "rollout host. Also stores immutable framed publications for gpu-delta and serves as "
-                "the adapter staging directory of --http-lora-ship path. Required for disk-delta and gpu-delta."
+                "rollout host. Also stores immutable framed publications for gpu-delta, the adapter "
+                "versions of disk-lora, and serves as the adapter staging directory of --http-lora-ship path. "
+                "Required for disk-delta, gpu-delta and disk-lora."
             )
         ),
     ] = None

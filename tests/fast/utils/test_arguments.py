@@ -4229,6 +4229,39 @@ class TestMilesValidateArgsHttpLora:
         miles_validate_args(self._parse(tmp_path, ["--check-lora-weight-equal"]))
 
 
+class TestMilesValidateArgsDiskLora:
+    @staticmethod
+    def _parse(tmp_path, extra: list[str]) -> argparse.Namespace:
+        # LoRA target resolution reads the HF config of --hf-checkpoint.
+        (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+        parser = copy.deepcopy(get_megatron_arg_parser())
+        parser.set_defaults(finetune=False)
+        return parser.parse_args(
+            ["--update-weight-transfer-mode", "disk-lora", "--lora-rank", "16", "--hf-checkpoint", str(tmp_path)]
+            + ["--num-rollout", "1"]
+            + extra
+            + REQUIRED_ARGS
+        )
+
+    def test_validates_with_a_version_directory(self, tmp_path):
+        miles_validate_args(self._parse(tmp_path, ["--update-weight-disk-dir", str(tmp_path / "versions")]))
+
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            ([], "writes each adapter version under --update-weight-disk-dir"),
+            (["--lora-merge-for-rollout"], "the single LoRA adapter the rollout serves"),
+            (["--pause-generation-mode", "abort"], "pauses in_place or retract"),
+            (["--disk-lora-keep-versions", "0"], "keeps at least the newest version"),
+        ],
+    )
+    def test_refuses_what_it_cannot_serve(self, tmp_path, extra, message):
+        if extra:
+            extra = extra + ["--update-weight-disk-dir", str(tmp_path / "versions")]
+        with pytest.raises(AssertionError, match=message):
+            miles_validate_args(self._parse(tmp_path, extra))
+
+
 _EXTERNAL_ROLLOUT_ARGS = [
     "--rollout-external-url",
     "https://rollout",
@@ -4251,6 +4284,7 @@ class TestMilesValidateArgsExternalRollout:
             (_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode disk-delta"),
             ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "disk-delta"], "fully async runs only"),
             ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "gpu-delta"], "fully async runs only"),
+            ([*_EXTERNAL_ROLLOUT_ARGS, "--update-weight-transfer-mode", "disk-lora"], "fully async runs only"),
             ([*_EXTERNAL_DISK_DELTA_ARGS, "--rollout-external-engine-addrs", "host:1"], "runs its own engines"),
             (
                 [
@@ -4281,6 +4315,7 @@ class TestMilesValidateArgsExternalRollout:
             "not_a_delta_mode",
             "not_fully_async",
             "gpu_delta_not_fully_async",
+            "disk_lora_not_fully_async",
             "external_engines",
             "eval",
             "opd_student_scores",
