@@ -107,6 +107,7 @@ miles-managed path:
 | `p2p` | Convert and re-shard weights, then write them directly to rollout-rank memory over RDMA | miles-managed, in-cluster jobs with direct rank-to-rank connectivity; see [P2P Weight Transfer](/advanced/p2p-weight-transfer) |
 | `disk-delta` | Publish changed canonical checkpoint bytes to shared storage, let rollout hosts materialize them locally, then reload | Trainer and rollout cannot share an NCCL fabric, or model-sized full-weight transfer dominates the update |
 | `gpu-delta` | Compress lossless XOR deltas on trainer GPUs and publish them to shared storage; each engine prepares them while serving, then XORs them into its live buffers during a short pause | Experimental Megatron-to-SGLang mode for separate GPUs that share storage and an immutable local HF base; see [GPU-Delta Weight Transfer](/advanced/gpu-delta-weight-transfer) |
+| `disk-lora` | The trainer's ranks write each version of the LoRA adapter in parallel, as one PEFT directory on shared storage; each engine reads it while serving and switches to it at a step boundary (`/update_lora_adapter`) | Single-LoRA runs whose engines serve the adapter, on separate GPUs that share storage |
 
 These are weight synchronization choices, not different rollout APIs. In the
 broadcast and P2P modes, miles transfers tensors into known engine ranks directly.
@@ -243,6 +244,13 @@ request (`manifest_sha256`, `stream_id`, `base_stream_id`, `base_version`,
 path under `--update-weight-disk-dir`. A replica applies it only from the
 publication's base, `(base_stream_id, base_version)`; a resume starts a new
 stream rather than deleting versions.
+
+With `--update-weight-transfer-mode disk-lora`, `/start` and `/versions` carry
+`"publication": {"kind": "lora", "lora_name": ..., "path": ...}`, `path` being the
+version's adapter directory under `--update-weight-disk-dir`. A replica switches
+to it with `/update_lora_adapter` whatever it serves: each version is the whole
+adapter. A resume writes under a new run tag, and `/start` publishes
+the restored adapter as `S`.
 
 `S` is the trainer's weight version when it starts or resumes. Before `/start`,
 a resume deletes the versions published after `S`, so the service retires any
