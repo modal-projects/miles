@@ -121,6 +121,18 @@ class TestSetupModelAndOptimizerLoraBranch:
 
         mock_lora_setup.assert_called_once_with(args)
 
+    @patch(f"{_MODEL_MODULE}.get_megatron_optimizer")
+    @patch(f"{_MODEL_MODULE}._setup_lora_model_via_bridge")
+    def test_lora_refuses_bf16_stochastic_rounding(self, mock_lora_setup, mock_opt, monkeypatch):
+        from miles.backends.megatron_utils.model import setup_model_and_optimizer
+
+        mock_lora_setup.return_value = [MagicMock()]
+        monkeypatch.setenv("OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG", "1")
+
+        with pytest.raises(ValueError, match="never syncs its frozen base"):
+            setup_model_and_optimizer(self._make_args(lora_rank=32, role="actor", mode="bridge"), role="actor")
+        mock_opt.assert_not_called()
+
     @patch(f"{_MODEL_MODULE}.get_optimizer_param_scheduler")
     @patch(f"{_MODEL_MODULE}.get_megatron_optimizer")
     @patch(f"{_MODEL_MODULE}.get_model")
