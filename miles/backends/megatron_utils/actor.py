@@ -1,4 +1,5 @@
 import atexit
+import functools
 import logging
 import os
 import shutil
@@ -72,6 +73,7 @@ from miles.utils.lora.hf_lora_targets import get_hf_lora_targets
 from miles.utils.lora.utils import build_lora_config, exports_hf_snapshots, is_multi_lora_enabled, reads_adapter_slots
 from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.misc import partition
+from miles.utils.nvfp4 import is_nvfp4_stochastic_rounding_enabled, nvfp4_rounding_point
 from miles.utils.object_store import StoreObjectRef, ValueSpec
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
 from miles.utils.replay_base import all_replay_managers, routing_replay_manager
@@ -128,6 +130,17 @@ def _setup_disk_offload_reclaim(disk_dir: str) -> None:
     os.makedirs(disk_dir, exist_ok=True)
     atexit.register(shutil.rmtree, disk_dir, ignore_errors=True)
     logger.info(f"Train disk-offload reclaim armed for {disk_dir} (startup wipe + atexit)")
+
+
+def _rounds_nvfp4_at_weight_version(method):
+    """The method's exports round NVFP4 stochastically at the weight version they export."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._nvfp4_rounding_point():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class MegatronTrainRayActor(TrainRayActor):
@@ -311,7 +324,7 @@ class MegatronTrainRayActor(TrainRayActor):
             checkpoint_dir = get_checkpoint_name(
                 ckpt_load_config.load, load_output.loaded_rollout_id, return_base_dir=True
             )
-            with self._gpu_delta_allocations():
+            with self._gpu_delta_allocations(), self._nvfp4_rounding_point():
                 self.weight_updater.restore_gpu_delta_checkpoint(
                     checkpoint_dir, load_output.loaded_rollout_id, publish_eval_stream=indep_dp_info.alive_rank == 0
                 )
@@ -966,6 +979,7 @@ class MegatronTrainRayActor(TrainRayActor):
         )
 
     @timer
+    @_rounds_nvfp4_at_weight_version
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         self._heartbeat.bump()
         if self.args.debug_rollout_only:
@@ -1031,6 +1045,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @with_logs
     @timer
+    @_rounds_nvfp4_at_weight_version
     def export_hf(self, rollout_id: int, path: str) -> None:
         """Export current weights as an HF checkpoint to ``path`` (collective).
 
@@ -1053,6 +1068,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @with_logs
     @timer
+    @_rounds_nvfp4_at_weight_version
     def export_eval_snapshot(self, rollout_id: int, path: str) -> None:
         """Export an immutable publication for dedicated GPU-delta eval, otherwise HF."""
         if not uses_gpu_delta_eval(self.args):
@@ -1095,8 +1111,14 @@ class MegatronTrainRayActor(TrainRayActor):
             self._get_actor_weights(include_model_companion=True).items()
         )
 
+    def _nvfp4_rounding_point(self):
+        if not is_nvfp4_stochastic_rounding_enabled():
+            return nullcontext()
+        return nvfp4_rounding_point(self.args.backend.seed, self._get_actor_weight_version())
+
     @with_logs
     @timer
+    @_rounds_nvfp4_at_weight_version
     def update_weights(
         self, info: UpdatableEngines, debug_weight_update_id: str, rollout_id: int | None
     ) -> WeightUpdateOutput:
