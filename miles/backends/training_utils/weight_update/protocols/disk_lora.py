@@ -95,10 +95,11 @@ class UpdateWeightFromDiskLora(WeightTransferProtocol):
         version_dir = os.path.join(self.args.update_weight_disk_dir, self._version_name(weight_version))
         tensors, self._tensors = self._tensors, {}
         os.makedirs(version_dir, exist_ok=True)
-        # safetensors writes 0600; engines may read as another user
+        # Readable whatever the umask: engines may read as another user.
         if tensors:
-            path = os.path.join(version_dir, f"adapter_model-{dist.get_rank():05d}.safetensors")
-            safetensors.torch.save_file(tensors, path)
+            path = Path(version_dir, f"adapter_model-{dist.get_rank():05d}.safetensors")
+            # One write: save_file writes each tensor separately, slow on network mounts.
+            path.write_bytes(safetensors.torch.save(tensors))
             os.chmod(path, 0o644)
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
