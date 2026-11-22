@@ -3,7 +3,7 @@ from functools import lru_cache
 
 import torch
 
-from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_quantize_1d, nvfp4_quantize_1d_pair
+from miles.utils.nvfp4 import NVFP4_GROUP_SIZE, nvfp4_philox_seed, nvfp4_quantize_1d, nvfp4_quantize_1d_pair
 
 GATED_PAIR_SUFFIXES = {
     ".gate_proj.weight": "gate",
@@ -130,7 +130,7 @@ def _quantize_moe_params(converted_named_params, ignore_rules):
             )
         gate_name, gate_weight = roles["gate"]
         up_name, up_weight = roles["up"]
-        gate_output, up_output = nvfp4_quantize_1d_pair(gate_weight, up_weight)
+        gate_output, up_output = nvfp4_quantize_1d_pair(gate_weight, up_weight, philox_seed=nvfp4_philox_seed(base))
         paired_outputs[gate_name] = gate_output
         paired_outputs[up_name] = up_output
 
@@ -142,7 +142,7 @@ def _quantize_moe_params(converted_named_params, ignore_rules):
         if converted_name in paired_outputs:
             qweight, block_scale, weight_scale_2 = paired_outputs[converted_name]
         else:
-            qweight, block_scale, weight_scale_2 = quantize_nvfp4(param)
+            qweight, block_scale, weight_scale_2 = quantize_nvfp4(param, converted_name)
         quantize_named_params.append((converted_name, qweight))
         quantize_named_params.append((converted_name.replace(".weight", ".weight_scale"), block_scale))
         quantize_named_params.append((converted_name.replace(".weight", ".weight_scale_2"), weight_scale_2))
@@ -173,6 +173,7 @@ def _split_gated_pair_name(name: str):
 
 def _quantize_nvfp4_1d(
     weight: torch.Tensor,
+    philox_seed: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     NVFP4 1D quantization (tile shape = 1x16).
@@ -187,20 +188,21 @@ def _quantize_nvfp4_1d(
     if n % NVFP4_GROUP_SIZE != 0:
         raise ValueError(f"NVFP4 requires K divisible by {NVFP4_GROUP_SIZE}, got {n}.")
 
-    return nvfp4_quantize_1d(weight)
+    return nvfp4_quantize_1d(weight, philox_seed=philox_seed)
 
 
 def quantize_nvfp4(
     weight: torch.Tensor,
+    name: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if weight.dim() == 2:
-        return _quantize_nvfp4_1d(weight)
+        return _quantize_nvfp4_1d(weight, nvfp4_philox_seed(name))
     if weight.dim() == 3:
         qweights = []
         block_scales = []
         global_scales = []
         for idx in range(weight.shape[0]):
-            qweight, block_scale, global_scale = _quantize_nvfp4_1d(weight[idx])
+            qweight, block_scale, global_scale = _quantize_nvfp4_1d(weight[idx], nvfp4_philox_seed(f"{name}.{idx}"))
             qweights.append(qweight)
             block_scales.append(block_scale)
             global_scales.append(global_scale)
