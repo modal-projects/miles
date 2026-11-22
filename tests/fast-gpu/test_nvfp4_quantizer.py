@@ -19,6 +19,7 @@ from tools.convert_hf_to_nvfp4 import should_quantize as tool_should_quantize_nv
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 
+import miles.utils.nvfp4 as nvfp4
 import miles.utils.nvfp4_fake_qat as nvfp4_qat
 from miles.backends.megatron_utils.megatron_to_hf.processors.quantizer_nvfp4 import (
     quantize_nvfp4 as processor_quantize_nvfp4,
@@ -34,11 +35,14 @@ from miles.kernels.quant.nvfp4_qdq import (
 )
 from miles.utils.nvfp4 import (
     NVFP4_GROUP_SIZE,
+    NVFP4_STOCHASTIC_ROUNDING_FLAG,
     _clear_negative_zero,
     nvfp4_global_decode_scale_te,
     nvfp4_global_encode_scale_te,
+    nvfp4_philox_seed,
     nvfp4_quantize_1d,
     nvfp4_quantize_1d_pair,
+    nvfp4_rounding_point,
     nvfp4_weight_e4m3_max,
 )
 
@@ -215,7 +219,7 @@ def test_nvfp4_quantize_params_omits_static_input_scale(monkeypatch):
     block_scale = torch.empty((4, 1), dtype=torch.float8_e4m3fn)
     global_scale = torch.ones((), dtype=torch.float32)
 
-    def fake_quantize_1d_pair(_gate, _up):
+    def fake_quantize_1d_pair(_gate, _up, philox_seed=None):
         return (qweight, block_scale, global_scale), (qweight, block_scale, global_scale)
 
     monkeypatch.setattr(
@@ -415,9 +419,136 @@ def test_nvfp4_quantize_keeps_the_bytes_of_a_weight_crossing_zero(use_4over6, mo
     torch.testing.assert_close(crossed_zero, qweight, rtol=0, atol=0)
 
 
+_E2M1_MAGNITUDES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _stochastic_rounding_on(monkeypatch):
+    monkeypatch.setenv(NVFP4_STOCHASTIC_ROUNDING_FLAG, "1")
+    monkeypatch.delenv(nvfp4_qat.NVFP4_FAKE_QAT_FLAG, raising=False)
+    monkeypatch.delenv("NVTE_NVFP4_4OVER6", raising=False)
+    nvfp4._validate_nvfp4_stochastic_rounding.cache_clear()
+
+
+def _e2m1_magnitudes(qweight: torch.Tensor) -> torch.Tensor:
+    """Each packed E2M1 code's magnitude, the even element in the low half."""
+    codes = torch.stack((qweight & 0x07, (qweight >> 4) & 0x07), dim=-1).flatten(-2).long()
+    return torch.tensor(_E2M1_MAGNITUDES, device=qweight.device)[codes]
+
+
+def _bytes(quantized) -> list[torch.Tensor]:
+    return [tensor.view(torch.uint8) if tensor.dtype == torch.float8_e4m3fn else tensor for tensor in quantized]
+
+
+def _same(first, second) -> bool:
+    return all(torch.equal(a, b) for a, b in zip(_bytes(first), _bytes(second), strict=True))
+
+
+def test_nvfp4_stochastic_rounding_off_rounds_to_nearest(monkeypatch):
+    monkeypatch.delenv(NVFP4_STOCHASTIC_ROUNDING_FLAG, raising=False)
+    weight = torch.randn((64, 128), dtype=torch.bfloat16, device="cuda")
+
+    with nvfp4_rounding_point(1234, 5):
+        assert _same(processor_quantize_nvfp4(weight, "w"), nvfp4_quantize_1d(weight))
+
+
+def test_nvfp4_stochastic_rounding_same_point_same_bits_other_points_other_bits(monkeypatch):
+    _stochastic_rounding_on(monkeypatch)
+    weight = torch.randn((256, 128), dtype=torch.bfloat16, device="cuda")
+
+    def quantize(seed, weight_version, name):
+        with nvfp4_rounding_point(seed, weight_version):
+            return processor_quantize_nvfp4(weight, name)
+
+    first = quantize(1234, 5, "w")
+    nearest = nvfp4_quantize_1d(weight)
+    assert _same(first, quantize(1234, 5, "w"))
+    # Only the E2M1 codes round stochastically; the scales stay round-to-nearest's.
+    assert _same(first[1:], nearest[1:])
+    assert not torch.equal(first[0], nearest[0])
+    for other in (quantize(1234, 6, "w"), quantize(1234, 5, "v"), quantize(4321, 5, "w")):
+        assert not torch.equal(other[0], first[0])
+
+
+def test_nvfp4_stochastic_rounding_rounds_to_a_neighbor_with_probability_of_its_distance(monkeypatch):
+    _stochastic_rounding_on(monkeypatch)
+    draws = 1024
+    torch.manual_seed(0)
+    weight = torch.randn((16, 256), dtype=torch.float32, device="cuda")
+    _, block_scale, global_scale = nvfp4_quantize_1d(weight)
+    scale = block_scale.float().repeat_interleave(NVFP4_GROUP_SIZE, dim=-1) * global_scale.float()
+    magnitude = (weight / scale).abs().clamp_max(6.0)
+    levels = torch.tensor(_E2M1_MAGNITUDES, device="cuda")
+    above = torch.searchsorted(levels, magnitude.contiguous())
+    upper = levels[above.clamp_max(len(levels) - 1)]
+    lower = torch.where(upper == magnitude, upper, levels[(above - 1).clamp_min(0)])
+    between = upper != lower
+    up_probability = torch.where(between, (magnitude - lower) / (upper - lower), 0.0)
+
+    ups = torch.zeros_like(magnitude)
+    for weight_version in range(draws):
+        with nvfp4_rounding_point(1234, weight_version):
+            qweight, _, _ = processor_quantize_nvfp4(weight, "w")
+        rounded = _e2m1_magnitudes(qweight)
+        assert ((rounded == lower) | (rounded == upper)).all()
+        ups += (rounded == upper) & between
+
+    # Within 5 sigma, and a few draws for rare outcomes, where the normal bound is too tight.
+    expected = draws * up_probability
+    sigma = (expected * (1 - up_probability)).sqrt()
+    assert ((ups - expected).abs() <= 5 * sigma + 3)[between].all()
+
+
+def test_nvfp4_stochastic_rounding_leaves_the_cuda_generator_alone(monkeypatch):
+    _stochastic_rounding_on(monkeypatch)
+    weight = torch.randn((64, 128), dtype=torch.bfloat16, device="cuda")
+    torch.cuda.manual_seed(7)
+    before = torch.cuda.get_rng_state()
+
+    with nvfp4_rounding_point(1234, 5):
+        processor_quantize_nvfp4(weight, "w")
+
+    assert torch.equal(torch.cuda.get_rng_state(), before)
+
+
+def test_nvfp4_stochastic_rounding_rounds_a_gated_pair_by_its_base_name(monkeypatch):
+    _stochastic_rounding_on(monkeypatch)
+    gate = torch.randn((64, 128), dtype=torch.bfloat16, device="cuda")
+    up = torch.randn((64, 128), dtype=torch.bfloat16, device="cuda")
+    base = "model.layers.0.mlp.experts.0"
+
+    with nvfp4_rounding_point(1234, 5):
+        out = dict(
+            quantize_params_nvfp4(
+                args=_quantizer_args(),
+                megatron_name="decoder.layers.0.mlp.experts.linear_fc1.weight0",
+                converted_named_params=[(f"{base}.gate_proj.weight", gate), (f"{base}.up_proj.weight", up)],
+                quantization_config={"quant_method": "nvfp4"},
+            )
+        )
+        expected_gate, expected_up = nvfp4_quantize_1d_pair(gate, up, philox_seed=nvfp4_philox_seed(base))
+
+    assert torch.equal(out[f"{base}.gate_proj.weight"], expected_gate[0])
+    assert torch.equal(out[f"{base}.up_proj.weight"], expected_up[0])
+
+
+def test_nvfp4_stochastic_rounding_refuses_fake_qat_4over6_and_an_export_outside_a_point(monkeypatch):
+    _stochastic_rounding_on(monkeypatch)
+    weight = torch.randn((64, 128), dtype=torch.bfloat16, device="cuda")
+
+    with pytest.raises(RuntimeError, match="nvfp4_rounding_point"):
+        processor_quantize_nvfp4(weight, "w")
+
+    for name, value in ((nvfp4_qat.NVFP4_FAKE_QAT_FLAG, "1"), ("NVTE_NVFP4_4OVER6", "weights")):
+        with monkeypatch.context() as refused:
+            refused.setenv(name, value)
+            nvfp4._validate_nvfp4_stochastic_rounding.cache_clear()
+            with nvfp4_rounding_point(1234, 5), pytest.raises(ValueError, match=name):
+                processor_quantize_nvfp4(weight, "w")
+
+
 @pytest.mark.parametrize(
     "quantize_fn",
-    [processor_quantize_nvfp4, tool_quantize_nvfp4],
+    [lambda weight: processor_quantize_nvfp4(weight, "w"), tool_quantize_nvfp4],
     ids=["processor", "convert_tool"],
 )
 @pytest.mark.parametrize("shape", NVFP4_SHAPES)
