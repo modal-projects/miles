@@ -160,6 +160,54 @@ def test_concurrent_shards_and_raw_targets_have_exclusive_ownership(tmp_path):
         publication.seal_publication(tmp_path, shards)
 
 
+def test_owners_sealed_together_read_back_as_each_wrote(tmp_path):
+    # Names interleave across owners, so sealing reorders every owner's columns.
+    writers = [_writer(tmp_path, owner) for owner in range(3)]
+    written = {}
+    for i in range(12):
+        writer, name = writers[i % 3], f"t{i:02d}"
+        if i % 4 == 3:
+            mask = np.full(4, i % 2, np.uint8)
+            entry = writer.add_raw_xor_tensor(name, mask, {"dtype": "F32", "shape": []})
+        else:
+            frames, payload, outer = _encoded(writer.metadata["codec"])
+            frames[1] = dict(frames[1], decoded_bytes=100 + i, encoded_bytes=5 + i)
+            trailing = 64 * (i % 2)
+            spec = {"dtype": "U8", "shape": [1, 2 * publication.FRAME_BYTES + 100 + i + trailing]}
+            entry = writer.add_encoded_tensor(name, frames, payload, outer, changed_bytes=i, spec=spec)
+        written[name] = copy.deepcopy(entry)
+    publication.seal_publication(tmp_path, [writer.finish_shard() for writer in writers])
+
+    manifest = publication.read_publication_metadata(tmp_path / "manifest.json")
+    assert [tensor["name"] for tensor in manifest["tensors"]] == sorted(written)
+    for tensor in manifest["tensors"]:
+        expected = written[tensor["name"]]
+        assert tensor["changed_bytes"] == expected["changed_bytes"]
+        assert tensor["frames"] == expected["frames"]
+        for kind in ("raw", "outer"):
+            assert (kind in tensor) == (kind in expected)
+        if "raw" in expected:
+            assert tensor["raw"] == expected["raw"]
+        if "outer" in expected:
+            fields = ("file", "encoded_offset", "encoded_bytes", "decoded_bytes", "frames")
+            assert {key: tensor["outer"][key] for key in fields} == {key: expected["outer"][key] for key in fields}
+    columns = safetensors.numpy.load_file(str(tmp_path / "metadata.safetensors"))
+    gaps, ends = [], []
+    for name in sorted(written):
+        entry = written[name]
+        if entry["encoding"] == "xor_bytes":
+            cursor = 0
+            for frame in entry["frames"]:
+                if cursor < frame["decoded_offset"]:
+                    gaps.append((cursor, frame["decoded_offset"] - cursor))
+                cursor = frame["decoded_offset"] + frame["decoded_bytes"]
+            if cursor < entry["nbytes"]:
+                gaps.append((cursor, entry["nbytes"] - cursor))
+        ends.append(len(gaps))
+    assert list(zip(columns["gaps.offset"], columns["gaps.nbytes"])) == gaps
+    assert list(columns["tensors.gap_end"]) == ends
+
+
 def test_unicode_manifest_authenticates_written_bytes_without_changing_plan_json(tmp_path):
     name = "层.é.weight_scale"
     plan = {"name": name}
