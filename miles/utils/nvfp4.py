@@ -1,11 +1,69 @@
+import functools
+import hashlib
+import logging
 import os
+from contextlib import contextmanager
 
 import torch
+
+from miles.utils.nvfp4_fake_qat import NVFP4_FAKE_QAT_FLAG
+
+logger = logging.getLogger(__name__)
 
 FP4_E2M1_MAX = 6.0
 FP8_E4M3_MAX = 448.0
 NVFP4_GROUP_SIZE = 16
 TE_NVFP4_ROW_ALIGNMENT = 16
+
+NVFP4_STOCHASTIC_ROUNDING_FLAG = "OPEN_TRAINING_NVFP4_STOCHASTIC_ROUNDING_FLAG"
+# (seed, weight version) of the weights being exported.
+_rounding_point: tuple[int, int] | None = None
+
+
+def is_nvfp4_stochastic_rounding_enabled() -> bool:
+    return os.getenv(NVFP4_STOCHASTIC_ROUNDING_FLAG, "0") == "1"
+
+
+@contextmanager
+def nvfp4_rounding_point(seed: int, weight_version: int):
+    """Exports inside quantize the weights of ``weight_version``."""
+    global _rounding_point
+    previous, _rounding_point = _rounding_point, (seed, weight_version)
+    try:
+        yield
+    finally:
+        _rounding_point = previous
+
+
+@functools.cache
+def _validate_nvfp4_stochastic_rounding() -> None:
+    if os.getenv(NVFP4_FAKE_QAT_FLAG, "0") == "1":
+        raise ValueError(
+            f"{NVFP4_STOCHASTIC_ROUNDING_FLAG}=1 with {NVFP4_FAKE_QAT_FLAG}=1: fake QAT trains on the "
+            "round-to-nearest weights, which rollouts would no longer serve"
+        )
+    if _nvfp4_4over6_enabled():
+        raise ValueError(
+            f"{NVFP4_STOCHASTIC_ROUNDING_FLAG}=1 with NVTE_NVFP4_4OVER6={os.environ['NVTE_NVFP4_4OVER6']}: TE's "
+            "NVFP4 quantizer does not round 4over6 blocks stochastically"
+        )
+    logger.info(f"{NVFP4_STOCHASTIC_ROUNDING_FLAG}=1: NVFP4 exports are rounded stochastically")
+
+
+def nvfp4_philox_seed(name: str) -> int | None:
+    """The Philox seed that rounds tensor ``name`` stochastically at the current point; None rounds to nearest.
+
+    A function of (seed, weight version, name) alone: a resumed trainer exports a version's bytes again, and
+    every layout rounds a tensor alike.
+    """
+    if not is_nvfp4_stochastic_rounding_enabled():
+        return None
+    _validate_nvfp4_stochastic_rounding()
+    if _rounding_point is None:
+        raise RuntimeError(f"{NVFP4_STOCHASTIC_ROUNDING_FLAG}=1: an export must run inside nvfp4_rounding_point")
+    seed, weight_version = _rounding_point
+    digest = hashlib.blake2b(f"{seed}/{weight_version}/{name}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "little")
 
 
 def nvfp4_weight_e4m3_max() -> int:
@@ -58,10 +116,22 @@ def _pad_rows_for_te_quantizer(weight: torch.Tensor) -> torch.Tensor:
     return torch.cat((weight, padding), dim=0)
 
 
+def _quantize_seeded(quantizer, weight: torch.Tensor, philox_seed: int):
+    # TE draws the rounding bits from the current device's default generator: seed it for this call only.
+    generator = torch.cuda.default_generators[torch.cuda.current_device()]
+    state = generator.get_state()
+    generator.manual_seed(philox_seed)
+    try:
+        return quantizer.quantize(weight)
+    finally:
+        generator.set_state(state)
+
+
 def nvfp4_quantize_1d(
     weight: torch.Tensor,
     *,
     clear_negative_zero: bool = True,
+    philox_seed: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
@@ -76,7 +146,7 @@ def nvfp4_quantize_1d(
         with_rht=False,
         with_post_rht_amax=False,
         with_2d_quantization=False,
-        stochastic_rounding=False,
+        stochastic_rounding=philox_seed is not None,
         row_scaled_nvfp4=False,
         nvfp4_use_4over6=_nvfp4_4over6_enabled(),
         nvfp4_e4m3_max=nvfp4_e4m3_max,
@@ -84,7 +154,11 @@ def nvfp4_quantize_1d(
         with_random_sign_mask=False,
     )
 
-    quantized = quantizer.quantize(_pad_rows_for_te_quantizer(weight))
+    padded = _pad_rows_for_te_quantizer(weight)
+    if philox_seed is None:
+        quantized = quantizer.quantize(padded)
+    else:
+        quantized = _quantize_seeded(quantizer, padded, philox_seed)
     qweight = quantized._rowwise_data[:num_rows, : num_cols // 2]
     if clear_negative_zero:
         qweight = _clear_negative_zero(qweight)
@@ -99,6 +173,7 @@ def nvfp4_quantize_1d_pair(
     second: torch.Tensor,
     *,
     clear_negative_zero: bool = True,
+    philox_seed: int | None = None,
 ) -> tuple[
     tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -115,7 +190,7 @@ def nvfp4_quantize_1d_pair(
     if combined is None:
         combined = torch.cat((first.contiguous(), second.contiguous()), dim=0)
     combined_qweight, combined_block_scale, global_scale = nvfp4_quantize_1d(
-        combined, clear_negative_zero=clear_negative_zero
+        combined, clear_negative_zero=clear_negative_zero, philox_seed=philox_seed
     )
     first_result = (
         combined_qweight[:first_rows].contiguous(),
