@@ -34,8 +34,10 @@ class OpenAIEndpointTracer:
         session_server_instance_id: str | None = None,
         samples_wire_fields: tuple[str, ...] = COMPUTED_FIELDS,
         agent_router_url: str | None = None,
+        samples_timeout: float = _SESSION_REQUEST_TIMEOUT,
     ):
         self.router_url = router_url
+        self.samples_timeout = samples_timeout
         self.session_id = session_id
         self.base_url = f"{router_url}/sessions/{session_id}"
         # The agent may run outside the cluster; the driver's own calls stay on base_url.
@@ -86,6 +88,7 @@ class OpenAIEndpointTracer:
             session_id=session_id,
             session_server_instance_id=instance.instance_id,
             samples_wire_fields=samples_wire_fields,
+            samples_timeout=args.session_samples_timeout,
             agent_router_url=instance.external_url,
         )
 
@@ -102,7 +105,7 @@ class OpenAIEndpointTracer:
             payload = await post_buffer_no_retry(
                 f"{self.base_url}/samples",
                 body,
-                timeout=_SESSION_REQUEST_TIMEOUT,
+                timeout=self.samples_timeout,
             )
             reply = await asyncio.to_thread(
                 decode_samples_and_merge_input_sample,

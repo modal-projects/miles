@@ -25,6 +25,15 @@ class SessionConfig(BaseConfig):
         ),
     ] = False
     session_server_workers: A[int, Arg(help="Number of session server instances.")] = 32
+    session_samples_timeout: A[
+        float,
+        Arg(
+            help=(
+                "Seconds a session server gets to assemble and return a finished session's training samples; "
+                "a long agentic session carrying top-k log-probs per token can take minutes."
+            )
+        ),
+    ] = 120.0
     session_server_ip: A[
         str | None,
         Arg(
