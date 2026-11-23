@@ -13,14 +13,22 @@ from miles.backends.training_utils.checkpoint.adapter.adapter_dir import (
 from miles.backends.training_utils.checkpoint.adapter.commit import UncommittedAdapterDir
 from miles.backends.training_utils.data.rollout import get_rollout_data
 from miles.backends.training_utils.parallel import get_parallel_state
+from miles.utils.args.custom_view import compute_custom_function_config
+from miles.utils.function_registry import load_function
 from miles.utils.object_store import StoreObjectRef
 from miles.utils.tracking_utils.structured_log import with_logs
+from miles.utils.workers.rpc.common.metadata import rpc
 
 
 class MultiLoRATrainRayActor(MegatronTrainRayActor):
     def _init_training_state(self) -> None:
         self.slot_optimizers: dict[int, SlotOptimizer] = {}
         self._init_weight_updater_and_publisher(update_weights=False, publish_snapshots=True)
+        self._post_write_hook = (
+            load_function(self.args.custom_update_weight_post_write_path)
+            if self.args.custom_update_weight_post_write_path
+            else None
+        )
 
     @with_logs
     def forward_backward(self, batch_id: int, rollout_data_ref: StoreObjectRef) -> dict:
@@ -134,6 +142,13 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
             tenant_digest=tenant_digest,
             lora_dropout=self.args.lora_dropout,
         )
+
+    @rpc(concurrency_group="commit_export")
+    def commit_export(self, path: str) -> None:
+        """The post-write hook on a sampler export, off the training group: a save waiting for it holds no trainer."""
+        if self._post_write_hook is not None:
+            fn_args = compute_custom_function_config(self.args, self.args.custom_update_weight_post_write_path)
+            self._post_write_hook(fn_args, path, [])
 
     @with_logs
     def export_external_slot(

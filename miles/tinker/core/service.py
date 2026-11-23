@@ -8,6 +8,7 @@ import os
 import secrets
 import time
 import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import NamedTuple
 
@@ -86,6 +87,7 @@ class TinkerService:
         self._sample_tasks: dict[str, tuple] = {}  # request_id -> (task, session_id)
         self._create_tasks: set = set()
         self._cleanup_tasks: set = set()
+        self._reply_tasks: set = set()
         # two cleanups would race on the same .deleting dirs
         self._cleanup_lock = asyncio.Lock()
         self._arrival_counter = 0
@@ -137,7 +139,13 @@ class TinkerService:
                 await self._wake.wait()
                 self._wake.clear()
         finally:
-            tasks = [sweep_task, expiry_task, *self._create_tasks, *(task for task, _ in self._sample_tasks.values())]
+            tasks = [
+                sweep_task,
+                expiry_task,
+                *self._create_tasks,
+                *self._reply_tasks,
+                *(task for task, _ in self._sample_tasks.values()),
+            ]
             for task in tasks:
                 task.cancel()
             # Cleanup failures must not replace the error that stopped the dispatcher.
@@ -332,10 +340,24 @@ class TinkerService:
         except (UserInputError, OwnershipError) as error:
             outcomes = [{"error": str(error), "error_category": "user"} for _ in barrier.entries]
         for (model_queue, pending), outcome in zip(barrier.entries, outcomes, strict=True):
-            await self._finish_request(model_queue, pending, outcome)
+            if isinstance(outcome, dict):
+                await self._finish_request(model_queue, pending, outcome)
+            else:
+                # the model's next request may run while this reply waits outside the trainer lock
+                model_queue.finish(pending)
+                self._reply_outside_the_lock(pending.command.request_id, outcome)
 
-    async def _dispatch_barrier_op(self, barrier: BarrierUnit) -> list[dict]:
-        """Return one result or error per entry; only the caller settles futures and retires models."""
+    def _reply_outside_the_lock(self, request_id: str, reply: Awaitable[dict]) -> None:
+        async def settle() -> None:
+            self._settle(request_id, await reply)
+
+        task = asyncio.create_task(settle())
+        self._reply_tasks.add(task)
+        task.add_done_callback(self._reply_tasks.discard)
+        task.add_done_callback(self._observe_background_task)
+
+    async def _dispatch_barrier_op(self, barrier: BarrierUnit) -> list[dict | Awaitable[dict]]:
+        """One result, error or reply still to come per entry; only the caller settles futures and retires models."""
         if barrier.op == CommandOp.OPTIM_STEP:
             return await self._step_optimizers(barrier.entries)
         ((model_queue, pending),) = barrier.entries  # every other barrier is single-entry
@@ -375,10 +397,14 @@ class TinkerService:
                     category,
                 )
                 return
-            self.futures.fail(pending.command.request_id, outcome["error"], category)
-        else:
-            self.futures.resolve(pending.command.request_id, outcome)
+        self._settle(pending.command.request_id, outcome)
         model_queue.finish(pending)
+
+    def _settle(self, request_id: str, outcome: dict) -> None:
+        if "error" in outcome:
+            self.futures.fail(request_id, outcome["error"], outcome.get("error_category", "server"))
+        else:
+            self.futures.resolve(request_id, outcome)
 
     async def _save_state(self, record: ModelRecord, payload: dict) -> dict:
         """Save parameters and optimizer state; call after optim_step to persist accumulated training work."""
@@ -473,7 +499,7 @@ class TinkerService:
         record.lora_alpha = source["lora_alpha"]
         return {"op": "load_state"}
 
-    async def _save_weights_for_sampler(self, record: ModelRecord, payload: dict) -> dict:
+    async def _save_weights_for_sampler(self, record: ModelRecord, payload: dict) -> dict | Awaitable[dict]:
         version = payload.get("sampler_path")
         if version is None:
             version = str(record.next_sampler_version)
@@ -501,11 +527,16 @@ class TinkerService:
         except OSError as error:
             # a storage failure loses only this export; the trainer and other tenants are unaffected
             return {"error": f"cannot commit sampler weights {version!r}: {error}", "error_category": "server"}
-        result = {
-            "op": "save_weights_for_sampler",
-            "path": f"tinker://{record.model_id}/sampler_weights/{version}",
-        }
-        await self._set_expiry_after_commit(result["path"], written.commit_id, payload["ttl_seconds"])
+        tinker_path = f"tinker://{record.model_id}/sampler_weights/{version}"
+        return self._reply_once_published(record, payload, tinker_path, str(written.path), written.commit_id)
+
+    async def _reply_once_published(
+        self, record: ModelRecord, payload: dict, tinker_path: str, adapter_dir: str, commit_id: str
+    ) -> dict:
+        if (failure := await self.backend.publish_sampler(adapter_dir)) is not None:
+            return failure
+        result = {"op": "save_weights_for_sampler", "path": tinker_path}
+        await self._set_expiry_after_commit(tinker_path, commit_id, payload["ttl_seconds"])
         if payload.get("sampler_path") is None:
             # unnamed saves return a sampling session bound to the new version
             result["sampling_session_id"] = self._new_sampling_session(
@@ -629,10 +660,17 @@ class TinkerService:
 
     async def _delete_checkpoint(self, tinker_path: str, root: str, name: str, tenant: str | None) -> None:
         """Requires the trainer and expiry locks; ``tenant`` None skips the ownership check (expiry)."""
+        _, kind, _ = parse_tinker_path(tinker_path)
+        files = None
+        if kind == "sampler_weights":
+            files = await asyncio.to_thread(self.backend.resolve_checkpoint_files, root, name, tenant)
         await asyncio.to_thread(self.backend.delete_adapter, root, name, tenant)
         await asyncio.to_thread(self.expiry.drop, tinker_path)
         self._delete_retired_outside_the_lock(root)
         logger.info(f"deleted checkpoint {tinker_path}")
+        if files is not None and (failure := await self.backend.withdraw_sampler(files["path"])) is not None:
+            # the checkpoint is gone either way; only a copy outside this gateway outlives it
+            logger.warning(failure["error"])
 
     async def _run_expiry_sweeper(self) -> None:
         while True:
