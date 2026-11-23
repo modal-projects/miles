@@ -132,12 +132,23 @@ class DataBuffer(ABC):
         """
         return True
 
+    def take_step(self, trainer_model_id: str | None = None) -> dict[str, float] | None:
+        """The policy's last step, one get's start to the next, once: seconds, waited, held, consumed, produced."""
+        return None
+
     def drop_saved_state(self, state: Any, *, reason: str) -> None:
         """Instead of ``load_state_dict``: record the saved groups as dropped, e.g. after a data source reset."""
         raise NotImplementedError(f"{type(self).__name__} must implement drop_saved_state() for a data reset")
 
 
 # ============================= one policy buffer ==============================
+
+
+@dataclass(frozen=True)
+class _Get:
+    began: float
+    waited: float
+    consumed: int
 
 
 class DefaultDataBuffer(DataBuffer):
@@ -185,6 +196,11 @@ class DefaultDataBuffer(DataBuffer):
         self._rng = random.Random(args.rollout_seed)
         self._current_version: int | None = None
         self._get_pending = False
+        self._produced = 0
+        self._held = 0.0
+        self._refused_since: float | None = None
+        self._last_get: _Get | None = None
+        self._step: dict[str, float] | None = None
 
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
@@ -207,9 +223,14 @@ class DefaultDataBuffer(DataBuffer):
             return
 
         async with self._cond:
+            full_since = None
             while len(self._buffer) >= self._capacity:
+                full_since = full_since or time.monotonic()
                 await self._cond.wait()
+            if full_since:
+                self._held += time.monotonic() - full_since
             self._buffer.append(input)
+            self._produced += 1
             self._cond.notify_all()
 
     def _preput_filter(self, input: DataBufferInput) -> bool:
@@ -242,22 +263,44 @@ class DefaultDataBuffer(DataBuffer):
         return True
 
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
+        began = time.monotonic()
+        if self._refused_since is not None:
+            # A refusal still standing counts toward the step it fell in.
+            self._held += began - self._refused_since
+            self._refused_since = began
+        if (last := self._last_get) is not None:
+            self._step = dict(
+                seconds=began - last.began,
+                waited=last.waited,
+                held=self._held,
+                consumed=last.consumed,
+                produced=self._produced,
+            )
+        self._produced, self._held = 0, 0.0
         self._get_pending = True
         try:
-            return await self._take(num_groups=num_groups, current_version=current_version)
+            entries, waited = await self._take(num_groups=num_groups, current_version=current_version)
         finally:
             self._get_pending = False
+        self._last_get = _Get(began, waited, len(entries))
+        return entries
 
-    async def _take(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
+    def take_step(self, trainer_model_id: str | None = None) -> dict[str, float] | None:
+        step, self._step = self._step, None
+        return step
+
+    async def _take(self, *, num_groups: int, current_version: int | None) -> tuple[list[DataBufferInput], float]:
         if current_version is not None:
             self._current_version = current_version
         async with self._cond:
             deadline = time.monotonic() + NO_PROGRESS_WARN_SECS
+            short_since = None
             while True:
                 # filters at retrieving sample: staleness filter
                 self._drop_stale(current_version)
                 if len(self._buffer) >= num_groups:
                     break
+                short_since = short_since or time.monotonic()
                 if (remaining := deadline - time.monotonic()) <= 0:
                     logger.warning(f"No completed rollout groups for {NO_PROGRESS_WARN_SECS}s")
                     deadline = time.monotonic() + NO_PROGRESS_WARN_SECS
@@ -284,7 +327,7 @@ class DefaultDataBuffer(DataBuffer):
                 if (staleness := version_stats.oldest_lag(current_version)) is not None:
                     self._metric_consumed_staleness.append(staleness)
                 self._record_selected_version_stats(version_stats, current_version)
-            return entries
+            return entries, (time.monotonic() - short_since if short_since else 0.0)
 
     def _drop_stale(self, current_version: int | None) -> None:
         limit = self._args.max_weight_staleness
@@ -342,7 +385,13 @@ class DefaultDataBuffer(DataBuffer):
         # that enters the buffer is trained at most max_weight_staleness versions later; random selection can keep
         # a group longer, until the staleness filter drops it.
         window = self._args.max_weight_staleness + int(self._get_pending)
-        return len(self._buffer) + in_flight < window * self._args.rollout_batch_size
+        admits = len(self._buffer) + in_flight < window * self._args.rollout_batch_size
+        if admits and self._refused_since is not None:
+            self._held += time.monotonic() - self._refused_since
+            self._refused_since = None
+        elif not admits and self._refused_since is None:
+            self._refused_since = time.monotonic()
+        return admits
 
     def drop_saved_state(self, state: list[DataBufferInput], *, reason: str) -> None:
         record_dropped_samples([[entry.prompt_group, entry.group] for entry in state])
@@ -424,6 +473,9 @@ class DefaultMultiDataBuffer(DataBuffer):
 
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         return self._inner_of(trainer_model_id).get_metrics(trainer_model_id=trainer_model_id)
+
+    def take_step(self, trainer_model_id: str | None = None) -> dict[str, float] | None:
+        return self._inner_of(trainer_model_id).take_step(trainer_model_id=trainer_model_id)
 
     def state_dict(self) -> Any:
         logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)

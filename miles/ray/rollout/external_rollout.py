@@ -1,4 +1,4 @@
-"""An external rollout service's weight API: /start, /versions and /status on --rollout-external-control-url."""
+"""An external rollout service's control API on --rollout-external-control-url: weights and training steps."""
 
 import asyncio
 import logging
@@ -43,6 +43,13 @@ class ExternalRollout:
         }
         logger.info(f"the external rollout serves version {version}: {metrics}")
         return metrics
+
+    async def report_step(self, step: dict[str, float]) -> None:
+        """One training step, from which the service sizes its engines; a failed report loses only that step."""
+        try:
+            await self._call("/steps", step)
+        except Exception as error:
+            logger.warning(f"the external rollout did not take a training step: {error!r}")
 
     async def _call(self, path: str, body: dict | None) -> dict:
         # A reply slower than its web endpoint allows may come back as a redirect to where it will appear.

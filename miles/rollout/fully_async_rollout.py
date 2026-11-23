@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from miles.ray.rollout.external_rollout import ExternalRollout
 from miles.rollout.base_types import (
     BaseRolloutFn,
     RolloutFnConstructorInput,
@@ -102,6 +103,10 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         )
         self._retry_buffer: deque[list[Sample]] = deque()
         self._running_tasks: list[_RunningTask] = []
+        # An external rollout service sizes its engines from each training step.
+        control_url = self.args.rollout_external_control_url
+        self._external_rollout = ExternalRollout(control_url) if control_url else None
+        self._step_reports: set[asyncio.Task] = set()
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
@@ -235,6 +240,11 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             trainer_model_id=input.trainer_model_id,
         )
         self._worker_error_cancel_targets.discard(asyncio.current_task())
+        if self._external_rollout is not None and (step := self._output.take_step(input.trainer_model_id)):
+            # Off the step: a slow or failed report never holds the trainer.
+            report = asyncio.create_task(self._external_rollout.report_step(step))
+            self._step_reports.add(report)
+            report.add_done_callback(self._step_reports.discard)
 
         data: list[Group] = []
         do_print = True

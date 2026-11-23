@@ -121,6 +121,7 @@ def make_args(**overrides) -> Namespace:
         reward_key=None,
         rollout_sample_filter_path=None,
         buffer_filter_path=None,
+        rollout_external_control_url=None,
         sglang_router_ip="127.0.0.1",
         sglang_router_port=30000,
         sglang_router_request_timeout_secs=14400,
@@ -169,6 +170,22 @@ async def test_drain_collects_batch_sorted_with_metrics(monkeypatch):
     # The worker persists across calls; a second drain works on the same instance.
     output2 = await fn(train_input(rollout_id=1))
     assert len(output2.samples) == 3
+
+
+async def test_every_step_after_the_first_is_reported_to_the_external_rollout(monkeypatch):
+    reports = []
+
+    async def report_step(self, step):
+        reports.append(step)
+
+    monkeypatch.setattr(fully_async.ExternalRollout, "report_step", report_step)
+    fn = make_fn(monkeypatch, make_args(rollout_external_control_url="https://control"), FakeDataSource())
+
+    await fn(train_input(rollout_id=0))
+    await fn(train_input(rollout_id=1))
+    await asyncio.sleep(0)
+
+    assert [report["consumed"] for report in reports] == [2]
 
 
 async def test_eval_without_fleet_pauses_producer(monkeypatch):
