@@ -296,6 +296,12 @@ class TestConcurrencyGroups:
 
         assert spec.concurrency_groups == {"heartbeat_status": 1, "default": 1, "fault_injector": 1, "kill_self": 1}
 
+    def test_a_fault_tolerant_multi_lora_trainer_also_declares_its_export_commit_group(self):
+        (spec,) = specs_trainer(_make_args(use_fault_tolerance=True, multi_lora=True))
+
+        assert spec.concurrency_groups == {**TRAINER_CONCURRENCY_GROUPS, "commit_export": 1}
+        assert specs_trainer(_make_args(multi_lora=True))[0].concurrency_groups is None
+
     def test_a_run_without_fault_tolerance_gets_a_plain_actor(self):
         """A threaded trainer actor runs NCCL setup off the main thread and deadlocked a non-FT run."""
         args = _make_args()

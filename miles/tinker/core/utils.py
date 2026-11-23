@@ -23,10 +23,11 @@ def parse_tinker_path(path: str) -> tuple[str, str, str]:
 
 
 def resolve_checkpoint_dir(checkpoint_root: str, model_id: str, kind: str, name: str) -> str:
-    root = os.path.realpath(checkpoint_root)
+    # the root's own spelling: a symlinked mount's target need not be where other hosts see the files
+    root = os.path.abspath(checkpoint_root)
     path = f"{root}/{model_id}/{kind}/{name}"
     resolved = os.path.realpath(path)
-    assert resolved.startswith(root + os.sep), f"checkpoint path {resolved!r} escapes {root!r}"
+    assert resolved.startswith(os.path.realpath(root) + os.sep), f"checkpoint path {resolved!r} escapes {root!r}"
     return path
 
 

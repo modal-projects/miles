@@ -10,6 +10,8 @@ from tests.fast.backends.megatron_utils.test_lora_actor import _lora_actor_modul
 from miles.backends.megatron_utils.lora import checkpoint as lora_checkpoint
 from miles.backends.megatron_utils.lora import model as lora_model
 from miles.backends.megatron_utils.lora.bridge_adapter_slots import BridgeAdapterSlots
+from miles.ray.specs.train import MULTI_LORA_TRAINER_CONCURRENCY_GROUPS
+from miles.utils.workers.rpc.common.metadata import DEFAULT_CONCURRENCY_GROUP, declared_concurrency_groups
 
 
 class _RecordedSlots(BridgeAdapterSlots):
@@ -88,3 +90,31 @@ def test_creating_a_model_on_a_claimed_slot_fails(actor_and_events):
 
     with pytest.raises(AssertionError, match="slot 1 is already claimed"):
         actor.load_slot(1, 8, 16.0)
+
+
+def test_a_sampler_export_is_made_visible_by_its_own_call(monkeypatch):
+    module = _lora_actor_module(monkeypatch)
+    monkeypatch.setattr(module, "save_sampler_export", lambda root, name, **kwargs: SimpleNamespace(path=root / name))
+    monkeypatch.setattr(module, "compute_custom_function_config", lambda args, path: args)
+    published = []
+    actor = module.MultiLoRATrainRayActor()
+    actor.args = SimpleNamespace(custom_update_weight_post_write_path="hook", lora_dropout=0.0)
+    actor._heartbeat = SimpleNamespace(bump=lambda: None)
+    actor.adapter_slots = SimpleNamespace(
+        parametrization=lambda **fields: SimpleNamespace(lora_rank=8), lora_rank=lambda slot: 8, targets=None
+    )
+    actor._post_write_hook = lambda args, path, engines: published.append((path, engines))
+
+    written = actor.export_slot(1, "/adapters/m1/sampler_weights", "0", "digest", {})
+    assert published == []
+
+    actor.commit_export(str(written.path))
+
+    assert published == [("/adapters/m1/sampler_weights/0", [])]
+
+
+def test_an_export_commit_does_not_queue_behind_training(monkeypatch):
+    groups = declared_concurrency_groups(_lora_actor_module(monkeypatch).MultiLoRATrainRayActor)
+
+    assert groups["commit_export"] != DEFAULT_CONCURRENCY_GROUP
+    assert set(groups.values()) <= set(MULTI_LORA_TRAINER_CONCURRENCY_GROUPS)

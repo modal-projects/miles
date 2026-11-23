@@ -23,11 +23,12 @@ from miles.backends.training_utils.checkpoint.adapter.parametrization import (
     PARAMETRIZATION_FILENAME,
     read_parametrization,
 )
+from miles.ray.rollout.external_rollout import ExternalRollout
 from miles.ray.rollout.train_data_conversion import ROLLOUT_DATA_VALUE_SPEC
 from miles.tinker.core.types import OwnershipError, UserInputError
 from miles.tinker.core.utils import PRE_COMMIT_META_FILENAME
 from miles.utils import object_store
-from miles.utils.http_utils import post
+from miles.utils.http_utils import post, rollout_external_headers
 from miles.utils.lora.hf_lora_targets import GDN_IN_PROJ_COMPONENTS_BY_MODULE, HfLoraTargets
 from miles.utils.lora.utils import matches_lora_target
 from tinker.types.topk_logprobs import MASK_LOGPROB
@@ -167,11 +168,19 @@ def classify_lora_groups(target_modules, layout: HfLoraTargets) -> dict[str, boo
 
 
 class MilesBackend:
-    def __init__(self, trainer, router_url: str, lora_layout: HfLoraTargets, dp_size: int = 1) -> None:
+    def __init__(
+        self,
+        trainer,
+        router_url: str,
+        lora_layout: HfLoraTargets,
+        dp_size: int = 1,
+        external_rollout: ExternalRollout | None = None,
+    ) -> None:
         self.trainer = trainer
         self.router_url = router_url
         self.lora_layout = lora_layout
         self.dp_size = dp_size
+        self.external_rollout = external_rollout
 
     def lora_groups(self, target_modules) -> dict[str, bool]:
         return classify_lora_groups(target_modules, self.lora_layout)
@@ -279,12 +288,32 @@ class MilesBackend:
 
     # -------- sampling --------
 
+    async def publish_sampler(self, path: str) -> dict | None:
+        await self.trainer.commit_export(path=path)
+        return await self._publish(path, withdrawn=False)
+
+    async def withdraw_sampler(self, path: str) -> dict | None:
+        return await self._publish(path, withdrawn=True)
+
+    async def _publish(self, path: str, withdrawn: bool) -> dict | None:
+        if self.external_rollout is None:
+            return None
+        try:
+            await self.external_rollout.publish_adapter(path, withdrawn=withdrawn)
+        except httpx.HTTPError as error:
+            return {"error": f"the external rollout did not take {path}: {error}", "error_category": "server"}
+        return None
+
     async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
         request = self._generate_request(payload, lora_name, lora_path)
         try:
             responses = await asyncio.gather(
                 *[
-                    post(f"{self.router_url}/generate", _with_sample_seed(request, index))
+                    post(
+                        f"{self.router_url}/generate",
+                        _with_sample_seed(request, index),
+                        headers=rollout_external_headers(),
+                    )
                     for index in range(payload["num_samples"])
                 ]
             )
