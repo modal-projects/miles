@@ -600,6 +600,9 @@ class TrainerController:
             parametrization_fields=parametrization_fields,
         )
 
+    async def commit_export(self, path: str) -> list[None]:
+        return await self._execute_slots("commit_export", path=path)
+
     async def export_external_slot(
         self,
         slot: int,

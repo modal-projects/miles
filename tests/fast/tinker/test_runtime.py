@@ -23,7 +23,7 @@ from tinker.proto.response_conv import deserialize_sample_response
 
 
 async def test_sampling_preserves_engine_client_error_details(monkeypatch):
-    async def rejected(*args):
+    async def rejected(*args, **kwargs):
         response = httpx.Response(
             400, text="prompt is too long", request=httpx.Request("POST", "http://router/generate")
         )
@@ -39,6 +39,63 @@ async def test_sampling_preserves_engine_client_error_details(monkeypatch):
     }
     with pytest.raises(UserInputError, match="prompt is too long"):
         await MilesBackend(None, "http://router", lora_layout=None).sample(payload, None)
+
+
+async def test_sampling_through_an_external_rollout_carries_its_key(monkeypatch):
+    monkeypatch.setenv("MILES_ROLLOUT_EXTERNAL_API_KEY", "key")
+    sent = []
+
+    async def accepted(url, payload, headers=None):
+        sent.append((url, headers))
+        return {"meta_info": {"output_token_logprobs": [(-0.1, 11)], "finish_reason": {"type": "stop"}}}
+
+    monkeypatch.setattr("miles.tinker.runtime.post", accepted)
+    payload = {
+        "prompt_tokens": [1],
+        "sampling_params": tinker_types.SamplingParams(max_tokens=1).model_dump(),
+        "num_samples": 1,
+        "prompt_logprobs": False,
+        "topk_prompt_logprobs": 0,
+    }
+
+    await MilesBackend(None, "https://pool", lora_layout=None).sample(payload, None)
+
+    assert sent == [("https://pool/generate", {"Authorization": "Bearer key"})]
+
+
+class _Committing:
+    def __init__(self, events: list) -> None:
+        self.events = events
+
+    async def commit_export(self, path):
+        self.events.append(("commit", path))
+
+
+async def test_a_sampler_is_committed_before_it_is_published():
+    events = []
+
+    class Rollout:
+        async def publish_adapter(self, path, withdrawn):
+            events.append(("publish", path))
+
+    backend = MilesBackend(_Committing(events), "https://pool", lora_layout=None, external_rollout=Rollout())
+
+    assert await backend.publish_sampler("/runs/r/adapter") is None
+    assert events == [("commit", "/runs/r/adapter"), ("publish", "/runs/r/adapter")]
+
+
+async def test_a_sampler_the_external_rollout_does_not_take_fails_as_a_server_error():
+    class Unreachable:
+        async def publish_adapter(self, path, withdrawn):
+            raise httpx.ConnectError("unreachable")
+
+    backend = MilesBackend(_Committing([]), "https://pool", lora_layout=None, external_rollout=Unreachable())
+
+    failure = await backend.publish_sampler("/runs/r/adapter")
+
+    assert failure["error_category"] == "server" and "/runs/r/adapter" in failure["error"]
+    own_engines = MilesBackend(_Committing([]), "http://router", lora_layout=None)
+    assert await own_engines.publish_sampler("/runs/r/adapter") is None
 
 
 def _datum(tokens: list[int], **extra) -> dict:

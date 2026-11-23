@@ -47,6 +47,29 @@ class TestServe:
         assert str(request.url) == "http://router:30000/generate"
         assert json.loads(request.content)["input_ids"] == [1, 2]
 
+    async def test_an_external_rollout_starts_at_the_base_weights_without_routers(
+        self, tinker_startup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        args = tinker_startup.args
+        args.starts_inference_engines = False
+        args.rollout_external_url, args.rollout_external_control_url = "https://engines", "https://control"
+        served = []
+
+        class _ExternalRollout:
+            def __init__(self, control_url: str) -> None:
+                assert control_url == "https://control"
+
+            async def serve(self, version: int) -> dict:
+                served.append(version)
+                return {}
+
+        monkeypatch.setattr(serve_tinker, "ExternalRollout", _ExternalRollout)
+        monkeypatch.setattr(serve_tinker, "resolve_router_addrs", lambda *args, **kwargs: pytest.fail("no routers"))
+
+        await with_disposer(serve_tinker.serve, args)
+
+        assert served == [-1]
+
     async def test_trainer_receives_tracking_ids_initialized_by_orchestration(
         self, tinker_startup: SimpleNamespace
     ) -> None:
