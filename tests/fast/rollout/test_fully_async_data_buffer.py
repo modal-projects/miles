@@ -519,6 +519,83 @@ class TestNoProgressWarning:
         assert "No completed rollout groups" not in caplog.text
 
 
+class TestSteps:
+    async def test_a_step_runs_from_one_gets_start_to_the_next(self) -> None:
+        """It holds the first get's wait and take, and every group the producer added until the next get began."""
+        buffer = _make_buffer(rollout_batch_size=2).buffer
+        first = asyncio.create_task(buffer.get(num_groups=2))
+        await asyncio.sleep(0.05)
+        for group_index in (1, 2):
+            await _put(buffer, _make_finished_group(group_index))
+        await first
+        assert buffer.take_step() is None
+
+        for group_index in (3, 4, 5):
+            await _put(buffer, _make_finished_group(group_index))
+        await asyncio.sleep(0.05)
+        await buffer.get(num_groups=2)
+        step = buffer.take_step()
+
+        assert (step["consumed"], step["produced"]) == (2, 5)
+        assert 0.05 <= step["waited"] and step["waited"] + 0.05 <= step["seconds"]
+        assert buffer.take_step() is None
+
+    async def test_a_step_nothing_blocked_neither_waited_nor_held(self) -> None:
+        buffer = _make_buffer().buffer
+        for group_index in (1, 2):
+            await _put(buffer, _make_finished_group(group_index))
+            await buffer.get(num_groups=1)
+
+        step = buffer.take_step()
+        assert (step["waited"], step["held"]) == (0.0, 0.0)
+
+    async def test_a_put_blocked_by_a_full_buffer_held_the_producer(self) -> None:
+        buffer = _make_buffer(async_data_buffer_capacity_factor=1.0).buffer
+        await _put(buffer, _make_finished_group(1))
+        blocked = asyncio.create_task(_put(buffer, _make_finished_group(2)))
+        await asyncio.sleep(0.05)
+        await buffer.get(num_groups=1)
+        await blocked
+
+        await buffer.get(num_groups=1)
+
+        assert buffer.take_step()["held"] >= 0.05
+
+    async def test_a_refused_admission_held_the_producer(self) -> None:
+        buffer = _make_buffer(async_submit_within_staleness=True, max_weight_staleness=0).buffer
+        await _put(buffer, _make_finished_group(1))
+        await buffer.get(num_groups=1)
+        assert not buffer.admits(in_flight=0)
+        await asyncio.sleep(0.05)
+        await _put(buffer, _make_finished_group(2))
+
+        await buffer.get(num_groups=1)
+
+        assert buffer.take_step()["held"] >= 0.05
+
+    async def test_a_group_rejected_on_put_was_not_produced(self) -> None:
+        buffer = _make_buffer().buffer
+        await _put(buffer, _make_finished_group(1))
+        await buffer.get(num_groups=1)
+
+        await _put(buffer, _make_finished_group(2, status=Sample.Status.ABORTED))
+        await _put(buffer, _make_finished_group(3))
+        await buffer.get(num_groups=1)
+
+        assert buffer.take_step()["produced"] == 1
+
+    async def test_each_policy_reports_its_own_steps(self) -> None:
+        multi = _make_multi_buffer()
+        for group_index in (1, 2):
+            await multi.put(
+                DataBufferInput(prompt_group=[], group=_make_policy_group(group_index, "solver", "solver"))
+            )
+            await multi.get(num_groups=1, trainer_model_id="solver")
+
+        assert multi.take_step("solver")["consumed"] == 1
+        assert multi.take_step("verifier") is None
+
+
 # ================================ metrics =================================
 
 

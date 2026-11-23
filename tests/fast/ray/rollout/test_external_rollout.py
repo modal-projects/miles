@@ -118,3 +118,22 @@ def test_a_reply_slower_than_its_endpoint_allows_is_followed_through_its_redirec
 
     assert _serve(ExternalRollout("https://control"), 0, 1)["perf/update_weights_external_s"] == 160
     assert [(method, path) for method, path, _, _ in requests][2:] == [("POST", "/versions"), ("GET", "/result")]
+
+
+def test_a_training_step_goes_to_the_service(service):
+    replies, requests = service
+    replies["/steps"] = [(200, {})]
+    step = {"seconds": 30.0, "waited": 4.0, "consumed": 2, "produced": 5}
+
+    asyncio.run(ExternalRollout("https://control").report_step(step))
+
+    assert [(method, path, body) for method, path, body, _ in requests] == [("POST", "/steps", step)]
+
+
+def test_a_step_the_service_refuses_is_only_logged(service, caplog):
+    replies, _ = service
+    replies["/steps"] = [(404, {"detail": "Not Found"})]
+
+    asyncio.run(ExternalRollout("https://control").report_step({"seconds": 1.0}))
+
+    assert "did not take a training step" in caplog.text
