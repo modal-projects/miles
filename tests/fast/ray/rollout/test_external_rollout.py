@@ -163,3 +163,27 @@ def test_a_step_the_service_refuses_is_only_logged(service, caplog):
     asyncio.run(ExternalRollout("https://control").report_step({"seconds": 1.0}))
 
     assert "did not take a training step" in caplog.text
+
+
+def test_an_adapter_is_published_under_the_run_s_start(service):
+    replies, requests = service
+    replies.update(
+        {
+            "/start": [(200, {"start_id": "s1"})],
+            "/status": [(200, {"serving": {"-1": 1}})],
+            "/adapters": [(200, {})],
+        }
+    )
+    rollout = ExternalRollout("https://control")
+
+    async def start_then_publish():
+        await rollout.serve(-1)
+        await rollout.publish_adapter("/runs/r/adapter")
+
+    asyncio.run(start_then_publish())
+
+    assert requests[-1][:3] == (
+        "POST",
+        "/adapters",
+        {"path": "/runs/r/adapter", "withdrawn": False, "start": -1, "start_id": "s1"},
+    )

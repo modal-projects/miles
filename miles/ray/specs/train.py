@@ -41,6 +41,7 @@ TRAINER_CONTROLLER_ADDRS_FLAG = "--trainer-controller-addrs"
 POOL_CATEGORY_TRAINER_ENGINE = "trainer_engine"
 
 TRAINER_CONCURRENCY_GROUPS = {"heartbeat_status": 1, "default": 1, "fault_injector": 1, "kill_self": 1}
+MULTI_LORA_TRAINER_CONCURRENCY_GROUPS = {**TRAINER_CONCURRENCY_GROUPS, "commit_export": 1}
 
 TRAINER_CONTROLLER_WORKER_CLASS = "miles.ray.train.group.TrainerController"
 
@@ -153,6 +154,9 @@ class TrainerSpec(BaseServeSpec):
 
     @classmethod
     def create(cls, config: TrainerConfig) -> Self:
+        multi_lora = (
+            config.train_backend == "megatron" and config.trainer_role == ACTOR_ROLE and is_multi_lora_enabled(config)
+        )
         return cls(
             args=config,
             name=compute_trainer_pool_id(config.trainer_id),
@@ -164,12 +168,14 @@ class TrainerSpec(BaseServeSpec):
             partial_static_meta=StaticMeta(values=dict(role=config.trainer_role), include_cell_index=True),
             worker_class=(
                 "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
-                if config.train_backend == "megatron"
-                and config.trainer_role == ACTOR_ROLE
-                and is_multi_lora_enabled(config)
+                if multi_lora
                 else _TRAINER_ACTOR_CLASSES[config.train_backend]
             ),
-            concurrency_groups=TRAINER_CONCURRENCY_GROUPS if config.use_fault_tolerance else None,
+            concurrency_groups=(
+                (MULTI_LORA_TRAINER_CONCURRENCY_GROUPS if multi_lora else TRAINER_CONCURRENCY_GROUPS)
+                if config.use_fault_tolerance
+                else None
+            ),
         )
 
     # TODO: support different sizes after the args refactor

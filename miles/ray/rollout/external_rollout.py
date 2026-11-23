@@ -1,4 +1,4 @@
-"""An external rollout service's control API on --rollout-external-control-url: weights and training steps."""
+"""An external rollout service's control API on --rollout-external-control-url: weights, adapters, training steps."""
 
 import asyncio
 import logging
@@ -49,6 +49,10 @@ class ExternalRollout:
         }
         logger.info(f"the external rollout serves version {version}: {metrics}")
         return metrics
+
+    async def publish_adapter(self, path: str, withdrawn: bool = False) -> None:
+        """Returns once every serving engine holds the adapter at `path`, or no longer does if `withdrawn`."""
+        await self._call("/adapters", {"path": path, "withdrawn": withdrawn, **self._start})
 
     async def report_step(self, step: dict[str, float]) -> None:
         """One training step, from which the service sizes its engines; a failed report loses only that step."""

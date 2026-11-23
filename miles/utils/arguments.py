@@ -1671,12 +1671,13 @@ def miles_validate_args(args):
         assert (
             args.rollout_external_url is not None and args.rollout_external_control_url is not None
         ), "--rollout-external-url and --rollout-external-control-url name one external rollout: set both."
-        assert args.update_weight_transfer_mode in ("disk-delta", "gpu-delta", "disk-lora"), (
+        # The Tinker gateway publishes each adapter version as files the service loads on demand.
+        assert args.entry == "serve" or args.update_weight_transfer_mode in ("disk-delta", "gpu-delta", "disk-lora"), (
             "An external rollout service loads each version from --update-weight-disk-dir: it needs "
             "--update-weight-transfer-mode disk-delta, gpu-delta or disk-lora."
         )
         trains = args.num_rollout != 0
-        assert args.fully_async or not trains, (
+        assert args.entry == "serve" or args.fully_async or not trains, (
             "An external rollout service serves fully async runs only: the other rollout loops abort every "
             "engine after each rollout, and the service lists none."
         )
