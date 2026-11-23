@@ -47,7 +47,15 @@ def run_forward_backward(
             forward_only=forward_only,
             adapter_slots=adapter_slots,
         )
-    per_datum_outputs = [output for microbatch in losses_reduced for output in microbatch["per_datum"]]
+    per_datum_outputs = [
+        {
+            "sample_index": int(output["sample_index"]),
+            "loss": float(output["loss"]),
+            "logprobs": output["logprobs"].tolist(),
+        }
+        for microbatch in losses_reduced
+        for output in microbatch["per_datum"]
+    ]
     dumper_phase_util.finalize(model)
 
     if get_parallel_state().is_pp_last_stage:

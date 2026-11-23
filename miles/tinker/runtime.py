@@ -209,10 +209,7 @@ class MilesBackend:
             for datum_output in worker_result["per_datum"]:
                 index = int(datum_output["sample_index"])
                 if index not in by_index:
-                    by_index[index] = {
-                        "loss": float(datum_output["loss"]),
-                        "logprobs": datum_output["logprobs"].tolist(),
-                    }
+                    by_index[index] = {"loss": datum_output["loss"], "logprobs": datum_output["logprobs"]}
         return [by_index[index] for index in range(len(slot_datums))]
 
     async def _call_trainer(self, method: str, batch_id: int, train_data: dict) -> list:

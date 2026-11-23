@@ -2,7 +2,6 @@
 
 import httpx
 import pytest
-import torch
 
 from miles.backends.training_utils.checkpoint.adapter.commit import tenant_digest as library_digest
 from miles.tinker.core.types import UserInputError
@@ -70,8 +69,8 @@ class TestBuildTrainData:
 async def test_forward_backward_merges_worker_replicas():
     backend = MilesBackend(trainer=None, router_url="http://router", lora_layout=None)
     per_datum = [
-        {"sample_index": 1, "loss": 2.0, "logprobs": torch.tensor([-0.2])},
-        {"sample_index": 0, "loss": 1.0, "logprobs": torch.tensor([-0.1])},
+        {"sample_index": 1, "loss": 2.0, "logprobs": [-0.2]},
+        {"sample_index": 0, "loss": 1.0, "logprobs": [-0.1]},
     ]
 
     async def fake_call_trainer(method, batch_id, train_data):
@@ -166,7 +165,7 @@ async def test_forward_only_runs_the_requested_loss():
     async def fake_call_trainer(method, batch_id, train_data):
         captured["method"] = method
         captured["loss_fn"] = train_data["loss_fn"]
-        return [{"per_datum": [{"sample_index": 0, "loss": 3.0, "logprobs": torch.tensor([-0.3])}]}]
+        return [{"per_datum": [{"sample_index": 0, "loss": 3.0, "logprobs": [-0.3]}]}]
 
     backend._call_trainer = fake_call_trainer
     outputs = await backend.forward_only(1, [(0, _datum([1, 2]))], "importance_sampling", {})
@@ -200,7 +199,7 @@ async def test_forward_backward_pads_the_batch_and_drops_padding_outputs():
     async def fake_call_trainer(method, batch_id, train_data):
         seen.update(train_data)
         per_datum = [
-            {"sample_index": index, "loss": float(index), "logprobs": torch.tensor([-0.1])}
+            {"sample_index": index, "loss": float(index), "logprobs": [-0.1]}
             for index in range(len(train_data["tokens"]))
         ]
         return [{"per_datum": per_datum}]

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic_core import PydanticSerializationError
 
+from miles.backends.training_utils.checkpoint.adapter.commit import UncommittedAdapterDir
 from miles.ray.rollout.inference_controller import UpdatableEngines
 from miles.ray.train.group import TrainerController
 from miles.utils.workers.rpc.common.metadata import collect_rpc_method_specs
@@ -69,3 +72,32 @@ class TestTheHandshakeThatJoinsTwoDeployments:
 
         with pytest.raises(PydanticSerializationError, match="DeploymentIdentity"):
             spec.serializer.encode_result({"run_uuid": "0123456789abcdef"})
+
+
+class TestTheMultiLoRASlotResultsCrossTheWire:
+    """The Tinker gateway reads fields off these results, so a mapping arriving instead fails at attribute access."""
+
+    def _round_trip(self, method: str, result):
+        spec = collect_rpc_method_specs(TrainerController)[method]
+        return spec.serializer.decode_result(spec.serializer.encode_result(result))
+
+    @pytest.mark.parametrize("method", ["save_slot", "export_slot", "export_external_slot"])
+    def test_an_adapter_dir_crosses_as_the_dataclass(self, method):
+        written = UncommittedAdapterDir(path=Path("/ckpt/m/sampler_weights/.0.c1"), commit_id="c1")
+
+        assert self._round_trip(method, [written, written]) == [written, written]
+
+    def test_optimizer_results_keep_their_integer_slots(self):
+        assert self._round_trip("optim_step", [{1: {"grad_norm": 0.5}}]) == [{1: {"grad_norm": 0.5}}]
+
+    @pytest.mark.parametrize("method", ["forward_backward", "forward_only"])
+    def test_per_datum_losses_and_logprobs_cross_as_numbers(self, method):
+        result = [{"metrics": {"loss": 1.0}, "per_datum": [{"sample_index": 0, "loss": 1.0, "logprobs": [-0.5]}]}]
+
+        assert self._round_trip(method, result) == result
+
+    @pytest.mark.parametrize("method", ["load_slot", "unload_slot"])
+    def test_a_slot_change_crosses_as_its_error_or_none(self, method):
+        result = [None, {"error": "refused", "error_category": "user"}]
+
+        assert self._round_trip(method, result) == result

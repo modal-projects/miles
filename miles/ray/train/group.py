@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 from uuid import uuid4
 
 from miles.backends.megatron_utils.megatron_config import CRITIC_ROLE
+from miles.backends.training_utils.checkpoint.adapter.commit import UncommittedAdapterDir
 from miles.backends.training_utils.types import TrainStepOutcome, TrainStepOutput
 from miles.ray.rollout.inference_controller import UpdatableEngines
 from miles.ray.specs.train import compute_trainer_pool_id
@@ -555,21 +556,21 @@ class TrainerController:
         assert cell.is_alive, "the Tinker trainer cell is unavailable"
         return await cell.execute(fn_name, **kwargs)
 
-    async def forward_backward(self, batch_id: int, data_ref: object_store.StoreObjectRef) -> list:
+    async def forward_backward(self, batch_id: int, data_ref: object_store.StoreObjectRef) -> list[dict]:
         return await self._execute_slots("forward_backward", batch_id=batch_id, rollout_data_ref=data_ref)
 
-    async def optim_step(self, adam_params_by_slot: dict[int, dict]) -> list:
+    async def optim_step(self, adam_params_by_slot: dict[int, dict]) -> list[dict[int, dict]]:
         return await self._execute_slots("optim_step", adam_params_by_slot=adam_params_by_slot)
 
-    async def forward_only(self, batch_id: int, data_ref: object_store.StoreObjectRef) -> list:
+    async def forward_only(self, batch_id: int, data_ref: object_store.StoreObjectRef) -> list[dict]:
         return await self._execute_slots("forward_only", batch_id=batch_id, rollout_data_ref=data_ref)
 
-    async def load_slot(self, slot: int, rank: int, alpha: float, source: dict | None = None) -> list:
+    async def load_slot(self, slot: int, rank: int, alpha: float, source: dict | None = None) -> list[dict | None]:
         return await self._execute_slots("load_slot", slot=slot, rank=rank, alpha=alpha, source=source)
 
     async def save_slot(
         self, slot: int, root: str, name: str, tenant_digest: str, parametrization_fields: dict
-    ) -> list:
+    ) -> list[UncommittedAdapterDir]:
         return await self._execute_slots(
             "save_slot",
             slot=slot,
@@ -581,7 +582,7 @@ class TrainerController:
 
     async def export_slot(
         self, slot: int, root: str, name: str, tenant_digest: str, parametrization_fields: dict
-    ) -> list:
+    ) -> list[UncommittedAdapterDir]:
         return await self._execute_slots(
             "export_slot",
             slot=slot,
@@ -599,7 +600,7 @@ class TrainerController:
         tenant_digest: str,
         parametrization_fields: dict,
         age_encryption_recipients: list[str],
-    ) -> list:
+    ) -> list[UncommittedAdapterDir]:
         return await self._execute_slots(
             "export_external_slot",
             slot=slot,
@@ -610,7 +611,7 @@ class TrainerController:
             age_encryption_recipients=age_encryption_recipients,
         )
 
-    async def unload_slot(self, slot: int) -> list:
+    async def unload_slot(self, slot: int) -> list[dict | None]:
         return await self._execute_slots("unload_slot", slot=slot)
 
     async def get_train_parallel_config(self) -> TrainParallelConfig | None:
