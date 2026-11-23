@@ -52,6 +52,8 @@ async def tinker_startup(monkeypatch: pytest.MonkeyPatch, tmp_path) -> AsyncIter
         experts_shared_outer_loras=False,
         tinker_lora_groups=["attn"],
         sglang_router_ip="router",
+        rollout_external_url=None,
+        starts_inference_engines=True,
         sglang_router_port=30000,
         actor_num_nodes=1,
         actor_num_gpus_per_node=2,

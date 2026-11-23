@@ -27,7 +27,7 @@ from tests.fast.tinker.harness import (
 import miles.tinker.core.service as service_module
 from miles.backends.training_utils.checkpoint.adapter.commit import _adopt_pre_commit_dir, resolve_adapter_dir
 from miles.tinker.core.checkpoint_expiry import CheckpointExpiry
-from miles.tinker.core.future import DONE, FAILED
+from miles.tinker.core.future import DONE, FAILED, PENDING
 from miles.tinker.core.types import NotFoundError, OwnershipError, UserInputError
 from miles.tinker.core.utils import resolve_checkpoint_dir, resolve_sampler_checkpoint, resolve_sampler_export
 
@@ -244,6 +244,80 @@ async def test_a_short_inference_window_does_not_shrink_the_training_window(serv
     model_id = await created_model(service)
     request_id = service.submit("tenant", "forward_backward", fb_payload(model_id, 1, [datum(7)]))
     assert (await await_settled(service, "tenant", request_id)).state == DONE
+
+
+async def test_a_sampler_save_returns_once_its_commit_is_published(service):
+    model_id = await created_model(service)
+    request_id = service.submit(
+        "tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 1, "ttl_seconds": None}
+    )
+    assert (await await_settled(service, "tenant", request_id)).state == DONE
+
+    link = Path(resolve_checkpoint_dir(service.config.checkpoint_root, model_id, "sampler_weights", "1"))
+    committed = resolve_adapter_dir(link.parent, "1", tenant="tenant")
+    assert service.backend.named("publish_sampler") == [{"path": str(committed.path)}]
+
+
+async def test_other_models_train_while_a_sampler_save_waits_for_its_publish(service):
+    saver, trainer = await created_model(service), await created_model(service)
+    published = asyncio.Event()
+
+    async def publish_sampler(path):
+        await published.wait()
+
+    service.backend.publish_sampler = publish_sampler
+    save = service.submit("tenant", "save_weights_for_sampler", {"model_id": saver, "seq_id": 1, "ttl_seconds": None})
+    train = service.submit("tenant", "forward_backward", fb_payload(trainer, 1, [datum()]))
+
+    assert (await await_settled(service, "tenant", train)).state == DONE
+    assert service.retrieve_future("tenant", save).state == PENDING
+    published.set()
+    assert (await await_settled(service, "tenant", save)).state == DONE
+
+
+async def test_a_sampler_save_publishes_under_the_roots_own_spelling(tmp_path):
+    (tmp_path / "volume").mkdir()
+    (tmp_path / "mount").symlink_to(tmp_path / "volume")
+    service = make_service(tmp_path / "mount")
+    run_task = asyncio.create_task(service.run())
+    try:
+        model_id = await created_model(service)
+        request_id = service.submit(
+            "tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 1, "ttl_seconds": None}
+        )
+        assert (await await_settled(service, "tenant", request_id)).state == DONE
+    finally:
+        run_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await run_task
+
+    [published] = service.backend.named("publish_sampler")
+    assert published["path"].startswith(f"{tmp_path / 'mount'}/")
+
+
+async def test_a_sampler_save_whose_publish_fails_fails(service):
+    model_id = await created_model(service)
+    service.backend.fail_on["publish_sampler"] = {"error": "unreachable", "error_category": "server"}
+    request_id = service.submit(
+        "tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 1, "ttl_seconds": None}
+    )
+
+    future = await await_settled(service, "tenant", request_id)
+
+    assert (future.state, future.error_category, future.error) == (FAILED, "server", "unreachable")
+
+
+async def test_deleting_sampler_weights_withdraws_their_commit(service):
+    model_id = await created_model(service)
+    request_id = service.submit(
+        "tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 1, "ttl_seconds": None}
+    )
+    await await_settled(service, "tenant", request_id)
+    [published] = service.backend.named("publish_sampler")
+
+    await service.delete_checkpoint("tenant", model_id, "sampler_weights/1")
+
+    assert service.backend.named("withdraw_sampler") == [published]
 
 
 async def test_sampler_requests_carry_the_published_checkpoint_path(service):

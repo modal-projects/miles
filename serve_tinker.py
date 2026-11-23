@@ -6,6 +6,7 @@ import uvicorn
 
 from miles.backends.training_utils.checkpoint.adapter.parametrization import base_model_fingerprint
 from miles.ray.placement_group import create_trainer_handles
+from miles.ray.rollout.external_rollout import ExternalRollout
 from miles.ray.rollout.router_manager import resolve_router_addrs
 from miles.ray.specs.inference import compute_router_providers, create_inference_controller_handle
 from miles.ray.specs.train import ACTOR_ROLE, compute_trainer_configs
@@ -64,7 +65,8 @@ async def serve(args, *, disposer: Disposer):
         ckpt_load_config=ckpt_load_config,
     )
 
-    await resolve_router_addrs(args, router_providers=compute_router_providers(args, capability=capability))
+    if args.starts_inference_engines:
+        await resolve_router_addrs(args, router_providers=compute_router_providers(args, capability=capability))
     inference_controller = create_inference_controller_handle(capability=capability)
     await inference_controller.init()
     disposer.add(inference_controller)
@@ -96,14 +98,19 @@ async def serve(args, *, disposer: Disposer):
         trains_mlp="mlp" in args.tinker_lora_groups,
         trains_unembed="unembed" in args.tinker_lora_groups,
     )
-    router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    router_url, external_rollout = f"http://{args.sglang_router_ip}:{args.sglang_router_port}", None
+    if args.rollout_external_url is not None:
+        # The base weights are version -1.
+        router_url, external_rollout = args.rollout_external_url, ExternalRollout(args.rollout_external_control_url)
+        await external_rollout.serve(-1)
     actor_world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
     dp_size = actor_world_size // (
         args.raw_megatron.base_args["tensor_model_parallel_size"]
         * args.raw_megatron.base_args["pipeline_model_parallel_size"]
         * args.raw_megatron.base_args["context_parallel_size"]
     )
-    service = TinkerService(MilesBackend(trainer, router_url, lora_layout, dp_size=dp_size), config)
+    backend = MilesBackend(trainer, router_url, lora_layout, dp_size=dp_size, external_rollout=external_rollout)
+    service = TinkerService(backend, config)
 
     server = uvicorn.Server(
         uvicorn.Config(
