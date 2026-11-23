@@ -407,8 +407,8 @@ class RolloutRelatedConfig(BaseConfig):
         CustomFunctionConfig | None,
         Arg(
             help=(
-                "Path to a custom function called on each trainer rank after a disk-delta or gpu-delta sync's "
-                "files are written, before the engines read them — to publish the writes on a "
+                "Path to a custom function called on each trainer rank after a weight sync's or a Tinker "
+                "sampler export's files are written, before the engines read them — to publish the writes on a "
                 "non-POSIX filesystem (no cross-host visibility without an explicit sync). "
                 "Signature: ``def hook(args, version_dir: str, rollout_engines) -> None``; the hook gates itself."
             ),

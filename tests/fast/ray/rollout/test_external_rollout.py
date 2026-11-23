@@ -181,3 +181,26 @@ def test_the_rollouts_load_goes_to_the_service_which_replies_its_capacity(servic
     assert [(method, path, body) for method, path, body, _ in requests] == [("POST", "/load", load)] * 3
     assert "did not take a load report" in caplog.text
 
+
+def test_an_adapter_is_published_under_the_run_s_start(service):
+    replies, requests = service
+    replies.update(
+        {
+            "/start": [(200, {"start_id": "s1"})],
+            "/status": [(200, {"serving": {"-1": 1}})],
+            "/adapters": [(200, {})],
+        }
+    )
+    rollout = ExternalRollout("https://control")
+
+    async def start_then_publish():
+        await rollout.serve(-1)
+        await rollout.publish_adapter("/runs/r/adapter")
+
+    asyncio.run(start_then_publish())
+
+    assert requests[-1][:3] == (
+        "POST",
+        "/adapters",
+        {"path": "/runs/r/adapter", "withdrawn": False, "start": -1, "start_id": "s1"},
+    )

@@ -194,6 +194,12 @@ class FakeBackend:
             )
         return written
 
+    async def publish_sampler(self, path):
+        return self._record("publish_sampler", path=path)
+
+    async def withdraw_sampler(self, path):
+        return self._record("withdraw_sampler", path=path)
+
     async def sample(self, payload, lora_name, lora_path=None):
         failure = self._record("sample", payload=payload, lora_name=lora_name, lora_path=lora_path)
         if failure is not None:
