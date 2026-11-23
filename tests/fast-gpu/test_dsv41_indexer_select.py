@@ -80,6 +80,23 @@ def test_canonical_select_matches_torch_select(bsz, seqlen, ratio, query_chunk, 
         assert torch.equal(canonical_cand, torch_cand)
 
 
+@pytest.mark.parametrize("seqlen,query_chunk", [(1, None), (3, 2)])
+@pytest.mark.parametrize("n_kv", [701, 1027])
+def test_a_lone_query_row_selects_over_an_unaligned_key_count(seqlen, query_chunk, n_kv):
+    """A chunk of one query row against more keys than topk, off SCORE_ROW_ALIGN (as a context-parallel rank
+    holds one row of a packed sample): the canonical selection still matches torch's."""
+    torch.manual_seed(0)
+    q = torch.randn(1, seqlen, HEADS, DIM, device="cuda", dtype=torch.bfloat16)
+    index_k = torch.randn(1, n_kv, DIM, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(1, seqlen, HEADS, device="cuda") * HEADS**-0.5 * DIM**-0.5
+    compress_lens = torch.full((seqlen,), n_kv, device="cuda")
+    options = dict(is_candidate_source=False, query_chunk=query_chunk)
+    torch_idx, _ = _select(q, index_k, weights, compress_lens, None, "torch", **options)
+    canonical_idx, _ = _select(q, index_k, weights, compress_lens, None, "canonical", **options)
+
+    assert torch.equal(canonical_idx.sort(dim=-1).values, torch_idx)
+
+
 @pytest.mark.parametrize("topk_backend", ["canonical", "torch"])
 @pytest.mark.parametrize("candidates", ["none", "source", "user"])
 @pytest.mark.parametrize("ratio", [1, 2])
