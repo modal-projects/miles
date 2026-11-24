@@ -14,6 +14,7 @@ from miles.backends.training_utils.checkpoint.adapter.commit import (
     delete_retired_adapter_dirs,
     delete_unreferenced_adapter_dirs,
     resolve_adapter_dir,
+    retire_adapter_dir,
     tenant_digest,
     write_adapter_dir,
 )
@@ -43,6 +44,35 @@ def test_a_commit_leaves_retired_dirs_to_the_cleanup_task(tmp_path):
     assert first.path.with_name(first.path.name + ".deleting").is_dir(), "a cleanup task may be removing it"
     delete_unreferenced_adapter_dirs(tmp_path)
     assert not any(p.name.endswith(".deleting") for p in tmp_path.iterdir())
+
+
+def test_an_overwrite_without_retiring_keeps_the_replaced_commit_until_the_next_commit(tmp_path):
+    with write_adapter_dir(tmp_path, "w", tenant_digest=tenant_digest("alice")) as written:
+        (written.path / "payload").write_text("1")
+    first = commit_adapter_dir(tmp_path, "w", written, overwrite=True)
+    with write_adapter_dir(tmp_path, "w", tenant_digest=tenant_digest("alice")) as written:
+        (written.path / "payload").write_text("2")
+    second = commit_adapter_dir(tmp_path, "w", written, overwrite=True, retire=False)
+
+    assert (first.path / "payload").read_text() == "1"
+    _save(tmp_path, "w", "3")
+    assert not first.path.exists() and not any(p.name.startswith(first.path.name) for p in tmp_path.iterdir())
+    assert second.path.with_name(second.path.name + ".deleting").is_dir()
+
+
+def test_a_kept_commit_outlives_later_commits_until_it_is_retired(tmp_path):
+    first = _save(tmp_path, "w", "1")
+    with write_adapter_dir(tmp_path, "w", tenant_digest=tenant_digest("alice")) as written:
+        (written.path / "payload").write_text("2")
+    commit_adapter_dir(tmp_path, "w", written, overwrite=True, retire=False)
+    with write_adapter_dir(tmp_path, "w", tenant_digest=tenant_digest("alice")) as written:
+        (written.path / "payload").write_text("3")
+    commit_adapter_dir(tmp_path, "w", written, overwrite=True, retire=False, keep={first.path.name})
+
+    assert (first.path / "payload").read_text() == "1"
+    retire_adapter_dir(tmp_path, first.path.name)
+    delete_retired_adapter_dirs(tmp_path)
+    assert not any(p.name.startswith(first.path.name) for p in tmp_path.iterdir())
 
 
 def test_refuses_to_overwrite_when_asked_not_to(tmp_path):

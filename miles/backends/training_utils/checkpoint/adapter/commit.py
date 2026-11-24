@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import shutil
+from collections.abc import Collection
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,18 +120,26 @@ def _link_target(link: Path) -> Path | None:
 
 
 def commit_adapter_dir(
-    root: Path, name: str, written: UncommittedAdapterDir, *, overwrite: bool
+    root: Path,
+    name: str,
+    written: UncommittedAdapterDir,
+    *,
+    overwrite: bool,
+    retire: bool = True,
+    keep: Collection[str] = (),
 ) -> CommittedAdapterDir:
     """Atomically point ``<name>`` at ``written``; the replaced commit is renamed ``.deleting``.
 
-    The committer removes it later with ``delete_retired_adapter_dirs``, outside any lock it holds.
+    The committer removes it later with ``delete_retired_adapter_dirs``, outside any lock it holds. Without
+    ``retire`` it keeps its path for readers that may still open it: the committer names it in ``keep`` until
+    they cannot, then hands it to ``retire_adapter_dir``.
     """
     root, link = Path(root), Path(root) / name
     assert written.path == _physical_dir(root, name, written.commit_id), f"{written.path} was not written for {name!r}"
     if not written.path.is_dir():
         # a storage condition, not an invariant: another node's write may not be visible yet over NFS
         raise FileNotFoundError(f"{written.path} does not exist")
-    delete_unreferenced_adapter_dirs(root, name, keep=written.path.name)
+    delete_unreferenced_adapter_dirs(root, name, keep={written.path.name, *keep})
     if _link_target(link) == written.path:
         # a retry after the link swap; the commit already stands
         return CommittedAdapterDir(written.path, written.commit_id)
@@ -155,7 +164,7 @@ def commit_adapter_dir(
         _rmtree(written.path)
         raise
     _fsync(root)
-    if previous is not None and previous.exists():
+    if retire and previous is not None and previous.exists():
         _retire(previous)
     return CommittedAdapterDir(written.path, written.commit_id)
 
@@ -207,7 +216,7 @@ def delete_adapter_dir(root: Path, name: str, *, tenant: str | None) -> None:
     _retire(committed.path)
 
 
-def delete_unreferenced_adapter_dirs(root: Path, name: str | None = None, *, keep: str | None = None) -> None:
+def delete_unreferenced_adapter_dirs(root: Path, name: str | None = None, *, keep: Collection[str] = ()) -> None:
     """Remove physical directories no link in ``root`` points to, retired directories and dangling links to them.
 
     Referenced-ness is decided by the links, not by name prefixes, so recovering ``foo`` never touches ``foo.bar``.
@@ -240,7 +249,7 @@ def delete_unreferenced_adapter_dirs(root: Path, name: str | None = None, *, kee
             entry.unlink()
     for entry in root.iterdir():
         internal = _INTERNAL_ENTRY.match(entry.name)
-        if internal is None or internal["suffix"] == _STAGING_SUFFIX or entry.is_symlink() or entry.name == keep:
+        if internal is None or internal["suffix"] == _STAGING_SUFFIX or entry.is_symlink() or entry.name in keep:
             continue
         if internal["suffix"] == _DELETING_SUFFIX:
             # a commit leaves them to delete_retired_adapter_dirs, which may be removing them right now
@@ -248,6 +257,13 @@ def delete_unreferenced_adapter_dirs(root: Path, name: str | None = None, *, kee
                 _rmtree(entry)
         elif entry.name not in referenced and (name is None or internal["name"] == name):
             _rmtree(entry)
+
+
+def retire_adapter_dir(root: Path, dir_name: str) -> None:
+    """Hand a directory no link points to any more to ``delete_retired_adapter_dirs``; one already gone is left."""
+    path = Path(root) / dir_name
+    if path.is_dir():
+        _retire(path)
 
 
 def _retire(path: Path) -> None:

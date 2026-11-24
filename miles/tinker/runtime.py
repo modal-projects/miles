@@ -1,6 +1,7 @@
 """Translate gateway datums to trainer batches and sampling requests to SGLang."""
 
 import asyncio
+from collections.abc import Collection
 from dataclasses import asdict
 from pathlib import Path
 from typing import TextIO
@@ -18,6 +19,7 @@ from miles.backends.training_utils.checkpoint.adapter.commit import (
     format_sglang_lora_name,
     lock_checkpoint_root,
     resolve_adapter_dir,
+    retire_adapter_dir,
 )
 from miles.backends.training_utils.checkpoint.adapter.parametrization import (
     PARAMETRIZATION_FILENAME,
@@ -67,13 +69,24 @@ def _build_train_data(slot_datums: list) -> dict:
     return train_data
 
 
-def commit_adapter(root: str, name: str, written: UncommittedAdapterDir, overwrite: bool) -> None:
+def commit_adapter(
+    root: str,
+    name: str,
+    written: UncommittedAdapterDir,
+    overwrite: bool,
+    retire: bool = True,
+    keep: Collection[str] = (),
+) -> None:
     """The gateway is the committer of every adapter dir under its checkpoint root."""
-    commit_adapter_dir(Path(root), name, written, overwrite=overwrite)
+    commit_adapter_dir(Path(root), name, written, overwrite=overwrite, retire=retire, keep=keep)
 
 
 def delete_retired_adapters(root: str) -> None:
     delete_retired_adapter_dirs(Path(root))
+
+
+def retire_adapter(root: str, dir_name: str) -> None:
+    retire_adapter_dir(Path(root), dir_name)
 
 
 def take_checkpoint_root(checkpoint_root: str) -> TextIO:
@@ -285,6 +298,7 @@ class MilesBackend:
 
     commit_adapter = staticmethod(commit_adapter)
     delete_retired_adapters = staticmethod(delete_retired_adapters)
+    retire_adapter = staticmethod(retire_adapter)
     resolve_adapter = staticmethod(resolve_adapter)
     resolve_checkpoint_files = staticmethod(resolve_checkpoint_files)
     delete_adapter = staticmethod(delete_adapter)
