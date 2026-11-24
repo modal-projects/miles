@@ -21,3 +21,19 @@ class TinkerConfig(BaseConfig):
             "ingress; download URLs are built from it (default: the URL each request arrived at)"
         ),
     ] = None
+    tinker_sampler_root: A[
+        str | None,
+        Arg(
+            help="Directory for sampler saves, the adapters the engines serve, apart from training checkpoints and "
+            "downloads (default: --tinker-checkpoint-root)"
+        ),
+    ] = None
+    tinker_sampler_backend: A[
+        str,
+        Arg(
+            choices=["snapshot", "in_place"],
+            help="snapshot (Tinker's contract): a sampler path serves the weights saved at it. in_place: each "
+            "model's saves replace its one adapter on every engine, and every sampler path of the model serves its "
+            "latest save",
+        ),
+    ] = "snapshot"

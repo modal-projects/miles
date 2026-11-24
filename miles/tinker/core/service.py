@@ -3,6 +3,7 @@
 The trainer lock serializes trainer calls across dispatch, model creation, and lease expiry."""
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -36,10 +37,11 @@ from miles.tinker.core.types import (
     UserInputError,
 )
 from miles.tinker.core.utils import (
+    IN_PLACE_VERSION_FILENAME,
     build_parametrization_fields,
+    locate_checkpoint,
     parse_tinker_path,
     read_checkpoint_metadata,
-    resolve_checkpoint_dir,
     resolve_sampler_checkpoint,
     resolve_sampler_export,
     tenant_digest,
@@ -410,7 +412,7 @@ class TinkerService:
         """Save parameters and optimizer state; call after optim_step to persist accumulated training work."""
         name = payload["name"] or f"checkpoint-{payload['seq_id']:06d}"
         validate_checkpoint_segment(name)
-        checkpoint_dir = resolve_checkpoint_dir(self.config.checkpoint_root, record.model_id, "weights", name)
+        checkpoint_dir = locate_checkpoint(self.config, record.model_id, "weights", name)
         if not payload["overwrite"] and os.path.lexists(checkpoint_dir):
             raise UserInputError(f"checkpoint {name!r} already exists; pass overwrite=True to replace it")
         root = os.path.dirname(checkpoint_dir)
@@ -463,7 +465,7 @@ class TinkerService:
         source_id, kind, name = parse_tinker_path(payload["path"])
         if kind != "weights":
             raise UserInputError(f"cannot load {kind} into a training model; use a save_state checkpoint")
-        checkpoint_dir = resolve_checkpoint_dir(self.config.checkpoint_root, source_id, kind, name)
+        checkpoint_dir = locate_checkpoint(self.config, source_id, kind, name)
         source_tenant = payload.get("weights_access_token")
         if source_tenant is None:
             source_tenant = record.tenant
@@ -500,27 +502,33 @@ class TinkerService:
         return {"op": "load_state"}
 
     async def _save_weights_for_sampler(self, record: ModelRecord, payload: dict) -> dict | Awaitable[dict]:
+        in_place = self.config.sampler_in_place
         version = payload.get("sampler_path")
-        if version is None:
-            version = str(record.next_sampler_version)
-            record.next_sampler_version += 1
-        else:
+        if version is not None:
             validate_checkpoint_segment(version)
-        path = resolve_checkpoint_dir(self.config.checkpoint_root, record.model_id, "sampler_weights", version)
-        if os.path.lexists(path):
+        if version is None or in_place:
+            count = record.next_sampler_version
+            record.next_sampler_version += 1
+            version = version or str(count)
+        path = locate_checkpoint(self.config, record.model_id, "sampler_weights", version)
+        if not in_place and os.path.lexists(path):
             raise UserInputError(f"sampler weights {version!r} already exist; save under a new name")
-        root = os.path.dirname(path)
+        root, name = os.path.split(path)
         # the tenant's key stays on the gateway; the trainer ranks see only its digest
         written = await self.backend.export_slot(
             slot=record.slot,
             root=root,
-            name=version,
+            name=name,
             tenant_digest=tenant_digest(record.tenant),
             parametrization_fields=build_parametrization_fields(record, self.config),
         )
         # the commit's recovery walk and fsyncs hit shared storage; keep the event loop serving
+        if in_place:
+            await asyncio.to_thread(
+                (written.path / IN_PLACE_VERSION_FILENAME).write_text, json.dumps({"version": count})
+            )
         try:
-            await asyncio.to_thread(self.backend.commit_adapter, root, version, written, overwrite=False)
+            await asyncio.to_thread(self.backend.commit_adapter, root, name, written, overwrite=in_place)
         except ValueError as error:
             # the commit refuses to replace a link it did not write (e.g. an operator's link to a shared adapter)
             raise UserInputError(f"cannot commit sampler weights {version!r}: {error}") from None
@@ -528,7 +536,9 @@ class TinkerService:
             # a storage failure loses only this export; the trainer and other tenants are unaffected
             return {"error": f"cannot commit sampler weights {version!r}: {error}", "error_category": "server"}
         tinker_path = f"tinker://{record.model_id}/sampler_weights/{version}"
-        return self._reply_once_published(record, payload, tinker_path, str(written.path), written.commit_id)
+        # in place the engines follow the model's link; otherwise each save is a directory requests name
+        announced = path if in_place else str(written.path)
+        return self._reply_once_published(record, payload, tinker_path, announced, written.commit_id)
 
     async def _reply_once_published(
         self, record: ModelRecord, payload: dict, tinker_path: str, adapter_dir: str, commit_id: str
@@ -536,7 +546,8 @@ class TinkerService:
         if (failure := await self.backend.publish_sampler(adapter_dir)) is not None:
             return failure
         result = {"op": "save_weights_for_sampler", "path": tinker_path}
-        await self._set_expiry_after_commit(tinker_path, commit_id, payload["ttl_seconds"])
+        if not self.config.sampler_in_place:
+            await self._set_expiry_after_commit(tinker_path, commit_id, payload["ttl_seconds"])
         if payload.get("sampler_path") is None:
             # unnamed saves return a sampling session bound to the new version
             result["sampling_session_id"] = self._new_sampling_session(
@@ -552,7 +563,7 @@ class TinkerService:
             )
         name = payload["name"]
         validate_checkpoint_segment(name)
-        path = resolve_checkpoint_dir(self.config.checkpoint_root, record.model_id, "external_weights", name)
+        path = locate_checkpoint(self.config, record.model_id, "external_weights", name)
         if os.path.lexists(path):
             raise UserInputError(f"external weights {name!r} already exist; save under a new name")
         root = os.path.dirname(path)
@@ -587,7 +598,7 @@ class TinkerService:
         """(tinker path, its adapter root, name, its files) of a committed checkpoint ``tenant`` owns."""
         tinker_path = f"tinker://{model_id}/{checkpoint_id}"
         _, kind, name = parse_tinker_path(tinker_path)
-        root = os.path.dirname(resolve_checkpoint_dir(self.config.checkpoint_root, model_id, kind, name))
+        root, name = os.path.split(locate_checkpoint(self.config, model_id, kind, name))
         try:
             files = self.backend.resolve_checkpoint_files(root, name, tenant)
         except ValueError as error:
@@ -646,6 +657,9 @@ class TinkerService:
         return os.path.join(files["path"], filename)
 
     async def set_checkpoint_ttl(self, tenant: str, model_id: str, checkpoint_id: str, ttl_seconds) -> None:
+        if self.config.sampler_in_place and checkpoint_id.startswith("sampler_weights/"):
+            # a model's adapter serves requests that may still come; only an explicit delete ends it
+            return
         # with deletes, so a TTL never outlives its checkpoint onto a later save of the same name
         async with self._expiry_lock:
             tinker_path, _, _, files = await asyncio.to_thread(self._owned_checkpoint, tenant, model_id, checkpoint_id)
@@ -668,9 +682,11 @@ class TinkerService:
         await asyncio.to_thread(self.expiry.drop, tinker_path)
         self._delete_retired_outside_the_lock(root)
         logger.info(f"deleted checkpoint {tinker_path}")
-        if files is not None and (failure := await self.backend.withdraw_sampler(files["path"])) is not None:
-            # the checkpoint is gone either way; only a copy outside this gateway outlives it
-            logger.warning(failure["error"])
+        if files is not None:
+            withdrawn = os.path.join(root, name) if self.config.sampler_in_place else files["path"]
+            if (failure := await self.backend.withdraw_sampler(withdrawn)) is not None:
+                # the checkpoint is gone either way; only a copy outside this gateway outlives it
+                logger.warning(failure["error"])
 
     async def _run_expiry_sweeper(self) -> None:
         while True:
@@ -694,7 +710,7 @@ class TinkerService:
             for tinker_path, entry in self.expiry.expired(time.time()):
                 model_id, kind, name = parse_tinker_path(tinker_path)
                 try:
-                    root = os.path.dirname(resolve_checkpoint_dir(self.config.checkpoint_root, model_id, kind, name))
+                    root, name = os.path.split(locate_checkpoint(self.config, model_id, kind, name))
                     files = await asyncio.to_thread(self.backend.resolve_checkpoint_files, root, name, None)
                     if files is None or files["commit_id"] != entry.commit_id:
                         # deleted by hand, or the expiry of a commit an overwrite replaced: nothing to remove
@@ -710,7 +726,7 @@ class TinkerService:
         model_id, kind, name = parse_tinker_path(tinker_path)
         if kind == "external_weights":
             raise UserInputError(f"{tinker_path} is a download; create a training client from a weights checkpoint")
-        checkpoint_dir = resolve_checkpoint_dir(self.config.checkpoint_root, model_id, kind, name)
+        checkpoint_dir = locate_checkpoint(self.config, model_id, kind, name)
         if kind == "sampler_weights":
             committed = resolve_sampler_export(
                 checkpoint_dir, tenant, model_id, tinker_path, self.backend.resolve_adapter

@@ -430,6 +430,30 @@ class TestHealthCheckerActiveness:
 
         assert srv.health_checker_activeness.get().active
 
+    @pytest.mark.asyncio
+    async def test_a_weight_updater_outside_a_rollout_loop_resumes_probing(self):
+        """No rollout follows such an update to resume probing for it."""
+        srv = _RecordingServer()
+        controller = _make_controller({"default": srv})
+        info = await controller.start_update_weights()
+        await controller.end_update_weights(
+            snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes, failed_cell_ids=[]
+        )
+
+        await controller.resume_health_monitoring()
+
+        assert srv.health_checker_activeness.get().active
+
+    @pytest.mark.asyncio
+    async def test_a_cell_waiting_for_weights_is_reported_until_it_serves(self):
+        cell = _FakeUpdatableCell("h")
+        controller = _make_controller({"default": _RecordingServer({"engine-0": cell}, update_weights=True)})
+        assert await controller.has_pending_weights()
+
+        cell.is_pending_weights = False
+
+        assert not await controller.has_pending_weights()
+
 
 class TestReconcile:
     @pytest.fixture
