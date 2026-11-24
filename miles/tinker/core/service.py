@@ -9,6 +9,7 @@ import os
 import secrets
 import time
 import uuid
+from collections import defaultdict
 from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import NamedTuple
@@ -74,6 +75,10 @@ assert _DOWNLOAD_URL_TTL_S <= MIN_TTL_S
 _EXPIRY_SWEEP_S = 60
 
 
+def _linked_dir(link: str) -> str | None:
+    return os.readlink(link) if os.path.islink(link) else None
+
+
 class TinkerService:
     def __init__(self, backend, config: GatewayConfig) -> None:
         self.backend = backend
@@ -90,6 +95,8 @@ class TinkerService:
         self._create_tasks: set = set()
         self._cleanup_tasks: set = set()
         self._reply_tasks: set = set()
+        # in place, per model: replaced directory -> count of the save replacing it, until that save is served
+        self._replaced: defaultdict[str, dict[str, int]] = defaultdict(dict)
         # two cleanups would race on the same .deleting dirs
         self._cleanup_lock = asyncio.Lock()
         self._arrival_counter = 0
@@ -522,13 +529,23 @@ class TinkerService:
             tenant_digest=tenant_digest(record.tenant),
             parametrization_fields=build_parametrization_fields(record, self.config),
         )
+        previous = None
         # the commit's recovery walk and fsyncs hit shared storage; keep the event loop serving
         if in_place:
             await asyncio.to_thread(
                 (written.path / IN_PLACE_VERSION_FILENAME).write_text, json.dumps({"version": count})
             )
+            previous = await asyncio.to_thread(_linked_dir, path)
         try:
-            await asyncio.to_thread(self.backend.commit_adapter, root, name, written, overwrite=in_place)
+            await asyncio.to_thread(
+                self.backend.commit_adapter,
+                root,
+                name,
+                written,
+                overwrite=in_place,
+                retire=not in_place,
+                keep=set(self._replaced.get(record.model_id, ())),
+            )
         except ValueError as error:
             # the commit refuses to replace a link it did not write (e.g. an operator's link to a shared adapter)
             raise UserInputError(f"cannot commit sampler weights {version!r}: {error}") from None
@@ -536,9 +553,28 @@ class TinkerService:
             # a storage failure loses only this export; the trainer and other tenants are unaffected
             return {"error": f"cannot commit sampler weights {version!r}: {error}", "error_category": "server"}
         tinker_path = f"tinker://{record.model_id}/sampler_weights/{version}"
-        # in place the engines follow the model's link; otherwise each save is a directory requests name
-        announced = path if in_place else str(written.path)
-        return self._reply_once_published(record, payload, tinker_path, announced, written.commit_id)
+        if in_place:
+            if previous is not None:
+                self._replaced[record.model_id][previous] = count
+            # the engines follow the model's link
+            return self._reply_in_place(record, payload, tinker_path, path, written.commit_id, count)
+        # each save is a directory requests name
+        return self._reply_once_published(record, payload, tinker_path, str(written.path), written.commit_id)
+
+    async def _reply_in_place(
+        self, record: ModelRecord, payload: dict, tinker_path: str, link: str, commit_id: str, count: int
+    ) -> dict:
+        result = await self._reply_once_published(record, payload, tinker_path, link, commit_id)
+        if "error" not in result:
+            replaced, root = self._replaced[record.model_id], os.path.dirname(link)
+            # served everywhere, so no engine reads what this save or an older one replaced
+            unread = [directory for directory, by_count in replaced.items() if by_count <= count]
+            for directory in unread:
+                await asyncio.to_thread(self.backend.retire_adapter, root, directory)
+                replaced.pop(directory, None)
+            if unread:
+                self._delete_retired_outside_the_lock(root)
+        return result
 
     async def _reply_once_published(
         self, record: ModelRecord, payload: dict, tinker_path: str, adapter_dir: str, commit_id: str
@@ -674,11 +710,15 @@ class TinkerService:
 
     async def _delete_checkpoint(self, tinker_path: str, root: str, name: str, tenant: str | None) -> None:
         """Requires the trainer and expiry locks; ``tenant`` None skips the ownership check (expiry)."""
-        _, kind, _ = parse_tinker_path(tinker_path)
+        model_id, kind, _ = parse_tinker_path(tinker_path)
         files = None
         if kind == "sampler_weights":
             files = await asyncio.to_thread(self.backend.resolve_checkpoint_files, root, name, tenant)
         await asyncio.to_thread(self.backend.delete_adapter, root, name, tenant)
+        if files is not None and self.config.sampler_in_place:
+            # what the model's saves replaced, kept for the engines until now
+            for directory in self._replaced.pop(model_id, {}):
+                await asyncio.to_thread(self.backend.retire_adapter, root, directory)
         await asyncio.to_thread(self.expiry.drop, tinker_path)
         self._delete_retired_outside_the_lock(root)
         logger.info(f"deleted checkpoint {tinker_path}")

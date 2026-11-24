@@ -53,6 +53,106 @@ async def test_each_save_replaces_the_models_adapter_under_the_next_count(in_pla
     assert in_place.backend.named("publish_sampler") == [{"path": str(link)}] * 2
 
 
+def _adapter_dirs(service, model_id: str) -> set[str]:
+    return {entry.name for entry in _link(service, model_id).parent.iterdir() if entry.name != "latest"}
+
+
+def _current_dir(service, model_id: str) -> str:
+    return _link(service, model_id).resolve().name
+
+
+def _block_publishes(service) -> asyncio.Event:
+    release = asyncio.Event()
+    publish = service.backend.publish_sampler
+
+    async def blocked_publish(path):
+        await release.wait()
+        return await publish(path)
+
+    service.backend.publish_sampler = blocked_publish
+    return release
+
+
+def _submit_save(service, model_id: str, seq_id: int) -> str:
+    return service.submit(
+        "tenant",
+        "save_weights_for_sampler",
+        {"model_id": model_id, "seq_id": seq_id, "sampler_path": None, "ttl_seconds": None},
+    )
+
+
+async def _until(condition) -> None:
+    for _ in range(500):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached in 5 s")
+
+
+async def _settled_saves(service, *request_ids: str) -> None:
+    for request_id in request_ids:
+        assert (await await_settled(service, "tenant", request_id)).state == DONE
+    await asyncio.gather(*service._cleanup_tasks)
+
+
+async def test_a_served_save_deletes_the_one_it_replaced(in_place):
+    model_id = await created_model(in_place)
+
+    await _save(in_place, model_id, 1)
+    await _save(in_place, model_id, 2)
+    await asyncio.gather(*in_place._cleanup_tasks)
+
+    assert _adapter_dirs(in_place, model_id) == {_current_dir(in_place, model_id)}
+
+
+async def test_saves_in_flight_keep_every_directory_an_engine_may_read(in_place):
+    model_id = await created_model(in_place)
+    await _save(in_place, model_id, 1)
+    first = _current_dir(in_place, model_id)
+    release = _block_publishes(in_place)
+
+    second = _submit_save(in_place, model_id, 2)
+    await _until(lambda: _current_dir(in_place, model_id) != first)
+    second_dir = _current_dir(in_place, model_id)
+    third = _submit_save(in_place, model_id, 3)
+    await _until(lambda: _current_dir(in_place, model_id) != second_dir)
+    assert _adapter_dirs(in_place, model_id) == {first, second_dir, _current_dir(in_place, model_id)}
+
+    release.set()
+    await _settled_saves(in_place, second, third)
+    assert _adapter_dirs(in_place, model_id) == {_current_dir(in_place, model_id)}
+
+
+async def test_a_failed_publish_keeps_the_replaced_save_until_a_later_one_is_served(in_place):
+    model_id = await created_model(in_place)
+    await _save(in_place, model_id, 1)
+    first = _current_dir(in_place, model_id)
+    in_place.backend.fail_on["publish_sampler"] = {"error": "engines unreachable", "error_category": "server"}
+
+    failed = _submit_save(in_place, model_id, 2)
+    assert (await await_settled(in_place, "tenant", failed)).state != DONE
+    assert first in _adapter_dirs(in_place, model_id)
+
+    await _save(in_place, model_id, 3)
+    await asyncio.gather(*in_place._cleanup_tasks)
+    assert _adapter_dirs(in_place, model_id) == {_current_dir(in_place, model_id)}
+
+
+async def test_deleting_the_model_removes_every_save_kept_for_the_engines(in_place):
+    model_id = await created_model(in_place)
+    await _save(in_place, model_id, 1)
+    in_place.backend.fail_on["publish_sampler"] = {"error": "engines unreachable", "error_category": "server"}
+    failed = _submit_save(in_place, model_id, 2)
+    assert (await await_settled(in_place, "tenant", failed)).state != DONE
+    assert len(_adapter_dirs(in_place, model_id)) == 2
+
+    await in_place.delete_checkpoint("tenant", model_id, "sampler_weights/2")
+    await asyncio.gather(*in_place._cleanup_tasks)
+
+    assert not os.path.lexists(_link(in_place, model_id))
+    assert _adapter_dirs(in_place, model_id) == set()
+
+
 async def test_any_sampler_path_of_the_model_samples_its_adapter_by_name(in_place):
     model_id = await created_model(in_place)
     path = await _save(in_place, model_id, 1)
