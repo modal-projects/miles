@@ -1663,7 +1663,8 @@ def miles_validate_args(args):
             "An external rollout service loads each version from --update-weight-disk-dir: it needs "
             "--update-weight-transfer-mode disk-delta."
         )
-        assert args.fully_async, (
+        trains = args.num_rollout != 0
+        assert args.fully_async or not trains, (
             "An external rollout service serves fully async runs only: the other rollout loops abort every "
             "engine after each rollout, and the service lists none."
         )
@@ -1671,7 +1672,9 @@ def miles_validate_args(args):
             "An external rollout service runs its own engines: it does not combine with "
             "--rollout-external-engine-addrs or --custom-inference-engine-provider-path."
         )
-        assert args.eval_interval is None, "An external rollout service does not serve eval during training yet."
+        assert (
+            args.eval_interval is None or not trains
+        ), "An external rollout service does not serve eval during training yet."
         assert not (
             args.use_opd and args.opd_log_prob_top_k > 0
         ), "An external rollout service does not score the student for --opd-log-prob-top-k yet."
