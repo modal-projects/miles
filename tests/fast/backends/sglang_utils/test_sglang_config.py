@@ -41,6 +41,7 @@ def _make_args(**overrides) -> Namespace:
         critic_num_gpus_per_node=0,
         use_critic=False,
         multi_lora=False,
+        tinker_sampler_backend="snapshot",
     )
     defaults.update(overrides)
     defaults.setdefault("starts_inference_engines", not defaults["debug_train_only"] or defaults["eval_num_gpus"] > 0)
@@ -164,8 +165,23 @@ class TestModelPathConsistency:
         assert cfg.models[0].server_groups[0].model_path == "/ckpt/actor-fp8"
         assert cfg.models[0].update_weights is False
 
+    def test_in_place_tinker_engines_wait_for_the_adapters(self, tmp_path):
+        """In place, a cell takes traffic only once it holds every model's adapter."""
+        cfg = _resolve_yaml(
+            tmp_path,
+            "sglang:\n"
+            "  - name: default\n"
+            "    server_groups:\n"
+            "      - worker_type: regular\n"
+            "        num_gpus: 8\n",
+            rollout_num_gpus=8,
+            multi_lora=True,
+            tinker_sampler_backend="in_place",
+        )
+        assert cfg.models[0].update_weights is True
+
     def test_multi_lora_rejects_weight_updates(self, tmp_path):
-        with pytest.raises(AssertionError, match="frozen base"):
+        with pytest.raises(AssertionError, match="snapshot sampler backend needs update_weights: False"):
             _resolve_yaml(
                 tmp_path,
                 "sglang:\n"

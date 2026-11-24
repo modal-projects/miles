@@ -141,6 +141,11 @@ class InferenceController:
         await self._health_monitoring_resume(model_id)
 
     @with_lock
+    async def resume_health_monitoring(self, model_id: str | None = None) -> None:
+        """For a caller that updates weights outside a rollout loop, whose next rollout would resume it."""
+        await self._health_monitoring_resume(model_id)
+
+    @with_lock
     async def dispose(self) -> None:
         if (ticker := self._ticker) is not None:
             self._ticker = None
@@ -250,6 +255,12 @@ class InferenceController:
                 cell_id: cell.meta.workers_hash for cell_id, cell in srv.normal_server_cells.items()
             },
             receiver_pool=receiver_pool,
+        )
+
+    @with_lock
+    async def has_pending_weights(self) -> bool:
+        return any(
+            cell.is_pending_weights for srv in self.servers.values() for cell in srv.normal_server_cells.values()
         )
 
     @lock_exempt

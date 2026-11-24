@@ -261,10 +261,13 @@ class ModelConfig(FrozenStrictBaseModel):
 
         update_weights = raw.update_weights
         if is_multi_lora_enabled(args):
-            assert update_weights is not True, "Tinker loads a frozen base; update_weights must be false"
             # Adapters reach the engines from disk and the base is never synced, so model_path may name another
-            # copy of the trainer's base, such as a quantized one.
-            update_weights = False
+            # copy of the trainer's base, such as a quantized one. In place, a cell waits for every model's adapter.
+            update_weights = args.tinker_sampler_backend == "in_place"
+            assert raw.update_weights in (
+                None,
+                update_weights,
+            ), f"Tinker's {args.tinker_sampler_backend} sampler backend needs update_weights: {update_weights}"
         elif update_weights is None:
             if effective_model_path != args.hf_checkpoint:
                 logger.warning(

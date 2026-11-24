@@ -80,6 +80,8 @@ class GatewayConfig:
     public_url: str | None = None
     lease_timeout_s: float = 300.0  # sessions stale beyond this lose their sampling, models, and slots
     batch_token_budget: int = 262_144  # packing bound per BatchUnit
+    sampler_root: str | None = None
+    sampler_in_place: bool = False
 
 
 @dataclass
