@@ -2,6 +2,7 @@ import asyncio
 import logging
 import socket
 from argparse import Namespace
+from pathlib import Path
 from typing import NamedTuple
 
 import ray
@@ -11,6 +12,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from miles.backends.megatron_utils.megatron_config import MegatronTrainerConfig
 from miles.backends.training_utils.checkpoint.tracker import read_checkpoint_tracker_iteration
 from miles.ray.rollout.inference_controller import UpdatableEngines
+from miles.ray.rollout.rollout_executor import compute_rollout_checkpoint_dir
 from miles.ray.rollout.router_manager import resolve_router_addrs, wait_session_server_ready
 from miles.ray.specs.inference import (
     SESSION_SERVER_POOL_ID,
@@ -299,7 +301,16 @@ async def attach_trainers_to_rollout(
 ) -> None:
     await rollout_executor.set_train_parallel_config(await actor_model.get_train_parallel_config())
     if args.start_rollout_id > 0:
-        await rollout_executor.load(args.start_rollout_id - 1, load=args.load)
+        await rollout_executor.load(args.start_rollout_id - 1, load=_restored_save(args))
+
+
+def _restored_save(args: OrchestratorConfig) -> str | None:
+    # a LoRA run keeps --load for its frozen base: its rollout state is in the save its adapter was resumed from
+    if args.lora_adapter_path is not None:
+        save = Path(args.lora_adapter_path).parent.parent
+        if compute_rollout_checkpoint_dir(save, rollout_id=args.start_rollout_id - 1).is_dir():
+            return str(save)
+    return args.load
 
 
 # TODO: move (when reorganizing files)
