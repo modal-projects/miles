@@ -50,9 +50,9 @@ class ExternalRollout:
         logger.info(f"the external rollout serves version {version}: {metrics}")
         return metrics
 
-    async def publish_adapter(self, path: str, withdrawn: bool = False) -> None:
-        """Returns once every serving engine holds the adapter at `path`, or no longer does if `withdrawn`."""
-        await self._call("/adapters", {"path": path, "withdrawn": withdrawn, **self._start})
+    async def publish_adapter(self, path: str) -> None:
+        """Returns once every serving engine holds what the Volume holds at `path`, which changed."""
+        await self._call("/adapters", {"path": path, **self._start})
 
     async def report_step(self, step: dict[str, float]) -> None:
         """One training step, from which the service sizes its engines; a failed report loses only that step."""
