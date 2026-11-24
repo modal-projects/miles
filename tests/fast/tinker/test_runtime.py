@@ -75,7 +75,7 @@ async def test_a_sampler_is_committed_before_it_is_published():
     events = []
 
     class Rollout:
-        async def publish_adapter(self, path, withdrawn):
+        async def publish_adapter(self, path):
             events.append(("publish", path))
 
     backend = MilesBackend(_Committing(events), "https://pool", lora_layout=None, external_rollout=Rollout())
@@ -86,7 +86,7 @@ async def test_a_sampler_is_committed_before_it_is_published():
 
 async def test_a_sampler_the_external_rollout_does_not_take_fails_as_a_server_error():
     class Unreachable:
-        async def publish_adapter(self, path, withdrawn):
+        async def publish_adapter(self, path):
             raise httpx.ConnectError("unreachable")
 
     backend = MilesBackend(_Committing([]), "https://pool", lora_layout=None, external_rollout=Unreachable())

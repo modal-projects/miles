@@ -290,16 +290,16 @@ class MilesBackend:
 
     async def publish_sampler(self, path: str) -> dict | None:
         await self.trainer.commit_export(path=path)
-        return await self._publish(path, withdrawn=False)
+        return await self._publish(path)
 
     async def withdraw_sampler(self, path: str) -> dict | None:
-        return await self._publish(path, withdrawn=True)
+        return await self._publish(path)
 
-    async def _publish(self, path: str, withdrawn: bool) -> dict | None:
+    async def _publish(self, path: str) -> dict | None:
         if self.external_rollout is None:
             return None
         try:
-            await self.external_rollout.publish_adapter(path, withdrawn=withdrawn)
+            await self.external_rollout.publish_adapter(path)
         except httpx.HTTPError as error:
             return {"error": f"the external rollout did not take {path}: {error}", "error_category": "server"}
         return None
