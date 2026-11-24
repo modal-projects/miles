@@ -88,7 +88,7 @@ def test_each_later_version_names_the_start_and_reports_the_wait_and_the_slowest
     assert requests[-1][:3] == ("POST", "/versions", {"version": 4, "base_version": 3, "start": 3, "start_id": "s1"})
 
 
-def test_a_publication_rides_on_the_start_and_on_each_later_version(service):
+def test_a_publication_rides_on_the_start_its_status_poll_and_each_later_version(service):
     """gpu-delta's files are not found by the version's number, so the service gets the publication with it."""
     replies, requests = service
     replies.update(
@@ -107,6 +107,11 @@ def test_a_publication_rides_on_the_start_and_on_each_later_version(service):
 
     asyncio.run(serve_both())
     assert requests[0][:3] == ("POST", "/start", {"version": 3, "publication": first})
+    assert requests[1][:3] == (
+        "GET",
+        "/status",
+        {"start": "3", "start_id": "s1", "head": "3", "publication": json.dumps(first)},
+    )
     assert requests[-1][:3] == (
         "POST",
         "/versions",
