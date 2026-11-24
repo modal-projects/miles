@@ -742,6 +742,33 @@ class TestCreateTrainingModels:
 
         rollout_executor.load.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "adapter, saved_rollout, expected",
+        [
+            (None, None, "ckpt"),
+            ("run/iter_0000009/adapter", "run/rollout/9", "run"),
+            ("sft/iter_0000009/adapter", None, "ckpt"),
+        ],
+        ids=["full_weight", "lora_resumed_from_its_save", "lora_from_a_save_without_rollout_state"],
+    )
+    async def test_a_resumed_run_restores_the_rollout_state_saved_beside_what_the_trainer_restored(
+        self, tmp_path, monkeypatch, adapter: str | None, saved_rollout: str | None, expected: str
+    ):
+        """A LoRA run's --load names its frozen base, so its rollout state is in the save its adapter was resumed from."""
+        handles = self._patched(monkeypatch, [])
+        rollout_executor = self._rollout_executor()
+        args = self._args(tmp_path, "--load", str(tmp_path / "ckpt"))
+        if adapter is not None:
+            args = args.model_copy(update={"lora_adapter_path": str(tmp_path / adapter)})
+        if saved_rollout is not None:
+            (tmp_path / saved_rollout).mkdir(parents=True)
+        trainer_handles = self._handles(args)
+        handles[0].init = AsyncMock(return_value=[10])
+
+        await _create_training_models(args, rollout_executor, handles=trainer_handles)
+
+        rollout_executor.load.assert_awaited_once_with(9, load=str(tmp_path / expected))
+
     async def test_an_external_trainer_is_identified_and_driven_through_one_handle(self, tmp_path, monkeypatch):
         """A second handle would identify one connection and drive another, so the check would guard nothing."""
         handles = self._patched(monkeypatch, [])
