@@ -4348,6 +4348,24 @@ class TestMilesValidateArgsExternalRollout:
 
         assert args.rollout_external and not args.starts_inference_engines
 
+    def test_an_eval_only_run_evaluates_on_an_external_rollout_in_the_synchronous_loop(self, tmp_path):
+        eval_data = tmp_path / "eval.jsonl"
+        eval_data.write_text("")
+        args = _parse_megatron_args(
+            [
+                *_EXTERNAL_ROLLOUT_ARGS,
+                *("--update-weight-transfer-mode", "disk-delta"),
+                *("--update-weight-disk-dir", str(tmp_path / "versions")),
+                *("--hf-checkpoint", str(tmp_path)),
+                *("--eval-interval", "1", "--eval-prompt-data", "held-out", str(eval_data)),
+            ]
+        )
+        args.num_rollout = 0
+
+        miles_validate_args(args)
+
+        assert args.rollout_external and not args.fully_async
+
 
 class TestLoRAMergeForRollout:
     @pytest.mark.parametrize(
