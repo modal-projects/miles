@@ -320,6 +320,34 @@ async def test_deleting_sampler_weights_withdraws_their_commit(service):
     assert service.backend.named("withdraw_sampler") == [published]
 
 
+async def test_deleting_sampler_weights_still_being_published_waits_for_their_save(service):
+    model_id = await created_model(service)
+    release, publish = asyncio.Event(), service.backend.publish_sampler
+
+    async def blocked_publish(path):
+        await release.wait()
+        return await publish(path)
+
+    service.backend.publish_sampler = blocked_publish
+    save = service.submit(
+        "tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 1, "ttl_seconds": None}
+    )
+    link = Path(resolve_checkpoint_dir(service.config.checkpoint_root, model_id, "sampler_weights", "1"))
+    for _ in range(500):
+        if os.path.islink(link):
+            break
+        await asyncio.sleep(0.01)
+
+    delete = asyncio.create_task(service.delete_checkpoint("tenant", model_id, "sampler_weights/1"))
+    await asyncio.sleep(0.1)
+    assert not delete.done() and os.path.islink(link)
+
+    release.set()
+    assert (await await_settled(service, "tenant", save)).state == DONE
+    await delete
+    assert not os.path.lexists(link) and service._background_error is None
+
+
 async def test_sampler_requests_carry_the_published_checkpoint_path(service):
     model_id = await created_model(service)
     request_id = service.submit(
