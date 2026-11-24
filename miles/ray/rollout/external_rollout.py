@@ -1,6 +1,7 @@
 """An external rollout service's control API on --rollout-external-control-url: weights, adapters, training steps."""
 
 import asyncio
+import json
 import logging
 from urllib.parse import urlencode
 
@@ -30,8 +31,11 @@ class ExternalRollout:
             reply = await self._call("/start", {"version": version, **publication_field})
             self._start = {"start": version, "start_id": reply["start_id"]}
             logger.info(f"waiting for the external rollout to serve version {version}")
-            # A control service restarted before any version learns the run from this poll.
-            status = f"/status?{urlencode({**self._start, 'head': version})}"
+            # A control service restarted before any version learns the run from this poll, the publication with it.
+            run = {**self._start, "head": version}
+            if publication is not None:
+                run["publication"] = json.dumps(publication)
+            status = f"/status?{urlencode(run)}"
             while not (await self._call(status, None))["serving"].get(str(version)):
                 await asyncio.sleep(_STATUS_POLL_S)
             logger.info(f"the external rollout serves version {version}")
