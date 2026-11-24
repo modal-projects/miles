@@ -27,6 +27,7 @@ from miles.ray.rollout.external_rollout import ExternalRollout
 from miles.ray.rollout.train_data_conversion import ROLLOUT_DATA_VALUE_SPEC
 from miles.tinker.core.types import OwnershipError, UserInputError
 from miles.tinker.core.utils import PRE_COMMIT_META_FILENAME
+from miles.tinker.in_place_adapters import InPlaceAdapters
 from miles.utils import object_store
 from miles.utils.http_utils import post, rollout_external_headers
 from miles.utils.lora.hf_lora_targets import GDN_IN_PROJ_COMPONENTS_BY_MODULE, HfLoraTargets
@@ -175,12 +176,14 @@ class MilesBackend:
         lora_layout: HfLoraTargets,
         dp_size: int = 1,
         external_rollout: ExternalRollout | None = None,
+        in_place: InPlaceAdapters | None = None,
     ) -> None:
         self.trainer = trainer
         self.router_url = router_url
         self.lora_layout = lora_layout
         self.dp_size = dp_size
         self.external_rollout = external_rollout
+        self.in_place = in_place
 
     def lora_groups(self, target_modules) -> dict[str, bool]:
         return classify_lora_groups(target_modules, self.lora_layout)
@@ -290,9 +293,13 @@ class MilesBackend:
 
     async def publish_sampler(self, path: str) -> dict | None:
         await self.trainer.commit_export(path=path)
+        if self.in_place is not None:
+            return await self.in_place.update(path)
         return await self._publish(path)
 
     async def withdraw_sampler(self, path: str) -> dict | None:
+        if self.in_place is not None:
+            return await self.in_place.remove(path)
         return await self._publish(path)
 
     async def _publish(self, path: str) -> dict | None:

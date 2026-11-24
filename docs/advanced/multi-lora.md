@@ -77,6 +77,10 @@ flowchart LR
    snapshot to shared storage. Sampling engines load the base once at startup and
    load adapter versions from disk when a request names them. The base is never
    re-synced, so engines may serve a quantized base while the trainer holds BF16.
+   The in-place sampler backend instead keeps one adapter per model on every
+   engine and replaces it with each save; every sampler path of the model then
+   samples its latest save (see
+   [In place](/examples/multi-lora#in-place)).
 
 Training and sampling use separate GPUs: each adapter's gradients stay on the
 training GPUs between calls, so multi-LoRA does not support `--colocate`. The

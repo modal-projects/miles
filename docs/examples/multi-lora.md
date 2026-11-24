@@ -115,13 +115,17 @@ survive a server restart.
 
 ## Sampler snapshots
 
-Training and inference must use the same base checkpoint. Tinker engines load
-that frozen base at startup and serve without trainer weight updates; dummy
-loading and `update_weights: true` are rejected. Ordinary full-model and
-single-LoRA training continue to use the existing weight updater.
+Training and inference must use the same base checkpoint. With the default
+sampler backend, `--tinker-sampler-backend snapshot`, Tinker engines load that
+frozen base at startup and serve without trainer weight updates; dummy loading
+and `update_weights: true` are rejected. Ordinary full-model and single-LoRA
+training continue to use the existing weight updater.
 
 `--tinker-checkpoint-root` must be on storage shared by the trainers, gateway,
-and every inference engine. All trainer ranks participate in adapter gathering.
+and every inference engine. `--tinker-sampler-root` (default: the checkpoint
+root) keeps sampler saves apart from training checkpoints and downloads, so an
+external rollout service copies only what engines serve. All trainer ranks
+participate in adapter gathering.
 `sampler_weights/<v>` is a link to `.<v>.<commit_id>/`, which holds the adapter
 files, `tenant.json` (the tenant digest) and `adapter_parametrization.json`; the
 gateway commits the link after all ranks finish writing.
@@ -135,6 +139,18 @@ so two gateways on different hosts could both hold the root. A save writes a
 new commit and then points the name at it; an overwrite retires the previous commit
 only after the new one is committed, so a failed overwrite keeps the previous
 checkpoint. A load adopts the alpha the checkpoint was trained with.
+
+### In place
+
+`--tinker-sampler-backend in_place` replaces Tinker's snapshot contract with a
+latest one: each model's saves replace its one adapter, `sampler_weights/latest`,
+on every engine at a step boundary while serving, and every sampler path of the
+model samples its latest save. Named saves are only labels, a TTL never
+removes the adapter, and deleting any of the model's sampler paths removes it.
+The engines run with `update_weights: true`: an engine cell takes traffic only
+once it holds every model's adapter, at startup and after a restart. The gateway
+updates its own engines, or announces each save's link to an external rollout
+service.
 
 ### Adapter layout
 
