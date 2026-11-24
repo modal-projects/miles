@@ -22,6 +22,23 @@ def parse_tinker_path(path: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+# In place, every sampler name of a model is its one adapter.
+IN_PLACE_SAMPLER_NAME = "latest"
+# Beside an in-place save's files: {"version": its count}, which the engines serve it as.
+IN_PLACE_VERSION_FILENAME = "version.json"
+
+
+def locate_checkpoint(config: GatewayConfig, model_id: str, kind: str, name: str) -> str:
+    if kind != "sampler_weights":
+        return resolve_checkpoint_dir(config.checkpoint_root, model_id, kind, name)
+    return resolve_checkpoint_dir(
+        config.sampler_root or config.checkpoint_root,
+        model_id,
+        kind,
+        IN_PLACE_SAMPLER_NAME if config.sampler_in_place else name,
+    )
+
+
 def resolve_checkpoint_dir(checkpoint_root: str, model_id: str, kind: str, name: str) -> str:
     # the root's own spelling: a symlinked mount's target need not be where other hosts see the files
     root = os.path.abspath(checkpoint_root)
@@ -80,14 +97,14 @@ def resolve_sampler_export(
 
 def resolve_sampler_checkpoint(
     config: GatewayConfig, tenant: str, model_path: str, resolve_adapter: Callable[[str, str, str, str], dict | None]
-) -> tuple[str, str]:
+) -> tuple[str, str | None]:
     """Return the adapter name and directory so engines can reload evicted snapshots."""
     model_id, kind, name = parse_tinker_path(model_path)
     if kind != "sampler_weights":
         raise UserInputError(
             f"sampling from training checkpoints is not supported: {model_path!r}; use save_weights_for_sampler()"
         )
-    checkpoint_dir = resolve_checkpoint_dir(config.checkpoint_root, model_id, "sampler_weights", name)
+    checkpoint_dir = locate_checkpoint(config, model_id, "sampler_weights", name)
     committed = resolve_sampler_export(checkpoint_dir, tenant, model_id, model_path, resolve_adapter)
     if committed is None:
         # written before commits existed: a plain directory with META.json, served as it is
@@ -100,6 +117,10 @@ def resolve_sampler_checkpoint(
     for key, value in served.items():
         if meta[key] != value:
             raise UserInputError(f"checkpoint {model_path!r} uses {key}={meta[key]!r}; this server serves {value!r}")
+    if config.sampler_in_place:
+        # the engines hold the model's adapter by its link's path under the sampler root
+        link = locate_checkpoint(config, model_id, "sampler_weights", name)
+        return os.path.relpath(link, os.path.abspath(config.sampler_root or config.checkpoint_root)), None
     return lora_name, checkpoint_dir
 
 

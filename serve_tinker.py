@@ -14,6 +14,7 @@ from miles.ray.train.init_request import TrainerControllerInitRequest
 from miles.tinker.arguments import configure_tinker_args, validate_tinker_args
 from miles.tinker.core.service import TinkerService
 from miles.tinker.core.types import GatewayConfig
+from miles.tinker.in_place_adapters import InPlaceAdapters
 from miles.tinker.runtime import MilesBackend, take_checkpoint_root
 from miles.tinker.server.app import build_app
 from miles.tinker.server.encoding import assert_installed_sdk_version
@@ -57,6 +58,9 @@ async def serve(args, *, disposer: Disposer):
     # a second gateway on this root fails here, not after the trainer and engines start; released after they stop
     checkpoint_root_lock = take_checkpoint_root(args.tinker_checkpoint_root)
     disposer.add(checkpoint_root_lock.close)
+    if args.tinker_sampler_root:
+        sampler_root_lock = take_checkpoint_root(args.tinker_sampler_root)
+        disposer.add(sampler_root_lock.close)
     capability = init_orchestration_script(ArgvOrchestratorStartupInfo.create(args), disposer=disposer)
     trainer_request = TrainerControllerInitRequest(
         num_rollout=args.num_rollout,
@@ -84,6 +88,8 @@ async def serve(args, *, disposer: Disposer):
         base_model=args.tinker_base_model or args.hf_checkpoint,
         n_slots=args.multi_lora_n_adapters,
         checkpoint_root=args.tinker_checkpoint_root,
+        sampler_root=args.tinker_sampler_root,
+        sampler_in_place=args.tinker_sampler_backend == "in_place",
         public_url=args.tinker_public_url,
         vocab_size=hf_config.vocab_size,
         exports_tinker_names=bool(lora_layout.tinker_name_renames),
@@ -109,7 +115,13 @@ async def serve(args, *, disposer: Disposer):
         * args.raw_megatron.base_args["pipeline_model_parallel_size"]
         * args.raw_megatron.base_args["context_parallel_size"]
     )
-    backend = MilesBackend(trainer, router_url, lora_layout, dp_size=dp_size, external_rollout=external_rollout)
+    in_place = None
+    if config.sampler_in_place and external_rollout is None:
+        in_place = InPlaceAdapters(inference_controller, config.sampler_root or config.checkpoint_root)
+        await in_place.start()
+    backend = MilesBackend(
+        trainer, router_url, lora_layout, dp_size=dp_size, external_rollout=external_rollout, in_place=in_place
+    )
     service = TinkerService(backend, config)
 
     server = uvicorn.Server(
@@ -118,16 +130,17 @@ async def serve(args, *, disposer: Disposer):
         )
     )
     logger.info(f"tinker gateway serving {config.base_model} on :{args.tinker_server_port}")
-    # supervise both: a crashed dispatcher must take the HTTP server down with it,
+    # supervise them together: a crashed dispatcher must take the HTTP server down with it,
     # not keep answering /healthz while every training future pends forever
-    service_task = asyncio.create_task(service.run())
-    server_task = asyncio.create_task(server.serve())
+    tasks = [asyncio.create_task(service.run()), asyncio.create_task(server.serve())]
+    if in_place is not None:
+        tasks.append(asyncio.create_task(in_place.update_waiting_cells()))
     try:
-        done, _ = await asyncio.wait({service_task, server_task}, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
     finally:
-        for task in (service_task, server_task):
+        for task in tasks:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
