@@ -119,7 +119,9 @@ Training and inference must use the same base checkpoint. With the default
 sampler backend, `--tinker-sampler-backend snapshot`, Tinker engines load that
 frozen base at startup and serve without trainer weight updates; dummy loading
 and `update_weights: true` are rejected. Ordinary full-model and single-LoRA
-training continue to use the existing weight updater.
+training continue to use the existing weight updater. Multi-LoRA engines run
+without attention DP: adapters rotate through SGLang's LoRA slots, and attention
+DP serves only pinned ones.
 
 `--tinker-checkpoint-root` must be on storage shared by the trainers, gateway,
 and every inference engine. `--tinker-sampler-root` (default: the checkpoint

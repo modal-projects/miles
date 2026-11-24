@@ -172,7 +172,16 @@ def _compute_server_args(
     if engine_info_bootstrap_port is not None:
         kwargs["engine_info_bootstrap_port"] = engine_info_bootstrap_port
 
+    attention_dp = sglang_attention_dp_enabled(
+        attn_dp_size=base_args["attn_dp_size"],
+        enable_dp_attention=base_args["enable_dp_attention"],
+        dp_size=base_args["dp_size"],
+    )
     if is_multi_lora_enabled(args):
+        assert not attention_dp, (
+            "multi-LoRA adapters rotate through SGLang's LoRA slots, but attention DP serves only pinned adapters: "
+            "serve multi-LoRA without attention DP"
+        )
         kwargs["enable_lora"] = True
         kwargs["max_loras_per_batch"] = args.multi_lora_n_adapters
         kwargs["max_lora_rank"] = max(args.lora_rank, 1)
@@ -180,11 +189,6 @@ def _compute_server_args(
             ["all"] if args.lora_adapter_targets == "all-linear" else args.lora_adapter_targets
         )
     elif lora_rollout_enabled(args):
-        attention_dp = sglang_attention_dp_enabled(
-            attn_dp_size=base_args["attn_dp_size"],
-            enable_dp_attention=base_args["enable_dp_attention"],
-            dp_size=base_args["dp_size"],
-        )
         kwargs["enable_lora"] = True
         # attention DP serves only pinned adapters (sgl-project/sglang#36389), and SGLang never pins the last slot
         kwargs["max_loras_per_batch"] = 2 if attention_dp else 1

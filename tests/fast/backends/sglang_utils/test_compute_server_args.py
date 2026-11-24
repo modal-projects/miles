@@ -243,6 +243,18 @@ class TestAttentionDpLoRA:
         assert server_args["lora_paths"] == [pinned if attention_dp else "miles_lora=/fake/adapter"]
         assert server_args["max_loras_per_batch"] == (2 if attention_dp else 1)
 
+    @pytest.mark.parametrize(("parallel", "attention_dp"), _ATTENTION_DP_SPELLINGS)
+    def test_multi_lora_refuses_attention_dp(self, parallel, attention_dp):
+        """Multi-LoRA adapters rotate through the LoRA slots; attention DP serves only pinned ones."""
+        args = make_args(lora_rank=8, multi_lora=True, multi_lora_n_adapters=4, **parallel)
+        for name in ("sglang_attn_dp_size", "sglang_enable_dp_attention", "sglang_dp_size"):
+            delattr(args, name)
+        if attention_dp:
+            with pytest.raises(AssertionError, match="serve multi-LoRA without attention DP"):
+                compute(args)
+        else:
+            assert compute(args)["max_loras_per_batch"] == 4
+
 
 class TestPipelinedEngine:
     def test_an_engine_spread_over_pipeline_stages_gets_its_per_stage_tp_size(self):
