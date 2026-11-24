@@ -153,6 +153,22 @@ async def test_deleting_the_model_removes_every_save_kept_for_the_engines(in_pla
     assert _adapter_dirs(in_place, model_id) == set()
 
 
+async def test_a_delete_waits_for_the_saves_being_published(in_place):
+    model_id = await created_model(in_place)
+    release = _block_publishes(in_place)
+    save = _submit_save(in_place, model_id, 1)
+    await _until(lambda: os.path.islink(_link(in_place, model_id)))
+
+    delete = asyncio.create_task(in_place.delete_checkpoint("tenant", model_id, "sampler_weights/1"))
+    await asyncio.sleep(0.1)
+    assert not delete.done() and os.path.islink(_link(in_place, model_id))
+
+    release.set()
+    await _settled_saves(in_place, save)
+    await delete
+    assert not os.path.lexists(_link(in_place, model_id)) and in_place._background_error is None
+
+
 async def test_any_sampler_path_of_the_model_samples_its_adapter_by_name(in_place):
     model_id = await created_model(in_place)
     path = await _save(in_place, model_id, 1)
