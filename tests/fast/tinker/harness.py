@@ -27,6 +27,7 @@ from miles.tinker.runtime import (
     delete_retired_adapters,
     resolve_adapter,
     resolve_checkpoint_files,
+    retire_adapter,
 )
 from miles.utils.lora.hf_lora_targets import get_hf_lora_targets
 
@@ -145,6 +146,7 @@ class FakeBackend:
 
     commit_adapter = staticmethod(commit_adapter)
     delete_retired_adapters = staticmethod(delete_retired_adapters)
+    retire_adapter = staticmethod(retire_adapter)
     resolve_adapter = staticmethod(resolve_adapter)
     resolve_checkpoint_files = staticmethod(resolve_checkpoint_files)
     delete_adapter = staticmethod(delete_adapter)

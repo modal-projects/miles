@@ -660,9 +660,9 @@ async def test_the_commit_runs_off_the_event_loop(service, monkeypatch, op):
     commit = service.backend.commit_adapter
     commit_threads = []
 
-    def recording_commit(root, name, written, overwrite):
+    def recording_commit(root, name, written, overwrite, **options):
         commit_threads.append(threading.current_thread())
-        commit(root, name, written, overwrite)
+        commit(root, name, written, overwrite, **options)
 
     monkeypatch.setattr(service.backend, "commit_adapter", recording_commit)
     payload = {"model_id": model_id, "seq_id": 1, "name": "ck", "overwrite": False, "ttl_seconds": None}
