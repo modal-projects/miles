@@ -185,5 +185,5 @@ def test_an_adapter_is_published_under_the_run_s_start(service):
     assert requests[-1][:3] == (
         "POST",
         "/adapters",
-        {"path": "/runs/r/adapter", "withdrawn": False, "start": -1, "start_id": "s1"},
+        {"path": "/runs/r/adapter", "start": -1, "start_id": "s1"},
     )
