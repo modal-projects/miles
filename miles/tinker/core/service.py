@@ -97,6 +97,8 @@ class TinkerService:
         self._reply_tasks: set = set()
         # in place, per model: replaced directory -> count of the save replacing it, until that save is served
         self._replaced: defaultdict[str, dict[str, int]] = defaultdict(dict)
+        # sampler checkpoints whose saves are still being published, by path; deleting one waits for them
+        self._publishing: defaultdict[str, set[asyncio.Event]] = defaultdict(set)
         # two cleanups would race on the same .deleting dirs
         self._cleanup_lock = asyncio.Lock()
         self._arrival_counter = 0
@@ -557,9 +559,22 @@ class TinkerService:
             if previous is not None:
                 self._replaced[record.model_id][previous] = count
             # the engines follow the model's link
-            return self._reply_in_place(record, payload, tinker_path, path, written.commit_id, count)
-        # each save is a directory requests name
-        return self._reply_once_published(record, payload, tinker_path, str(written.path), written.commit_id)
+            reply = self._reply_in_place(record, payload, tinker_path, path, written.commit_id, count)
+        else:
+            # each save is a directory requests name
+            reply = self._reply_once_published(record, payload, tinker_path, str(written.path), written.commit_id)
+        published = asyncio.Event()
+        self._publishing[path].add(published)
+        return self._until_published(path, published, reply)
+
+    async def _until_published(self, path: str, published: asyncio.Event, reply: Awaitable[dict]) -> dict:
+        try:
+            return await reply
+        finally:
+            published.set()
+            self._publishing[path].discard(published)
+            if not self._publishing[path]:
+                del self._publishing[path]
 
     async def _reply_in_place(
         self, record: ModelRecord, payload: dict, tinker_path: str, link: str, commit_id: str, count: int
@@ -702,11 +717,20 @@ class TinkerService:
             await asyncio.to_thread(self.expiry.set, tinker_path, files["commit_id"], ttl_seconds, time.time())
 
     async def delete_checkpoint(self, tenant: str, model_id: str, checkpoint_id: str) -> None:
-        async with self._trainer_lock, self._expiry_lock:
-            tinker_path, root, name, _ = await asyncio.to_thread(
-                self._owned_checkpoint, tenant, model_id, checkpoint_id
-            )
-            await self._delete_checkpoint(tinker_path, root, name, tenant)
+        _, kind, checkpoint_name = parse_tinker_path(f"tinker://{model_id}/{checkpoint_id}")
+        path = locate_checkpoint(self.config, model_id, kind, checkpoint_name)
+        while True:
+            # a save commits under the trainer lock and is published outside it, reading its checkpoint until done
+            async with self._trainer_lock:
+                publishing = list(self._publishing.get(path, ()))
+                if not publishing:
+                    async with self._expiry_lock:
+                        tinker_path, root, name, _ = await asyncio.to_thread(
+                            self._owned_checkpoint, tenant, model_id, checkpoint_id
+                        )
+                        await self._delete_checkpoint(tinker_path, root, name, tenant)
+                    return
+            await asyncio.gather(*(published.wait() for published in publishing))
 
     async def _delete_checkpoint(self, tinker_path: str, root: str, name: str, tenant: str | None) -> None:
         """Requires the trainer and expiry locks; ``tenant`` None skips the ownership check (expiry)."""
