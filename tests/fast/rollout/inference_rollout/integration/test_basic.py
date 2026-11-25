@@ -22,6 +22,7 @@ _VARIANTS = [
                 "miles.rollout.sglang_rollout.generate",
             ]
         ),
+        False,
         id="old_rollout_old_generate",
     ),
     pytest.param(
@@ -33,28 +34,30 @@ _VARIANTS = [
                 "miles.rollout.sglang_rollout.generate",
             ]
         ),
+        False,
         id="new_rollout_old_generate",
     ),
     pytest.param(
         RolloutEnvConfig(extra_argv=MODULAR_ROLLOUT_BASE_ARGV + extra_argv_for_variant("single_turn")),
+        True,
         id="new_rollout_new_generate",
     ),
 ]
 
 
-@pytest.mark.parametrize("rollout_env", _VARIANTS, indirect=True)
-def test_train(rollout_env):
+@pytest.mark.parametrize("rollout_env,session_load", _VARIANTS, indirect=["rollout_env"])
+def test_train(rollout_env, session_load):
     env = rollout_env
     out = load_and_call_train(env.args, env.data_source)
 
     assert len(out.samples) == env.args.rollout_batch_size
     group = out.samples[0]
     assert len(group) == env.args.n_samples_per_prompt
-    assert group[0] == expected_sample(group_index=0)
+    assert group[0] == expected_sample(group_index=0, session_load=session_load)
 
 
-@pytest.mark.parametrize("rollout_env", _VARIANTS, indirect=True)
-def test_eval(rollout_env):
+@pytest.mark.parametrize("rollout_env,session_load", _VARIANTS, indirect=["rollout_env"])
+def test_eval(rollout_env, session_load):
     env = rollout_env
     fn = load_rollout_function(
         RolloutFnConstructorInput(args=env.args, data_source=env.data_source), env.args.eval_function_path
@@ -66,4 +69,4 @@ def test_eval(rollout_env):
     samples = out.data["toy"]["samples"]
     assert len(rewards) == len(samples) == env.args.n_samples_per_eval_prompt
     assert rewards[0] == 1
-    assert samples[0] == expected_sample(group_index=None)
+    assert samples[0] == expected_sample(group_index=None, session_load=session_load)

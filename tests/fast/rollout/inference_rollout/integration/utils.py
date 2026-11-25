@@ -1,3 +1,5 @@
+from unittest.mock import ANY
+
 from tests.fast.fixtures.generation_fixtures import extra_argv_for_variant
 from tests.fast.fixtures.rollout_fixtures import RolloutEnvConfig
 
@@ -10,10 +12,11 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.filter_hub.base_types import FilterOutput
 from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.utils.types import Sample, SampleLineage, WeightVersionsPerCall
 
 
-def expected_sample(*, group_index: int | None) -> Sample:
+def expected_sample(*, group_index: int | None, session_load: bool) -> Sample:
     return Sample(
         group_index=group_index,
         lineage=(
@@ -36,7 +39,7 @@ def expected_sample(*, group_index: int | None) -> Sample:
         rollout_routed_experts=None,
         remove_sample=False,
         status=Sample.Status.COMPLETED,
-        metadata={},
+        metadata={SESSION_LOAD_KEY: {"turn_seconds": ANY, "session_seconds": ANY}} if session_load else {},
         train_metadata=None,
         non_generation_time=0.0,
         spec_info=Sample.SpecInfo(

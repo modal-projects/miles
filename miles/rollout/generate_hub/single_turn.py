@@ -2,6 +2,8 @@
 Simple single-turn generation.
 """
 
+import time
+
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import (
     compute_prompt_ids_from_sample,
@@ -10,6 +12,7 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
     generation_url,
     update_sample_from_response,
 )
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.utils.http_utils import post
 from miles.utils.media_refs import has_media
 from miles.utils.types import Sample
@@ -55,7 +58,10 @@ async def generate(input: GenerateFnInput, url: str | None = None) -> GenerateFn
         sample.status = halt_status
         return GenerateFnOutput(samples=sample)
 
+    started = time.monotonic()
     output = await post(url, payload, headers=compute_request_headers(args, sample))
+    seconds = time.monotonic() - started
     await update_sample_from_response(args, sample, payload=payload, output=output, tokenizer=input.state.tokenizer)
+    sample.metadata[SESSION_LOAD_KEY] = {"turn_seconds": seconds, "session_seconds": seconds}
 
     return GenerateFnOutput(samples=sample)
