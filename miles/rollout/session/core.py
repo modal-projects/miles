@@ -37,6 +37,7 @@ from miles.rollout.session.samples.merge import (
     merge_samples_with_addition_r3,
     truncate_samples_by_total_tokens,
 )
+from miles.rollout.session.session_load import SESSION_LOAD_KEY, session_load
 from miles.rollout.session.store_refs import response_store_ref
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.output_store.plan import StorePlanError
@@ -310,6 +311,7 @@ class SessionCore:
         metadata["accumulated_token_ids"] = session.token_ids
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["turn_args"] = filter_turn_args(session.turn_args)
+        metadata[SESSION_LOAD_KEY] = session_load(zip(session.records, [None, *session.records]))
         return metadata
 
     async def get_session(self, session_id: str) -> Response:

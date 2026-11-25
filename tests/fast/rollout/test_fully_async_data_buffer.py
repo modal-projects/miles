@@ -540,6 +540,18 @@ class TestSteps:
         assert 0.05 <= step["waited"] and step["waited"] + 0.05 <= step["seconds"]
         assert buffer.take_step() is None
 
+    async def test_the_trainer_waits_while_its_get_is_short_of_groups(self) -> None:
+        buffer = _make_buffer().buffer
+        assert buffer.waiting() == 0.0
+        get = asyncio.create_task(buffer.get(num_groups=1))
+        await asyncio.sleep(0.05)
+        assert buffer.waiting() >= 0.05
+
+        await _put(buffer, _make_finished_group(1))
+        await get
+
+        assert buffer.waiting() == 0.0
+
     async def test_a_step_nothing_blocked_neither_waited_nor_held(self) -> None:
         buffer = _make_buffer().buffer
         for group_index in (1, 2):

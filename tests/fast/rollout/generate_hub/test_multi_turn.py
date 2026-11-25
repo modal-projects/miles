@@ -11,6 +11,7 @@ import pytest
 from tests.ci.ci_register import register_cpu_ci
 from tests.fast.fixtures.generation_fixtures import GenerateEnv, generation_env, listify, make_sample, run_generate
 
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.session.types import SessionServerInstance
 from miles.utils.chat_template_utils import TITOTokenizerType, get_tito_tokenizer
 from miles.utils.function_registry import function_registry
@@ -128,7 +129,8 @@ def verify_samples(actual: Sample | list[Sample], expected: list[ExpectedSampleI
         )
         # Session server populates diagnostic metadata (token IDs,
         # trim config, mismatch analysis, dashboard lifecycle timing, the
-        # template kwargs the last turn recorded) that varies with mock setup.
+        # template kwargs the last turn recorded, the session's load) that
+        # varies with mock setup.
         # Strip these before comparing structure.
         for key in (
             "session_id",
@@ -138,6 +140,7 @@ def verify_samples(actual: Sample | list[Sample], expected: list[ExpectedSampleI
             "lifecycle",
             "leaf",
             "turn_args",
+            SESSION_LOAD_KEY,
         ):
             actual_partial.metadata.pop(key, None)
         assert actual_partial == expected_item.partial_sample

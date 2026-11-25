@@ -20,6 +20,7 @@ from miles.rollout.session.core import (
 from miles.rollout.session.errors import OutputStoreContractError, SessionNotFoundError, TokenizationError
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
+from miles.rollout.session.session_load import SESSION_LOAD_KEY, session_load
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY, build_session_rollout_metrics
 from miles.rollout.session.v2.session_state import (
@@ -78,6 +79,9 @@ class SessionCoreV2(SessionCore):
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["tree"] = tree_metadata(session)
         metadata["turn_args"] = filter_turn_args(latest.turn_args) if latest is not None else {}
+        metadata[SESSION_LOAD_KEY] = session_load(
+            (node.record, node.parent.record if node.parent else None) for node in session.tree.nodes
+        )
         return metadata
 
     async def get_session(self, session_id: str) -> Response:

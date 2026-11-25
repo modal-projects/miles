@@ -9,6 +9,7 @@ import miles.rollout.generate_hub.agentic_tool_call as agentic_tool_call
 from miles.ray.rollout.rollout_data_conversion import validate_compact_rollout_ids
 from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.session.samples.codec import SamplesReply
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.session.types import SessionServerInstance
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.output_store.plan import StorePlanError
@@ -69,8 +70,13 @@ def _session_metadata(spec_info=None):
         SESSION_ROLLOUT_METRICS_KEY: {
             "session_id": "sid-1",
             "metrics": {"spec_info": spec_info or Sample.SpecInfo().to_dict()},
-        }
+        },
+        **_with_load(),
     }
+
+
+def _with_load():
+    return {SESSION_LOAD_KEY: {"turn_seconds": 3.0, "prefix_tokens": 5, "uncached_prefix_tokens": 1}}
 
 
 def _patch_agent(monkeypatch, tracer) -> list[str | None]:
@@ -91,7 +97,7 @@ def _patch_agent(monkeypatch, tracer) -> list[str | None]:
 @pytest.mark.parametrize("evaluation", [False, True])
 async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, evaluation):
     sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1])
-    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
+    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata=_with_load(), empty_reason=None))
     _patch_agent(monkeypatch, tracer)
 
     generate_input = _generate_input(evaluation=evaluation, sampling_params={"temperature": 0.7, "max_new_tokens": 8})
@@ -106,9 +112,24 @@ async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, eva
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
+async def test_every_sample_carries_its_sessions_load_and_seconds(monkeypatch, version: str) -> None:
+    leaves = [Sample(status=Sample.Status.COMPLETED, response_length=1, tokens=[1], rollout_id=1) for _ in range(2)]
+    tracer = _Tracer(
+        SamplesReply(samples=leaves[: 2 if version == "v2" else 1], session_metadata=_with_load(), empty_reason=None)
+    )
+    _patch_agent(monkeypatch, tracer)
+
+    output = await agentic_tool_call.generate(_generate_input(use_session_server=version))
+
+    samples = output.samples if version == "v2" else [output.samples]
+    session_load = {**_with_load()[SESSION_LOAD_KEY], "session_seconds": pytest.approx(0, abs=1)}
+    assert [sample.metadata[SESSION_LOAD_KEY] for sample in samples] == [session_load] * len(samples)
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
 async def test_session_identity_for_penalty_logs_is_owned_by_tracer(monkeypatch, version: str) -> None:
     sample = Sample(status=Sample.Status.COMPLETED, response_length=1, tokens=[1], metadata={"session_id": "spoofed"})
-    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
+    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata=_with_load(), empty_reason=None))
     _patch_agent(monkeypatch, tracer)
     await agentic_tool_call.generate(_generate_input(use_session_server=version))
     assert sample.metadata["session_id"] == "sid-1"
@@ -121,7 +142,7 @@ async def test_a_max_seq_len_warns_once_that_miles_does_not_stop_the_agent(monke
     warn = agentic_tool_call._warn_max_seq_len_does_not_stop_the_agent
     monkeypatch.setattr(agentic_tool_call, warn.__name__, functools.cache(warn.__wrapped__))
     sample = Sample(status=Sample.Status.COMPLETED, response_length=1, tokens=[1])
-    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
+    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata=_with_load(), empty_reason=None))
     _patch_agent(monkeypatch, tracer)
 
     with caplog.at_level(logging.WARNING, logger=agentic_tool_call.__name__):
@@ -138,7 +159,7 @@ async def test_success_assigns_shared_rollout_id_to_v2_leaves(monkeypatch, input
         Sample(status=Sample.Status.COMPLETED, response="one", response_length=1, tokens=[1]),
         Sample(status=Sample.Status.COMPLETED, response="two", response_length=1, tokens=[2]),
     ]
-    tracer = _Tracer(SamplesReply(samples=leaves, session_metadata={}, empty_reason=None))
+    tracer = _Tracer(SamplesReply(samples=leaves, session_metadata=_with_load(), empty_reason=None))
     _patch_agent(monkeypatch, tracer)
     generate_input = _generate_input()
     generate_input.sample.rollout_id = input_rollout_id
@@ -155,7 +176,7 @@ async def test_v2_requires_input_rollout_identity(monkeypatch):
         Sample(status=Sample.Status.COMPLETED, response="one", response_length=1, tokens=[1]),
         Sample(status=Sample.Status.COMPLETED, response="two", response_length=1, tokens=[2]),
     ]
-    tracer = _Tracer(SamplesReply(samples=leaves, session_metadata={}, empty_reason=None))
+    tracer = _Tracer(SamplesReply(samples=leaves, session_metadata=_with_load(), empty_reason=None))
     _patch_agent(monkeypatch, tracer)
     generate_input = _generate_input()
     generate_input.sample.index = None

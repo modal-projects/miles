@@ -43,6 +43,7 @@ from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, call_agen
 from miles.rollout.agentic.sandbox_reporter import push_sandbox_reports
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.function_registry import load_function
 from miles.utils.output_store.dropped import record_dropped_samples
@@ -175,7 +176,9 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         for s in samples:
             s.metadata.update(agent_metadata or {})
 
+    load = {**result.session_metadata[SESSION_LOAD_KEY], "session_seconds": time.monotonic() - t_start}
     for sample in samples:
+        sample.metadata[SESSION_LOAD_KEY] = load
         # The tracer owns this identity; agent metadata must not replace it.
         sample.metadata["session_id"] = tracer.session_id
 
@@ -191,7 +194,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         return GenerateFnOutput(samples=samples)
 
     (sample,) = samples
-    sample.metadata.update(result.session_metadata)
+    sample.metadata.update({**result.session_metadata, SESSION_LOAD_KEY: load})
     return GenerateFnOutput(samples=sample)
 
 

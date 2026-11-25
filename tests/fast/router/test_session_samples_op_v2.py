@@ -30,6 +30,7 @@ from tests.fast.utils.output_store.test_plan import fake_store_refs
 
 from miles.rollout.session.errors import OutputStoreContractError, TokenizationError
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, decode_samples_and_merge_input_sample
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.session.sessions import setup_session_routes
 from miles.rollout.session.v2.core import SessionCoreV2
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
@@ -734,6 +735,44 @@ async def test_session_rollout_metrics_count_every_tree_node_once(spec_core):
                 "completion_tokens": 5,
             }
         },
+    }
+
+
+async def test_a_node_continues_its_parent_not_the_node_committed_before_it(core):
+    sid, state = await _fresh_state(core)
+    root = _fabricate_node(
+        state, None, _single_turn_record([1, 2, 3], [10, 11]), [1, 2, 3, 10, 11], completion_span=(3, 5)
+    )
+    child = _fabricate_node(
+        state,
+        root,
+        _single_turn_record([1, 2, 3, 10, 11, 19], [29]),
+        [1, 2, 3, 10, 11, 19, 29],
+        completion_span=(6, 7),
+    )
+    _fabricate_node(
+        state,
+        root,
+        _single_turn_record([1, 2, 3, 10, 11, 20], [30]),
+        [1, 2, 3, 10, 11, 20, 30],
+        completion_span=(6, 7),
+    )
+    _fabricate_node(
+        state,
+        child,
+        _single_turn_record([1, 2, 3, 10, 11, 19, 29, 40], [50]),
+        [1, 2, 3, 10, 11, 19, 29, 40, 50],
+        completion_span=(8, 9),
+    )
+
+    status, payload = await _collect_via_op(core, sid)
+
+    assert status == 200
+    metadata = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).session_metadata
+    assert metadata[SESSION_LOAD_KEY] == {
+        "turn_seconds": 0.0,
+        "prefix_tokens": 5 + 5 + 7,
+        "uncached_prefix_tokens": 17,
     }
 
 

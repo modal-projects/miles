@@ -24,6 +24,7 @@ from miles.rollout.generate_hub import agentic_tool_call
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.samples.codec import SamplesReply
 from miles.rollout.session.server import SessionServer
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.session.types import SessionServerInstance
 from miles.utils import http_utils
 from miles.utils.http_utils import find_available_port
@@ -190,8 +191,11 @@ def assert_agentic_retry_trajectory_parity(v1: SessionParityRun, v2: SessionPari
     assert isinstance(v1.samples[0].metadata["session_id"], str)
     assert isinstance(v2.samples[0].metadata["session_id"], str)
 
-    v2_linear_metadata = {key: value for key, value in v2.session_metadata.items() if key not in ("agent", "tree")}
-    _assert_bits_equal(v1.session_metadata, v2_linear_metadata, path="session_metadata")
+    v1_metadata = {key: value for key, value in v1.session_metadata.items() if key != SESSION_LOAD_KEY}
+    v2_linear_metadata = {
+        key: value for key, value in v2.session_metadata.items() if key not in ("agent", "tree", SESSION_LOAD_KEY)
+    }
+    _assert_bits_equal(v1_metadata, v2_linear_metadata, path="session_metadata")
     assert_sample_bitwise_equal(
         v1.samples[0],
         v2.samples[0],
@@ -276,6 +280,7 @@ def _training_metadata_projection(metadata: dict[str, Any]) -> dict[str, Any]:
     projected = deepcopy(metadata)
     projected.pop("leaf", None)
     projected.pop("max_trim_tokens", None)
+    projected.pop(SESSION_LOAD_KEY, None)
     # each path opens its own session, so the ids differ by construction
     if "session_id" in projected:
         projected["session_id"] = "<session>"

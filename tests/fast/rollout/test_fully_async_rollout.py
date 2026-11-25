@@ -28,6 +28,7 @@ from miles.backends.megatron_utils.megatron_config import resolve_megatron_confi
 from miles.rollout.base_types import BaseRolloutFn, RolloutFnConstructorInput, RolloutFnEvalInput, RolloutFnTrainInput
 from miles.rollout.filter_hub.base_types import FilterOutput
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.utils.audit_utils.event_logger.logger import EventLogger, read_events, set_event_logger
 from miles.utils.audit_utils.event_logger.models import ExplicitlyDroppedSamplesEvent
 from miles.utils.audit_utils.process_identity import SimpleProcessIdentity
@@ -186,6 +187,50 @@ async def test_every_step_after_the_first_is_reported_to_the_external_rollout(mo
     await asyncio.sleep(0)
 
     assert [report["consumed"] for report in reports] == [2]
+
+
+async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(monkeypatch):
+    reports, minute, real_sleep = [], asyncio.Event(), asyncio.sleep
+
+    async def report_load(self, load):
+        reports.append(load)
+
+    async def sleep(delay, *args):
+        if delay != 60:
+            return await real_sleep(delay, *args)
+        await minute.wait()
+        minute.clear()
+
+    async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        if group[0].group_index > 1002:
+            await asyncio.Event().wait()
+        for sample in group:
+            sample.status = Sample.Status.COMPLETED
+            sample.metadata["session_id"] = f"session {group[0].group_index}"
+            sample.metadata[SESSION_LOAD_KEY] = {"turn_seconds": 3.0, "session_seconds": 10.0, "prefix_tokens": 5}
+        return group
+
+    monkeypatch.setattr(fully_async.ExternalRollout, "report_load", report_load)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    fn = make_fn(monkeypatch, make_args(rollout_external_control_url="https://control"), FakeDataSource(), generate)
+    await fn(train_input(rollout_id=0))
+    await real_sleep(0.05)
+
+    minute.set()
+    await real_sleep(0.05)
+
+    assert reports == [
+        {
+            "turn_seconds": 6.0,
+            "session_seconds": 20.0,
+            "prefix_tokens": 10,
+            "finished_sessions": 2,
+            "finished_groups": 2,
+            "sessions_in_flight": 2 * N_SAMPLES_PER_PROMPT,
+            "waiting": 0.0,
+        }
+    ]
+    await fn.dispose()
 
 
 async def test_eval_without_fleet_pauses_producer(monkeypatch):
