@@ -121,6 +121,8 @@ class SessionServer:
                 "response_body": error_body,
                 "status_code": 502,
                 "headers": {"content-type": "application/json"},
+                # A header aiohttp refuses fails the same way every time; a lost connection may not.
+                "transport_error": not isinstance(exc, ValueError),
             }
         return {
             "request_body": body,

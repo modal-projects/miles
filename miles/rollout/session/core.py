@@ -445,9 +445,7 @@ class SessionCore:
 
         # --- Phase 2: proxy to backend (NO lock held) ---
         headers = self._with_routing_key(headers, session_id)
-        result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers
-        )
+        result = await self._proxy_turn(method, query, proxy_body, headers)
         await self._take_store_ref(session, request_body, result)
 
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the
@@ -503,6 +501,18 @@ class SessionCore:
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    async def _proxy_turn(self, method: str, query: str, body: bytes, headers: dict) -> dict:
+        # Re-sent while it fails in transport, as post() re-sends a /generate request: an engine that lost the
+        # connection kept nothing of the turn, and the session records it only after a 200.
+        request = ProxyRequest(method=method, query=query)
+        result = await self.backend.do_proxy(request, "v1/chat/completions", body=body, headers=headers)
+        for _ in range(59):
+            if not result.get("transport_error"):
+                break
+            await asyncio.sleep(1)
+            result = await self.backend.do_proxy(request, "v1/chat/completions", body=body, headers=headers)
+        return result
 
     def _with_routing_key(self, headers: dict, session_id: str) -> dict:
         header = self.config.routing_key_header
