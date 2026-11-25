@@ -217,8 +217,8 @@ async def test_the_window_is_scoped_to_the_policy_the_script_is_publishing():
 
 
 @pytest.mark.asyncio
-async def test_an_external_rollout_serves_each_version_before_the_rollout_takes_it():
-    """The rollout's next requests count on the version."""
+async def test_an_external_rollout_serves_each_version_before_update_weights_returns():
+    """The rollout takes the version once the trainer has published it: the next drain trains against it."""
     from miles.ray.placement_group import update_weights
 
     order: list[str] = []
@@ -238,8 +238,46 @@ async def test_an_external_rollout_serves_each_version_before_the_rollout_takes_
             rollout_id=3,
         )
 
-    assert order[2:] == ["end_update_weights", "update_external_rollout", "set_weight_version"]
+    assert order[2:] == ["end_update_weights", "set_weight_version", "update_external_rollout"]
     inference_controller.update_external_rollout.assert_awaited_once_with(11, None)
+    tracking.log.assert_called_once_with(
+        ANY, {"perf/update_weights_external_s": 2.0, "rollout/step": 3}, step_key="rollout/step"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_background_serve_returns_once_the_trainer_has_published():
+    """The next fully-async step drains and trains while the external rollout applies the version."""
+    from miles.ray.placement_group import update_weights
+
+    order: list[str] = []
+    inference_controller = _OrderRecordingInferenceController(order)
+    applied = asyncio.Event()
+
+    async def _serve(version: int, publication: dict | None) -> dict[str, float]:
+        await applied.wait()
+        order.append("update_external_rollout")
+        return {"perf/update_weights_external_s": 2.0}
+
+    inference_controller.update_external_rollout = _serve
+    executor = MagicMock(set_weight_version=AsyncMock(side_effect=lambda *a, **k: order.append("set_weight_version")))
+
+    with patch("miles.ray.placement_group.tracking") as tracking:
+        serving = await update_weights(
+            _orchestration_args(rollout_external_url="https://rollout", wandb_always_use_train_step=False),
+            _actor_model(order),
+            executor,
+            inference_controller,
+            rollout_id=3,
+            serve_in_background=True,
+        )
+        assert order[2:] == ["end_update_weights", "set_weight_version"]
+        assert not serving.done()
+
+        applied.set()
+        await serving
+
+    assert order[-1] == "update_external_rollout"
     tracking.log.assert_called_once_with(
         ANY, {"perf/update_weights_external_s": 2.0, "rollout/step": 3}, step_key="rollout/step"
     )

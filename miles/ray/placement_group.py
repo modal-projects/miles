@@ -400,7 +400,10 @@ async def update_weights(
     *,
     rollout_id: int | None = None,
     trainer_model_id: str | None = None,
-) -> None:
+    serve_in_background: bool = False,
+) -> asyncio.Task[None] | None:
+    """Returns once the engines serve the trainer's new weights. With ``serve_in_background``, returns once the
+    trainer has published them, with the task that waits for an external rollout to serve them."""
     if rollout_id is not None:
         await reach_fault_hook_async(
             FaultHookName.ORCHESTRATOR_STEP_END, rollout_id=rollout_id, trainer_model_id=trainer_model_id
@@ -433,13 +436,25 @@ async def update_weights(
         snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes,
     )
 
-    if output.weight_version is not None:
-        if args.rollout_external_url is not None:
-            metrics = await inference_controller.update_external_rollout(output.weight_version, output.publication)
-            if rollout_id is not None:
-                metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
-                tracking.log(args, metrics, step_key="rollout/step")
-        await rollout_executor.set_weight_version(output.weight_version, trainer_model_id=trainer_model_id)
+    if output.weight_version is None:
+        return None
+    await rollout_executor.set_weight_version(output.weight_version, trainer_model_id=trainer_model_id)
+    if args.rollout_external_url is None:
+        return None
+    serving = _serve_external_rollout(args, inference_controller, output, rollout_id=rollout_id)
+    if serve_in_background:
+        return await eager_create_task(serving)
+    await serving
+    return None
+
+
+async def _serve_external_rollout(
+    args, inference_controller: BaseWorkerHandle, output: WeightUpdateOutput, *, rollout_id: int | None
+) -> None:
+    metrics = await inference_controller.update_external_rollout(output.weight_version, output.publication)
+    if rollout_id is not None:
+        metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
+        tracking.log(args, metrics, step_key="rollout/step")
 
 
 def _log_inference_engine_weight_checksums(

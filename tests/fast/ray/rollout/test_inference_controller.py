@@ -1894,3 +1894,21 @@ async def test_the_controller_hands_each_published_version_to_the_external_rollo
         "perf/update_weights_external_s": 1.0
     }
     assert served == [(4, {"target_version": 2})]
+
+
+@pytest.mark.asyncio
+async def test_the_external_rollout_serves_a_version_while_another_call_holds_the_controller_lock(monkeypatch):
+    """The next drain's prepare_rollout takes the lock while the service is still applying the version."""
+    controller = InferenceController(
+        make_args(rollout_external_control_url="https://control"), engine_provider=None, router_providers=[]
+    )
+
+    async def serve(version: int, publication: dict | None) -> dict[str, float]:
+        return {"perf/update_weights_external_s": 1.0}
+
+    monkeypatch.setattr(controller._external_rollout, "serve", serve)
+
+    async with controller.context_lock:
+        served = await asyncio.wait_for(controller.update_external_rollout(5, None), timeout=5)
+
+    assert served == {"perf/update_weights_external_s": 1.0}

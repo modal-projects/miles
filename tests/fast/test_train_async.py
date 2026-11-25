@@ -79,6 +79,7 @@ def _install_driver_fakes(
         critic_model=FakeTrainingModel(events, "critic") if args.use_critic else None,
         api_server_calls=[],
         cell_operations=object(),
+        serve_gates={},
     )
     capability = SimpleNamespace(cell_operations=lambda: components.cell_operations)
 
@@ -105,9 +106,27 @@ def _install_driver_fakes(
         return rollout, components.actor_model, components.critic_model
 
     async def update_weights(
-        _args: Any, _model: Any, _executor: Any, _inference_controller: Any, *, rollout_id: int | None = None
-    ) -> None:
+        _args: Any,
+        _model: Any,
+        _executor: Any,
+        _inference_controller: Any,
+        *,
+        rollout_id: int | None = None,
+        serve_in_background: bool = False,
+    ) -> asyncio.Task[None] | None:
         events.append(f"update_weights:{rollout_id}")
+        if args.rollout_external_url is None:
+            return None
+
+        async def serve() -> None:
+            if (applied := components.serve_gates.get(rollout_id)) is not None:
+                await applied.wait()
+            events.append(f"served:{rollout_id}")
+
+        if serve_in_background:
+            return asyncio.create_task(serve())
+        await serve()
+        return None
 
     monkeypatch.setattr(train_async_driver, "init_orchestration_script", lambda _startup_info, *, disposer: capability)
     monkeypatch.setattr(train_async_driver, "create_trainer_handles", create_trainer_handles)
@@ -222,6 +241,50 @@ class TestPipelinedGeneration:
         assert events.index("actor_train:1") < events.index("update_weights:1")
         assert events.index("update_weights:1") < events.index("generate_start:2")
         assert components.actor_model.trained == [0, 1, 2]
+
+    async def test_fully_async_trains_while_the_external_rollout_serves_the_last_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """One version in flight: the next step trains meanwhile and publishes only once that version is served."""
+        events: list[str] = []
+        args = _make_args(
+            fully_async=True, num_rollout=2, update_weights_interval=1, rollout_external_url="https://rollout"
+        )
+        components = _install_driver_fakes(monkeypatch, args, events)
+        applied = asyncio.Event()
+        components.serve_gates[0] = applied
+
+        driver = asyncio.create_task(with_disposer(train_async_driver.train, _startup_info(args)))
+        await asyncio.wait_for(components.actor_model.train_started[1].wait(), timeout=10)
+
+        assert "served:0" not in events
+        assert "update_weights:1" not in events
+
+        applied.set()
+        await asyncio.wait_for(driver, timeout=10)
+
+        assert events.index("served:0") < events.index("update_weights:1")
+        assert events.index("served:1") < events.index("inference_dispose")
+        assert components.actor_model.trained == [0, 1]
+
+    async def test_a_staleness_bound_drains_only_once_the_external_rollout_serves_the_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The bound admits and drops groups by the served version: one generated meanwhile would be counted stale."""
+        events: list[str] = []
+        args = _make_args(
+            fully_async=True,
+            num_rollout=2,
+            update_weights_interval=1,
+            rollout_external_url="https://rollout",
+            max_weight_staleness=1,
+        )
+        components = _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_async_driver.train, _startup_info(args))
+
+        assert events.index("served:0") < events.index("generate_start:1")
+        assert components.actor_model.trained == [0, 1]
 
 
 class TestCheckpointPublication:
