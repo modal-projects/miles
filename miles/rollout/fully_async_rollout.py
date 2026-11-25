@@ -52,10 +52,12 @@ from miles.rollout.fully_async_data_buffer import (
 from miles.rollout.generate_utils.sample_utils import reward_log_summary, sample_text_preview
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
 from miles.rollout.inference_rollout.inference_rollout_eval import run_eval_datasets
+from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.submission_scheduler import make_submission_scheduler
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
 from miles.utils.function_registry import load_function
+from miles.utils.http_utils import get
 from miles.utils.output_store.dropped import record_dropped_samples
 from miles.utils.simple_checkpointer import load_simple_checkpoint, save_simple_checkpoint
 from miles.utils.types import Sample
@@ -109,7 +111,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         control_url = self.args.rollout_external_control_url
         self._external_rollout = ExternalRollout(control_url) if control_url else None
         self._step_reports: set[asyncio.Task] = set()
-        self._reporter: asyncio.Task | None = None
+        self._refresher: asyncio.Task | None = None
         self._session_load: Counter[str] = Counter()
         self._recent_loads: deque[Counter[str]] = deque(maxlen=10)
         self._admitted_groups = 0
@@ -126,18 +128,17 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 "the orchestration publishes the restored weight version before the producer starts, or every "
                 "group a checkpoint restored is filtered out as stale"
             )
-            if self._external_rollout is not None:
-                # Admission starts from the inference side's capacity, not the args' maximum.
-                await self._report_load()
-                self._reporter = asyncio.create_task(self._report_load_every_minute())
+            # Admission starts from the inference side's capacity, not the args' maximum.
+            await self._refresh_capacity()
+            self._refresher = asyncio.create_task(self._refresh_capacity_every_minute())
             self._worker = asyncio.create_task(self._worker_loop())
             self._worker.add_done_callback(self._on_worker_error)
             logger.info("Started fully-async rollout worker")
         return await self._drain(input)
 
     async def dispose(self) -> None:
-        if (reporter := self._reporter) is not None:
-            await _end_worker(reporter)
+        if (refresher := self._refresher) is not None:
+            await _end_worker(refresher)
         if (worker := self._worker) is None:
             return
         await _end_worker(worker)
@@ -218,8 +219,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             for task in done:
                 prompt_group = next(x.prompt_group for x in self._running_tasks if x.task is task)
                 entry = self._collect_group_result(task, prompt_group)
-                if self._external_rollout is not None:
-                    self._add_session_load(entry.group)
+                self._add_session_load(entry.group)
                 await self._output.put(entry)
                 self._running_tasks = [x for x in self._running_tasks if x.task is not task]
 
@@ -257,21 +257,24 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._session_load["finished_sessions"] += len(loads)
         self._session_load["finished_groups"] += bool(loads)
 
-    async def _report_load(self) -> None:
+    async def _refresh_capacity(self) -> None:
         load, self._session_load = self._session_load, Counter()
         self._recent_loads.append(load)
-        in_flight = sum(len(task.prompt_group) for task in self._running_tasks)
-        capacity = await self._external_rollout.report_load(
-            {**load, "sessions_in_flight": in_flight, "waiting": self._output.waiting()}
-        )
+        if self._external_rollout is None:
+            capacity = await _own_engines_capacity(self.args)
+        else:
+            in_flight = sum(len(task.prompt_group) for task in self._running_tasks)
+            capacity = await self._external_rollout.report_load(
+                {**load, "sessions_in_flight": in_flight, "waiting": self._output.waiting()}
+            )
         if capacity is not None and capacity != self._request_capacity:
             self._request_capacity = capacity
             self._admission_changed.set()
 
-    async def _report_load_every_minute(self) -> None:
+    async def _refresh_capacity_every_minute(self) -> None:
         while True:
             await asyncio.sleep(60)
-            await self._report_load()
+            await self._refresh_capacity()
 
     # -------------------------- consumer --------------------------
 
@@ -396,6 +399,17 @@ def _copy_and_reset_for_retry(prompt_group: list[Sample]) -> list[Sample]:
     for sample in copied:
         sample.reset_for_retry()
     return copied
+
+
+async def _own_engines_capacity(args) -> int | None:
+    try:
+        async with asyncio.timeout(30):
+            urls = await get_worker_urls(args)
+            loads = await asyncio.gather(*(get(f"{url}/v1/loads?include=core") for url in urls))
+    except Exception as error:
+        logger.warning(f"could not read the engines' capacity: {error!r}")
+        return None
+    return sum(rank["max_running_requests"] for load in loads for rank in load["loads"]) or None
 
 
 async def _end_worker(worker: asyncio.Task) -> None:

@@ -299,6 +299,30 @@ async def test_admission_follows_the_reported_capacity_without_aborting_what_run
     await capacity.fn.dispose()
 
 
+async def test_without_an_external_rollout_admission_follows_what_its_own_engines_report(monkeypatch):
+    async def worker_urls(args):
+        return ["http://engine-0", "http://engine-1"]
+
+    async def loads(url):
+        return {"loads": [{"max_running_requests": 2}]}
+
+    started = []
+
+    async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        started.append(group[0].group_index)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fully_async, "get_worker_urls", worker_urls)
+    monkeypatch.setattr(fully_async, "get", loads)
+    fn = make_fn(monkeypatch, make_args(async_max_concurrent_samples=16), FakeDataSource(), generate)
+    drain = asyncio.create_task(fn(train_input(rollout_id=0)))
+    await asyncio.sleep(0.05)
+
+    assert len(started) == 4 // N_SAMPLES_PER_PROMPT
+    drain.cancel()
+    await fn.dispose()
+
+
 async def test_without_a_reported_capacity_the_args_bound_admission(monkeypatch):
     capacity = _Capacity(monkeypatch, [])
     drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
