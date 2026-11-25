@@ -65,6 +65,18 @@ class RolloutRelatedConfig(BaseConfig):
             )
         ),
     ] = False
+    max_weight_staleness: A[
+        int | None,
+        Arg(
+            help=(
+                "Maximum allowed gap between a group's oldest generated-token weight version and the current "
+                "engine weight version. Prompt KV weight staleness is not considered. "
+                "Groups exceeding this threshold are recycled back to "
+                "the data buffer instead of being sent to training. Only effective in fully "
+                "async mode. None (default) disables staleness filtering."
+            )
+        ),
+    ] = None
     # Sampling values reach the engine per request only: the built-in generate path sends them
     # itself and the session server fills fields an agent omits from its session's defaults.
     # They are never engine launch arguments: an engine shared by rollout and eval has no single default.
@@ -579,18 +591,6 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
             )
         ),
     ] = False
-    max_weight_staleness: A[
-        int | None,
-        Arg(
-            help=(
-                "Maximum allowed gap between a group's oldest generated-token weight version and the current "
-                "engine weight version. Prompt KV weight staleness is not considered. "
-                "Groups exceeding this threshold are recycled back to "
-                "the data buffer instead of being sent to training. Only effective in fully "
-                "async mode. None (default) disables staleness filtering."
-            )
-        ),
-    ] = None
     async_submit_within_staleness: A[
         bool,
         Arg(

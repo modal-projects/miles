@@ -89,6 +89,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
 
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
+    # An external rollout serving the last published version while the next fully-async step trains.
+    serving: asyncio.Task[None] | None = None
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:
@@ -156,7 +158,18 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
                 # sync generate before update weights to prevent update weight in the middle of generation
                 rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
                 rollout_data_next_future = None
-            await update_weights(args, actor_model, rollout_executor, inference_controller, rollout_id=rollout_id)
+            if serving is not None:
+                # One version in flight: the last one is served before the next is published.
+                await serving
+            serving = await update_weights(
+                args,
+                actor_model,
+                rollout_executor,
+                inference_controller,
+                rollout_id=rollout_id,
+                # A staleness bound admits and drops groups by the version the engines serve.
+                serve_in_background=args.fully_async and args.max_weight_staleness is None,
+            )
             if defer_next_drain and not args.colocate:
                 rollout_data_next_future = await eager_create_task(prepare_and_generate(rollout_id + 1))
         if args.colocate:
@@ -180,6 +193,9 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
                 rollout_id,
             )
             break
+
+    if serving is not None:
+        await serving
 
 
 if __name__ == "__main__":
