@@ -230,9 +230,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         )
 
     def _add_session_load(self, group: Group) -> None:
-        # A v2 session gives several samples, each carrying the whole session's load.
+        # A v2 session gives several samples, each carrying the whole session's load; a single-turn sample is its own.
         loads = {
-            sample.metadata["session_id"]: sample.metadata[SESSION_LOAD_KEY]
+            sample.metadata.get("session_id", id(sample)): sample.metadata[SESSION_LOAD_KEY]
             for sample in iter_samples(group)
             if SESSION_LOAD_KEY in sample.metadata
         }

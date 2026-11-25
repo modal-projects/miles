@@ -189,7 +189,8 @@ async def test_every_step_after_the_first_is_reported_to_the_external_rollout(mo
     assert [report["consumed"] for report in reports] == [2]
 
 
-async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(monkeypatch):
+@pytest.mark.parametrize("sessions_per_group", [1, N_SAMPLES_PER_PROMPT])
+async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(monkeypatch, sessions_per_group):
     reports, minute, real_sleep = [], asyncio.Event(), asyncio.sleep
 
     async def report_load(self, load):
@@ -206,7 +207,8 @@ async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(
             await asyncio.Event().wait()
         for sample in group:
             sample.status = Sample.Status.COMPLETED
-            sample.metadata["session_id"] = f"session {group[0].group_index}"
+            if sessions_per_group == 1:
+                sample.metadata["session_id"] = f"session {group[0].group_index}"
             sample.metadata[SESSION_LOAD_KEY] = {"turn_seconds": 3.0, "session_seconds": 10.0, "prefix_tokens": 5}
         return group
 
@@ -219,12 +221,13 @@ async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(
     minute.set()
     await real_sleep(0.05)
 
+    sessions = 2 * sessions_per_group
     assert reports == [
         {
-            "turn_seconds": 6.0,
-            "session_seconds": 20.0,
-            "prefix_tokens": 10,
-            "finished_sessions": 2,
+            "turn_seconds": 3.0 * sessions,
+            "session_seconds": 10.0 * sessions,
+            "prefix_tokens": 5 * sessions,
+            "finished_sessions": sessions,
             "finished_groups": 2,
             "sessions_in_flight": 2 * N_SAMPLES_PER_PROMPT,
             "waiting": 0.0,

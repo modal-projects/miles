@@ -3,6 +3,7 @@ from tests.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=220, suite="stage-b-cpu", labels=["rollout"])
 
 from dataclasses import replace
+from unittest.mock import ANY
 import numpy as np
 import pybase64
 import pytest
@@ -16,6 +17,7 @@ from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.generate_hub import single_turn
 from miles.rollout.inference_rollout import inference_rollout_common
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.utils.async_utils import run
 from miles.utils.processing_utils import encode_image_for_rollout_engine
 from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
@@ -138,7 +140,11 @@ def expected_sample(
         rollout_routed_experts=rollout_routed_experts,
         remove_sample=False,
         status=status,
-        metadata={},
+        metadata=(
+            {SESSION_LOAD_KEY: {"turn_seconds": ANY, "session_seconds": ANY}}
+            if variant == "single_turn" and versions
+            else {}
+        ),
         train_metadata=None,
         non_generation_time=0.0,
         spec_info=spec_info or Sample.SpecInfo(),
