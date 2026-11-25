@@ -182,6 +182,17 @@ def test_the_rollouts_load_goes_to_the_service_which_replies_its_capacity(servic
     assert "did not take a load report" in caplog.text
 
 
+def test_a_load_report_the_service_never_answers_gives_up(monkeypatch, caplog):
+    async def never(self, path, body):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(external_rollout, "_LOAD_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(ExternalRollout, "_call", never)
+
+    assert asyncio.run(ExternalRollout("https://control").report_load({})) is None
+    assert "did not take a load report" in caplog.text
+
+
 def test_an_adapter_is_published_under_the_run_s_start(service):
     replies, requests = service
     replies.update(

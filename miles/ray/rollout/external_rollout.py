@@ -13,6 +13,7 @@ from miles.utils.http_utils import _post, rollout_external_headers
 logger = logging.getLogger(__name__)
 
 _STATUS_POLL_S = 5
+_LOAD_TIMEOUT_S = 30
 
 
 class ExternalRollout:
@@ -68,7 +69,8 @@ class ExternalRollout:
     async def report_load(self, load: dict[str, float | None]) -> int | None:
         """The rollout's load, from which the service sizes its engines; it replies the requests they run at once."""
         try:
-            reply = await self._call("/load", load)
+            async with asyncio.timeout(_LOAD_TIMEOUT_S):
+                reply = await self._call("/load", load)
         except Exception as error:
             logger.warning(f"the external rollout did not take a load report: {error!r}")
             return None
