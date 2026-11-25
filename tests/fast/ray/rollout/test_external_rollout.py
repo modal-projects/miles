@@ -170,15 +170,15 @@ def test_a_step_the_service_refuses_is_only_logged(service, caplog):
     assert "did not take a training step" in caplog.text
 
 
-def test_the_rollouts_load_goes_to_the_service_and_a_refusal_is_only_logged(service, caplog):
+def test_the_rollouts_load_goes_to_the_service_which_replies_its_capacity(service, caplog):
     replies, requests = service
-    replies["/load"] = [(200, {}), (404, {"detail": "Not Found"})]
+    replies["/load"] = [(200, {"capacity": 96}), (200, {}), (404, {"detail": "Not Found"})]
     load = {"finished_sessions": 2, "turn_seconds": 6.0, "sessions_in_flight": 4, "waiting": None}
 
-    asyncio.run(ExternalRollout("https://control").report_load(load))
-    asyncio.run(ExternalRollout("https://control").report_load(load))
+    capacities = [asyncio.run(ExternalRollout("https://control").report_load(load)) for _ in range(3)]
 
-    assert [(method, path, body) for method, path, body, _ in requests] == [("POST", "/load", load)] * 2
+    assert capacities == [96, None, None]
+    assert [(method, path, body) for method, path, body, _ in requests] == [("POST", "/load", load)] * 3
     assert "did not take a load report" in caplog.text
 
 

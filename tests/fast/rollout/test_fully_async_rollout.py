@@ -223,6 +223,7 @@ async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(
 
     sessions = 2 * sessions_per_group
     assert reports == [
+        {"sessions_in_flight": 0, "waiting": 0.0},
         {
             "turn_seconds": 3.0 * sessions,
             "session_seconds": 10.0 * sessions,
@@ -231,9 +232,96 @@ async def test_each_minute_the_external_rollout_gets_the_finished_sessions_load(
             "finished_groups": 2,
             "sessions_in_flight": 2 * N_SAMPLES_PER_PROMPT,
             "waiting": 0.0,
-        }
+        },
     ]
     await fn.dispose()
+
+
+class _Capacity:
+    """An external rollout replying each load report with the next capacity; each group generates until released."""
+
+    def __init__(self, monkeypatch, capacities: list[int], generating_share: float = 1.0):
+        self.capacities, self.minute, self.real_sleep = iter(capacities), asyncio.Event(), asyncio.sleep
+        self.started: list[int] = []
+        self.releases: dict[int, asyncio.Event] = {}
+        monkeypatch.setattr(fully_async.ExternalRollout, "report_load", self._report_load)
+        monkeypatch.setattr(asyncio, "sleep", self._sleep)
+        args = make_args(rollout_external_control_url="https://control", async_max_concurrent_samples=16)
+        self.share = generating_share
+        self.fn = make_fn(monkeypatch, args, FakeDataSource(), self._generate)
+
+    async def _report_load(self, load):
+        return next(self.capacities, None)
+
+    async def _sleep(self, delay, *args):
+        if delay != 60:
+            return await self.real_sleep(delay, *args)
+        await self.minute.wait()
+        self.minute.clear()
+
+    async def _generate(self, state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        index = group[0].group_index
+        self.started.append(index)
+        await self.releases.setdefault(index, asyncio.Event()).wait()
+        for sample in group:
+            sample.status = Sample.Status.COMPLETED
+            sample.metadata[SESSION_LOAD_KEY] = {"turn_seconds": 10.0 * self.share, "session_seconds": 10.0}
+            sample_done_callback()
+        return group
+
+    async def settle(self) -> None:
+        await self.real_sleep(0.05)
+
+    async def release(self, index: int) -> None:
+        self.releases.setdefault(index, asyncio.Event()).set()
+        await self.settle()
+
+    async def next_minute(self) -> None:
+        self.minute.set()
+        await self.settle()
+
+
+async def test_admission_follows_the_reported_capacity_without_aborting_what_runs(monkeypatch):
+    capacity = _Capacity(monkeypatch, [4, 8, 2])
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
+    assert capacity.started == [1001, 1002]
+
+    await capacity.next_minute()
+    await capacity.release(1001)
+    assert capacity.started == [1001, 1002, 1003, 1004, 1005]
+
+    await capacity.next_minute()
+    await capacity.release(1002)
+    await drain
+    assert capacity.started == [1001, 1002, 1003, 1004, 1005]
+    assert not any(task.task.done() for task in capacity.fn._running_tasks)
+    await capacity.fn.dispose()
+
+
+async def test_without_a_reported_capacity_the_args_bound_admission(monkeypatch):
+    capacity = _Capacity(monkeypatch, [])
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
+
+    assert len(capacity.started) == 16 // N_SAMPLES_PER_PROMPT
+    drain.cancel()
+    await capacity.fn.dispose()
+
+
+async def test_sessions_generating_half_their_life_double_what_a_capacity_admits(monkeypatch):
+    capacity = _Capacity(monkeypatch, [4, 4], generating_share=0.5)
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
+    await capacity.release(1001)
+    assert capacity.started == [1001, 1002, 1003]
+
+    await capacity.next_minute()
+    await capacity.release(1002)
+
+    assert capacity.started == [1001, 1002, 1003, 1004, 1005, 1006]
+    await drain
+    await capacity.fn.dispose()
 
 
 async def test_eval_without_fleet_pauses_producer(monkeypatch):

@@ -65,12 +65,14 @@ class ExternalRollout:
         except Exception as error:
             logger.warning(f"the external rollout did not take a training step: {error!r}")
 
-    async def report_load(self, load: dict[str, float | None]) -> None:
-        """The rollout's load, from which the service sizes its engines; a failed report loses only that window."""
+    async def report_load(self, load: dict[str, float | None]) -> int | None:
+        """The rollout's load, from which the service sizes its engines; it replies the requests they run at once."""
         try:
-            await self._call("/load", load)
+            reply = await self._call("/load", load)
         except Exception as error:
             logger.warning(f"the external rollout did not take a load report: {error!r}")
+            return None
+        return reply.get("capacity")
 
     async def _call(self, path: str, body: dict | None) -> dict:
         # A reply slower than its web endpoint allows may come back as a redirect to where it will appear.
