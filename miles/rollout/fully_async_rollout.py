@@ -111,6 +111,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._step_reports: set[asyncio.Task] = set()
         self._reporter: asyncio.Task | None = None
         self._session_load: Counter[str] = Counter()
+        self._recent_loads: deque[Counter[str]] = deque(maxlen=10)
+        self._request_capacity: int | None = None
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
@@ -123,11 +125,13 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 "the orchestration publishes the restored weight version before the producer starts, or every "
                 "group a checkpoint restored is filtered out as stale"
             )
+            if self._external_rollout is not None:
+                # Admission starts from the inference side's capacity, not the args' maximum.
+                await self._report_load()
+                self._reporter = asyncio.create_task(self._report_load_every_minute())
             self._worker = asyncio.create_task(self._worker_loop())
             self._worker.add_done_callback(self._on_worker_error)
             logger.info("Started fully-async rollout worker")
-            if self._external_rollout is not None:
-                self._reporter = asyncio.create_task(self._report_load())
         return await self._drain(input)
 
     async def dispose(self) -> None:
@@ -164,8 +168,16 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
     def _max_in_flight_groups(self) -> int:
         if (x := self.args.async_max_concurrent_samples) is not None:
             # Whole groups are submitted, so the sample budget floors to a group count.
-            return max(1, x // self.args.n_samples_per_prompt)
-        return self.args.rollout_batch_size
+            groups = max(1, x // self.args.n_samples_per_prompt)
+        else:
+            groups = self.args.rollout_batch_size
+        if self._request_capacity is None:
+            return groups
+        recent = sum(self._recent_loads, Counter())
+        # A session holds a request only for its generating share of its life.
+        generating_share = recent["turn_seconds"] / recent["session_seconds"] if recent["session_seconds"] else 1.0
+        sessions = self._request_capacity / generating_share
+        return min(groups, max(1, int(sessions // self.args.n_samples_per_prompt)))
 
     def _submit_one_group(self) -> asyncio.Task:
         samples = [self._retry_buffer.popleft()] if self._retry_buffer else self.data_source.get_samples(1)
@@ -242,13 +254,20 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._session_load["finished_groups"] += bool(loads)
 
     async def _report_load(self) -> None:
+        load, self._session_load = self._session_load, Counter()
+        self._recent_loads.append(load)
+        in_flight = sum(len(task.prompt_group) for task in self._running_tasks)
+        capacity = await self._external_rollout.report_load(
+            {**load, "sessions_in_flight": in_flight, "waiting": self._output.waiting()}
+        )
+        if capacity is not None and capacity != self._request_capacity:
+            self._request_capacity = capacity
+            self._admission_changed.set()
+
+    async def _report_load_every_minute(self) -> None:
         while True:
             await asyncio.sleep(60)
-            load, self._session_load = self._session_load, Counter()
-            in_flight = sum(len(task.prompt_group) for task in self._running_tasks)
-            await self._external_rollout.report_load(
-                {**load, "sessions_in_flight": in_flight, "waiting": self._output.waiting()}
-            )
+            await self._report_load()
 
     # -------------------------- consumer --------------------------
 
