@@ -13,7 +13,8 @@ from miles.utils.http_utils import _post, rollout_external_headers
 logger = logging.getLogger(__name__)
 
 _STATUS_POLL_S = 5
-_LOAD_TIMEOUT_S = 30
+_RUN_POLL_S = 60
+_REPORT_TIMEOUT_S = 30
 
 
 class ExternalRollout:
@@ -21,6 +22,8 @@ class ExternalRollout:
         self._url = control_url.rstrip("/")
         self._start: dict | None = None
         self._served: int | None = None
+        self._publication: dict | None = None
+        self._run_poll: asyncio.Task | None = None
 
     async def serve(self, version: int, publication: dict | None = None) -> dict[str, float]:
         """The first version starts the run and waits for one engine; later ones, for every engine taking traffic.
@@ -32,20 +35,17 @@ class ExternalRollout:
             reply = await self._call("/start", {"version": version, **publication_field})
             self._start = {"start": version, "start_id": reply["start_id"]}
             logger.info(f"waiting for the external rollout to serve version {version}")
-            # A control service restarted before any version learns the run from this poll, the publication with it.
-            run = {**self._start, "head": version}
-            if publication is not None:
-                run["publication"] = json.dumps(publication)
-            status = f"/status?{urlencode(run)}"
+            status = self._status(version, publication)
             while not (await self._call(status, None))["serving"].get(str(version)):
                 await asyncio.sleep(_STATUS_POLL_S)
             logger.info(f"the external rollout serves version {version}")
-            self._served = version
+            self._served, self._publication = version, publication
+            self._run_poll = asyncio.create_task(self._poll_run())
             return {}
         reply = await self._call(
             "/versions", {"version": version, "base_version": self._served, **self._start, **publication_field}
         )
-        self._served = version
+        self._served, self._publication = version, publication
         stats = [engine["stats"] or {} for engine in reply["engines"].values()]
         metrics = {
             "perf/update_weights_external_s": reply["seconds"],
@@ -69,12 +69,28 @@ class ExternalRollout:
     async def report_load(self, load: dict[str, float | None]) -> int | None:
         """The rollout's load, from which the service sizes its engines; it replies the requests they run at once."""
         try:
-            async with asyncio.timeout(_LOAD_TIMEOUT_S):
+            async with asyncio.timeout(_REPORT_TIMEOUT_S):
                 reply = await self._call("/load", load)
         except Exception as error:
             logger.warning(f"the external rollout did not take a load report: {error!r}")
             return None
         return reply.get("capacity")
+
+    def _status(self, head: int, publication: dict | None) -> str:
+        # A control service restarted at any point learns the run from this poll, the head's publication with it.
+        run = {**self._start, "head": head}
+        if publication is not None:
+            run["publication"] = json.dumps(publication)
+        return f"/status?{urlencode(run)}"
+
+    async def _poll_run(self) -> None:
+        while True:
+            await asyncio.sleep(_RUN_POLL_S)
+            try:
+                async with asyncio.timeout(_REPORT_TIMEOUT_S):
+                    await self._call(self._status(self._served, self._publication), None)
+            except Exception as error:
+                logger.warning(f"the external rollout did not answer the run's status poll: {error!r}")
 
     async def _call(self, path: str, body: dict | None) -> dict:
         # A reply slower than its web endpoint allows may come back as a redirect to where it will appear.

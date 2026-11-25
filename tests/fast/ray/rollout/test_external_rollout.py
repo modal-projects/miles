@@ -11,6 +11,8 @@ import pytest
 
 from miles.ray.rollout import external_rollout
 from miles.ray.rollout.external_rollout import ExternalRollout
+
+_REAL_SLEEP, _RUN_POLL = asyncio.sleep, ExternalRollout._poll_run
 from miles.utils import http_utils
 
 
@@ -38,7 +40,12 @@ def service(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(http_utils.asyncio, "sleep", no_wait)
     monkeypatch.setattr(external_rollout, "_STATUS_POLL_S", 0)
+    monkeypatch.setattr(ExternalRollout, "_poll_run", _no_run_poll)
     return replies, requests
+
+
+async def _no_run_poll(self):
+    pass
 
 
 def _serve(rollout: ExternalRollout, *versions: int) -> dict:
@@ -186,11 +193,30 @@ def test_a_load_report_the_service_never_answers_gives_up(monkeypatch, caplog):
     async def never(self, path, body):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(external_rollout, "_LOAD_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(external_rollout, "_REPORT_TIMEOUT_S", 0.05)
     monkeypatch.setattr(ExternalRollout, "_call", never)
 
     assert asyncio.run(ExternalRollout("https://control").report_load({})) is None
     assert "did not take a load report" in caplog.text
+
+
+def test_between_versions_the_run_poll_names_the_start_the_head_and_its_publication(service, monkeypatch):
+    replies, requests = service
+    monkeypatch.setattr(asyncio, "sleep", _REAL_SLEEP)
+    monkeypatch.setattr(ExternalRollout, "_poll_run", _RUN_POLL)
+    monkeypatch.setattr(external_rollout, "_RUN_POLL_S", 0.01)
+    publication = {"kind": "lora", "path": "/runs/r/v3"}
+    replies.update({"/start": [(200, {"start_id": "s1"})], "/status": [(200, {"serving": {"3": 1}})] * 100})
+
+    async def serve_then_wait():
+        await ExternalRollout("https://control").serve(3, publication)
+        await asyncio.sleep(0.1)
+
+    asyncio.run(serve_then_wait())
+
+    polls = [body for _, path, body, _ in requests if path == "/status"]
+    run = {"start": "3", "start_id": "s1", "head": "3", "publication": json.dumps(publication)}
+    assert len(polls) > 2 and all(poll == run for poll in polls)
 
 
 def test_an_adapter_is_published_under_the_run_s_start(service):
