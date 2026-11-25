@@ -30,6 +30,7 @@ from miles.rollout.session.core import SessionCore
 from miles.rollout.session.errors import OutputStoreContractError
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.samples.codec import decode_samples_and_merge_input_sample
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.session.sessions import setup_session_routes
 from miles.utils.chat_template_utils import get_tito_tokenizer
 from miles.utils.processing_utils import load_tokenizer
@@ -322,6 +323,22 @@ async def test_session_metadata_matches_get_session(core):
     assert response.status_code == 200
     assert reply.session_metadata == json.loads(response.body)["metadata"]
     assert reply.session_metadata["accumulated_token_ids"] == _ACCUMULATED
+
+
+async def test_the_reply_carries_the_sessions_load(core):
+    first, second = _two_turn_records()
+    first.request_timestamp, first.timestamp = 0.0, 2.0
+    second.request_timestamp, second.timestamp = 5.0, 6.5
+    second.response["choices"][0]["meta_info"]["cached_tokens"] = 2
+    sid = await _make_session(core, [first, second], _ACCUMULATED)
+
+    _, payload = await _collect_via_op(core, sid)
+
+    assert decode_samples_and_merge_input_sample(payload, Sample()).session_metadata[SESSION_LOAD_KEY] == {
+        "turn_seconds": 3.5,
+        "prefix_tokens": 5,
+        "uncached_prefix_tokens": 3,
+    }
 
 
 # ── additional R3 (in-place weight updates): patches rebuild the full tensor ──

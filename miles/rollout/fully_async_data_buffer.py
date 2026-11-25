@@ -136,6 +136,10 @@ class DataBuffer(ABC):
         """The policy's last step, one get's start to the next, once: seconds, waited, held, consumed, produced."""
         return None
 
+    def waiting(self) -> float | None:
+        """Seconds the get now pending has waited short of groups, 0 if none waits; None if the buffer cannot tell."""
+        return None
+
     def drop_saved_state(self, state: Any, *, reason: str) -> None:
         """Instead of ``load_state_dict``: record the saved groups as dropped, e.g. after a data source reset."""
         raise NotImplementedError(f"{type(self).__name__} must implement drop_saved_state() for a data reset")
@@ -196,6 +200,7 @@ class DefaultDataBuffer(DataBuffer):
         self._rng = random.Random(args.rollout_seed)
         self._current_version: int | None = None
         self._get_pending = False
+        self._short_since: float | None = None
         self._produced = 0
         self._held = 0.0
         self._refused_since: float | None = None
@@ -282,6 +287,7 @@ class DefaultDataBuffer(DataBuffer):
             entries, waited = await self._take(num_groups=num_groups, current_version=current_version)
         finally:
             self._get_pending = False
+            self._short_since = None
         self._last_get = _Get(began, waited, len(entries))
         return entries
 
@@ -289,18 +295,20 @@ class DefaultDataBuffer(DataBuffer):
         step, self._step = self._step, None
         return step
 
+    def waiting(self) -> float | None:
+        return 0.0 if self._short_since is None else time.monotonic() - self._short_since
+
     async def _take(self, *, num_groups: int, current_version: int | None) -> tuple[list[DataBufferInput], float]:
         if current_version is not None:
             self._current_version = current_version
         async with self._cond:
             deadline = time.monotonic() + NO_PROGRESS_WARN_SECS
-            short_since = None
             while True:
                 # filters at retrieving sample: staleness filter
                 self._drop_stale(current_version)
                 if len(self._buffer) >= num_groups:
                     break
-                short_since = short_since or time.monotonic()
+                self._short_since = self._short_since or time.monotonic()
                 if (remaining := deadline - time.monotonic()) <= 0:
                     logger.warning(f"No completed rollout groups for {NO_PROGRESS_WARN_SECS}s")
                     deadline = time.monotonic() + NO_PROGRESS_WARN_SECS
@@ -327,7 +335,7 @@ class DefaultDataBuffer(DataBuffer):
                 if (staleness := version_stats.oldest_lag(current_version)) is not None:
                     self._metric_consumed_staleness.append(staleness)
                 self._record_selected_version_stats(version_stats, current_version)
-            return entries, (time.monotonic() - short_since if short_since else 0.0)
+            return entries, (time.monotonic() - self._short_since if self._short_since else 0.0)
 
     def _drop_stale(self, current_version: int | None) -> None:
         limit = self._args.max_weight_staleness

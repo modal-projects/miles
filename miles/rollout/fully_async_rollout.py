@@ -19,7 +19,7 @@ rollout engines, pausing producer submissions for the duration of the
 import asyncio
 import copy
 import logging
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,7 @@ from miles.rollout.base_types import (
     compute_kv_cache_namespace,
     stamp_kv_cache_namespace,
 )
+from miles.rollout.filter_hub.base_types import iter_samples
 from miles.rollout.fully_async_data_buffer import (
     DataBuffer,
     DataBufferConstructorInput,
@@ -51,6 +52,7 @@ from miles.rollout.fully_async_data_buffer import (
 from miles.rollout.generate_utils.sample_utils import reward_log_summary, sample_text_preview
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
 from miles.rollout.inference_rollout.inference_rollout_eval import run_eval_datasets
+from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.rollout.submission_scheduler import make_submission_scheduler
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
 from miles.utils.function_registry import load_function
@@ -107,6 +109,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         control_url = self.args.rollout_external_control_url
         self._external_rollout = ExternalRollout(control_url) if control_url else None
         self._step_reports: set[asyncio.Task] = set()
+        self._reporter: asyncio.Task | None = None
+        self._session_load: Counter[str] = Counter()
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
@@ -122,9 +126,13 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             self._worker = asyncio.create_task(self._worker_loop())
             self._worker.add_done_callback(self._on_worker_error)
             logger.info("Started fully-async rollout worker")
+            if self._external_rollout is not None:
+                self._reporter = asyncio.create_task(self._report_load())
         return await self._drain(input)
 
     async def dispose(self) -> None:
+        if (reporter := self._reporter) is not None:
+            await _end_worker(reporter)
         if (worker := self._worker) is None:
             return
         await _end_worker(worker)
@@ -194,6 +202,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             for task in done:
                 prompt_group = next(x.prompt_group for x in self._running_tasks if x.task is task)
                 entry = self._collect_group_result(task, prompt_group)
+                if self._external_rollout is not None:
+                    self._add_session_load(entry.group)
                 await self._output.put(entry)
                 self._running_tasks = [x for x in self._running_tasks if x.task is not task]
 
@@ -218,6 +228,27 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             prompt_group=prompt_group,
             group=[replace(sample, status=Sample.Status.ABORTED) for sample in prompt_group],
         )
+
+    def _add_session_load(self, group: Group) -> None:
+        # A v2 session gives several samples, each carrying the whole session's load.
+        loads = {
+            sample.metadata["session_id"]: sample.metadata[SESSION_LOAD_KEY]
+            for sample in iter_samples(group)
+            if SESSION_LOAD_KEY in sample.metadata
+        }
+        for load in loads.values():
+            self._session_load.update(load)
+        self._session_load["finished_sessions"] += len(loads)
+        self._session_load["finished_groups"] += bool(loads)
+
+    async def _report_load(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            load, self._session_load = self._session_load, Counter()
+            in_flight = sum(len(task.prompt_group) for task in self._running_tasks)
+            await self._external_rollout.report_load(
+                {**load, "sessions_in_flight": in_flight, "waiting": self._output.waiting()}
+            )
 
     # -------------------------- consumer --------------------------
 

@@ -1,4 +1,4 @@
-"""An external rollout service's control API on --rollout-external-control-url: weights, adapters, training steps."""
+"""An external rollout service's control API on --rollout-external-control-url: weights, adapters, steps and load."""
 
 import asyncio
 import json
@@ -64,6 +64,13 @@ class ExternalRollout:
             await self._call("/steps", step)
         except Exception as error:
             logger.warning(f"the external rollout did not take a training step: {error!r}")
+
+    async def report_load(self, load: dict[str, float | None]) -> None:
+        """The rollout's load, from which the service sizes its engines; a failed report loses only that window."""
+        try:
+            await self._call("/load", load)
+        except Exception as error:
+            logger.warning(f"the external rollout did not take a load report: {error!r}")
 
     async def _call(self, path: str, body: dict | None) -> dict:
         # A reply slower than its web endpoint allows may come back as a redirect to where it will appear.
