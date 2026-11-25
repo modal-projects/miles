@@ -178,6 +178,7 @@ def _merge_turns(turns: list[Sample], tokenizer) -> Sample:
         loss_mask=_per_token("loss_mask", default=1, observation=0),
         weight_versions=[call for turn in turns for call in turn.weight_versions],
         kv_cache_namespace=_merge_equal_value("kv_cache_namespace"),
+        request_priority=_merge_equal_value("request_priority"),
         rollout_log_probs=_per_token("rollout_log_probs", default=0.0, observation=0.0),
         rollout_topk_token_ids=merge_rollout_topk_logprobs_field(turns, "rollout_topk_token_ids", obs_lens),
         rollout_topk_log_probs=merge_rollout_topk_logprobs_field(turns, "rollout_topk_log_probs", obs_lens),

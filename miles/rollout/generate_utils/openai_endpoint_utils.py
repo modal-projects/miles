@@ -58,6 +58,7 @@ class OpenAIEndpointTracer:
         evaluation: bool = False,
         sampling_params: dict | None = None,
         extra_key: str | None = None,
+        priority: int | None = None,
     ):
         instances = args.session_server_instances
         if not instances:
@@ -73,7 +74,7 @@ class OpenAIEndpointTracer:
             key: value for key, value in (sampling_params or {}).items() if key in CreateSessionRequest.model_fields
         }
         body = CreateSessionRequest.model_validate(
-            {**session_params, "evaluation": evaluation, "extra_key": extra_key}
+            {**session_params, "evaluation": evaluation, "extra_key": extra_key, "priority": priority}
         )
         use_v2 = args.use_session_server == "v2"
         samples_wire_fields = COMPUTED_FIELDS_V2 if use_v2 else COMPUTED_FIELDS

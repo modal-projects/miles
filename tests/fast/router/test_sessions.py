@@ -26,8 +26,8 @@ from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 _INSTANCE_ID = "0123456789abcdef-0"
 
 
-def _create_session(url: str, *, extra_key: str | None = None) -> str:
-    body = {} if extra_key is None else {"extra_key": extra_key}
+def _create_session(url: str, *, extra_key: str | None = None, priority: int | None = None) -> str:
+    body = {key: value for key, value in {"extra_key": extra_key, "priority": priority}.items() if value is not None}
     return requests.post(f"{url}/sessions", json=body, timeout=5.0).json()["session_id"]
 
 
@@ -770,3 +770,15 @@ class TestSessionExtraKey:
 
         assert response.status_code == 200
         assert len(response.json()["session_id"]) == 32
+
+
+def test_every_turn_of_a_session_carries_its_priority_and_an_unprioritized_one_none(router_env):
+    messages = [{"role": "user", "content": "first"}]
+    session_id = _create_session(router_env.url, priority=3)
+
+    first = _post_chat(router_env.url, session_id, {"messages": messages})
+    second_messages = [*messages, first.json()["choices"][0]["message"], {"role": "user", "content": "more"}]
+    _post_chat(router_env.url, session_id, {"messages": second_messages})
+    _post_chat(router_env.url, _create_session(router_env.url), {"messages": messages})
+
+    assert [body.get("priority") for body in router_env.backend.request_log[-3:]] == [3, 3, None]

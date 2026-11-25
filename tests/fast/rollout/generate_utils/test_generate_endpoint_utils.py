@@ -73,6 +73,12 @@ class TestComputeRequestPayloadExtraKey:
         assert halt_status is None
         assert payload["extra_key"] == "train:-:7"
 
+    def test_a_request_priority_reaches_the_payload_and_none_adds_no_field(self):
+        payload, _ = compute_request_payload(_make_args(), input_ids=[1, 2], sampling_params={}, request_priority=7)
+        unprioritized, _ = compute_request_payload(_make_args(), input_ids=[1, 2], sampling_params={})
+
+        assert (payload["priority"], "priority" in unprioritized) == (7, False)
+
 
 class TestComputeRequestPayloadOutputStore:
     def make_args(self, **overrides) -> SimpleNamespace:

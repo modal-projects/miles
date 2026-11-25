@@ -57,6 +57,13 @@ class TestMergeSamples:
 
         assert merged.kv_cache_namespace == namespace
 
+    def test_merge_keeps_the_turns_request_priority(self, mock_tokenizer: MagicMock) -> None:
+        a = make_sample(tokens=[1, 2, 10], response_length=1, loss_mask=[1])
+        b = make_sample(tokens=[1, 2, 10, 20, 30], response_length=1, loss_mask=[1])
+        a.request_priority = b.request_priority = 4
+
+        assert _merge_turns([a, b], mock_tokenizer).request_priority == 4
+
     @pytest.mark.parametrize("other_namespace", [None, "train:-:2"])
     def test_merge_rejects_different_cache_namespaces(
         self, mock_tokenizer: MagicMock, other_namespace: str | None

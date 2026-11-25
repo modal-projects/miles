@@ -61,6 +61,7 @@ class SessionStateV2:
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
     extra_key: str | None = None
+    priority: int | None = None
 
     def snapshot(self) -> "SessionStateV2":
         """Capture the committed tree for collection. Caller holds the lock."""
@@ -250,6 +251,7 @@ class SessionRegistryV2(SessionRegistry):
         sampling_defaults: dict[str, Any] | None = None,
         sampling_support_replay: bool = False,
         extra_key: str | None = None,
+        priority: int | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         self.sessions[session_id] = SessionStateV2(
@@ -257,6 +259,7 @@ class SessionRegistryV2(SessionRegistry):
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
             extra_key=extra_key,
+            priority=priority,
         )
         return session_id
 

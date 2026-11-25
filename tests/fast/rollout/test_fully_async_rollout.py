@@ -324,6 +324,14 @@ async def test_sessions_generating_half_their_life_double_what_a_capacity_admits
     await capacity.fn.dispose()
 
 
+async def test_each_admitted_group_carries_the_next_request_priority(monkeypatch):
+    fn = make_fn(monkeypatch, make_args(rollout_batch_size=3), FakeDataSource())
+
+    output = await fn(train_input(rollout_id=0))
+
+    assert [[sample.request_priority for sample in group] for group in output.samples] == [[0, 0], [1, 1], [2, 2]]
+
+
 async def test_eval_without_fleet_pauses_producer(monkeypatch):
     """Shared-engine eval: producer submissions pause during eval and resume after."""
     release = asyncio.Event()

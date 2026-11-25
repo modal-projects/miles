@@ -112,6 +112,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._reporter: asyncio.Task | None = None
         self._session_load: Counter[str] = Counter()
         self._recent_loads: deque[Counter[str]] = deque(maxlen=10)
+        self._admitted_groups = 0
         self._request_capacity: int | None = None
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
@@ -184,6 +185,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         stamp_kv_cache_namespace(samples, namespace=self._curr_kv_cache_namespace)
         self._scheduler.on_submit(samples)
         [prompt_group] = samples
+        for sample in prompt_group:
+            sample.request_priority = self._admitted_groups
+        self._admitted_groups += 1
         task = asyncio.create_task(self._generate_group(prompt_group))
         self._running_tasks.append(_RunningTask(prompt_group=prompt_group, task=task))
         return task

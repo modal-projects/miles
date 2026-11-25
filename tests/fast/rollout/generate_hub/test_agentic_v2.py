@@ -82,7 +82,7 @@ def _with_load():
 def _patch_agent(monkeypatch, tracer) -> list[str | None]:
     extra_keys: list[str | None] = []
 
-    async def fake_create(args, *, evaluation=False, sampling_params=None, extra_key=None):
+    async def fake_create(args, *, evaluation=False, sampling_params=None, extra_key=None, priority=None):
         tracer.evaluation = evaluation
         tracer.sampling_params = sampling_params
         extra_keys.append(extra_key)
@@ -280,7 +280,7 @@ class TestSessionServerInstancesValidation:
         """generate() raises the documented AssertionError when session_server_instances is null or empty, without creating a tracer."""
         created_for: list[object] = []
 
-        async def fake_create(args, *, evaluation=False, sampling_params=None, extra_key=None):
+        async def fake_create(args, *, evaluation=False, sampling_params=None, extra_key=None, priority=None):
             created_for.append(args)
             return _empty_tracer()
 

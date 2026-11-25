@@ -11,6 +11,7 @@ from miles.rollout.session.core import (
     JSON_MEDIA_TYPE,
     ProxyRequest,
     SessionCore,
+    _add_session_priority,
     _chat_client_response,
     _render_json,
     _samples_response,
@@ -225,6 +226,7 @@ class SessionCoreV2(SessionCore):
             checkpoint_token_ids = attach_parent.token_ids if attach_parent is not None else []
             self._maybe_request_addition_r3(request_body, checkpoint_token_ids, prompt_token_ids)
             _add_session_extra_key(request_body, session)
+            _add_session_priority(request_body, session)
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
             proxy_body = orjson.dumps(request_body)

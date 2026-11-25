@@ -66,6 +66,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         evaluation=input.evaluation,
         sampling_params=input.sampling_params,
         extra_key=input.sample.kv_cache_namespace,
+        priority=input.sample.request_priority,
     )
 
     # a mixed dataset may name its own agent and a lower length limit

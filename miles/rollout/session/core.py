@@ -286,13 +286,19 @@ class SessionCore:
         return Response(content=_render_json(body), status_code=200, media_type=JSON_MEDIA_TYPE)
 
     async def create_session(
-        self, *, evaluation: bool = False, sampling_defaults: dict | None = None, extra_key: str | None = None
+        self,
+        *,
+        evaluation: bool = False,
+        sampling_defaults: dict | None = None,
+        extra_key: str | None = None,
+        priority: int | None = None,
     ) -> Response:
         session_id = self.registry.create_session(
             evaluation=evaluation,
             sampling_defaults=sampling_defaults,
             sampling_support_replay=not evaluation and self.config.use_sampling_support_replay,
             extra_key=extra_key,
+            priority=priority,
         )
         return Response(content=_render_json({"session_id": session_id}), status_code=200, media_type=JSON_MEDIA_TYPE)
 
@@ -430,6 +436,7 @@ class SessionCore:
             # prepare_token_ids_and_request_args applied any retry rollback, so token_ids is
             # the checkpoint this request builds on.
             self._maybe_request_addition_r3(request_body, session.token_ids, prompt_token_ids)
+            _add_session_priority(request_body, session)
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
             proxy_body = orjson.dumps(request_body)
@@ -509,3 +516,8 @@ class SessionCore:
             ProxyRequest(method=method, query=query), path, body=body, headers=headers
         )
         return proxy_result_to_response(result)
+
+
+def _add_session_priority(request_body: dict, session) -> None:
+    if session.priority is not None:
+        request_body["priority"] = session.priority

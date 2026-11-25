@@ -52,6 +52,7 @@ async def generate(input: GenerateFnInput, url: str | None = None) -> GenerateFn
         multimodal_inputs=sample.multimodal_inputs,
         evaluation=input.evaluation,
         kv_cache_namespace=sample.kv_cache_namespace,
+        request_priority=sample.request_priority,
         mm_token_expansion_start_len=mm_token_expansion_start_len,
     )
     if payload is None:

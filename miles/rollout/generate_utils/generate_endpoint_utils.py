@@ -137,6 +137,7 @@ def compute_request_payload(
     *,
     evaluation: bool = False,
     kv_cache_namespace: str | None = None,
+    request_priority: int | None = None,
     mm_token_expansion_start_len: int = 0,
 ) -> tuple[dict[str, Any] | None, Sample.Status | None]:
     sampling_params = deepcopy(sampling_params)
@@ -168,6 +169,8 @@ def compute_request_payload(
         payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
     if kv_cache_namespace is not None:
         payload["extra_key"] = kv_cache_namespace
+    if request_priority is not None:
+        payload["priority"] = request_priority
 
     if not evaluation:
         configure_rollout_topk_logprobs_request(args, payload)

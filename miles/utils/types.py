@@ -233,6 +233,9 @@ class Sample:
 
     kv_cache_namespace: str | None = None
 
+    # When the rollout admitted this sample's group, sent as each request's priority (SGLang serves lower values first)
+    request_priority: int | None = None
+
     non_generation_time: float = 0.0  # time spent in non-generation steps
 
     @dataclass
@@ -478,6 +481,7 @@ class Sample:
         self.status = Sample.Status.ABORTED
         self.trainer_model_id = None
         self.kv_cache_namespace = None
+        self.request_priority = None
         self.non_generation_time = 0.0
         self.spec_info = Sample.SpecInfo()
         self.prefix_cache_info = Sample.PrefixCacheInfo()

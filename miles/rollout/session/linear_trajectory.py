@@ -169,6 +169,7 @@ class LinearTrajectory:
     evaluation: bool = False
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
+    priority: int | None = None
 
     def snapshot(self) -> "LinearTrajectory":
         """Copy the mutable containers, sharing committed payloads read-only. Caller holds the lock."""
@@ -503,6 +504,7 @@ class SessionRegistry:
         sampling_defaults: dict[str, Any] | None = None,
         sampling_support_replay: bool = False,
         extra_key: str | None = None,
+        priority: int | None = None,
     ) -> str:
         assert extra_key is None, (
             f"session server v1 does not support the KV cache namespace {extra_key!r}; "
@@ -513,6 +515,7 @@ class SessionRegistry:
             evaluation=evaluation,
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
+            priority=priority,
         )
         return session_id
 

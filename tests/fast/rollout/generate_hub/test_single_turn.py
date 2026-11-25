@@ -178,6 +178,18 @@ class TestBasicGeneration:
         assert listify(result.sample) == [expected_sample(variant)]
 
 
+class TestRequestPriority:
+    def test_the_samples_request_priority_goes_with_its_request(self, variant, generation_env):
+        if variant == "old_sglang_rollout":
+            pytest.skip("the old rollout sends no priority")
+        sample = _make_sample()
+        sample.request_priority = 7
+
+        result = _run_generate(variant, generation_env, sample)
+
+        assert result.requests[0]["priority"] == 7
+
+
 class TestRadixCacheExtraKey:
     def test_a_started_sample_partitions_the_cache_by_its_kv_cache_namespace(self, variant, generation_env):
         """A sample with a kv_cache_namespace sends extra_key the namespace itself and keeps it."""
