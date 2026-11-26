@@ -316,39 +316,42 @@ class TestSubmissionSchedulers:
     def test_group_level_counts_groups(self):
         scheduler = GroupLevelSubmission()
         assert scheduler.sample_done_callback is None
-        assert scheduler.has_capacity(pending_groups=1, group_budget=2)
-        assert not scheduler.has_capacity(pending_groups=2, group_budget=2)
+        assert scheduler.has_capacity(pending_samples=GROUP_SIZE, group_size=GROUP_SIZE, sample_budget=2 * GROUP_SIZE)
+        assert not scheduler.has_capacity(
+            pending_samples=2 * GROUP_SIZE, group_size=GROUP_SIZE, sample_budget=2 * GROUP_SIZE
+        )
 
     def test_backfill_counts_samples(self):
-        scheduler = SampleBackfillSubmission(GROUP_SIZE)
+        scheduler = SampleBackfillSubmission()
+        full = dict(pending_samples=2 * GROUP_SIZE, group_size=GROUP_SIZE, sample_budget=2 * GROUP_SIZE)
 
         scheduler.on_submit([make_group(1), make_group(2)])
         assert scheduler.samples_in_flight == 2 * GROUP_SIZE
-        assert not scheduler.has_capacity(pending_groups=2, group_budget=2)
+        assert not scheduler.has_capacity(**full)
 
         for _ in range(GROUP_SIZE - 1):
             scheduler.sample_done_callback()
-        assert not scheduler.has_capacity(pending_groups=2, group_budget=2)
+        assert not scheduler.has_capacity(**full)
 
         scheduler.sample_done_callback()
-        assert scheduler.has_capacity(pending_groups=2, group_budget=2)
+        assert scheduler.has_capacity(**full)
 
     def test_orphaned_credits_resync_when_nothing_is_pending(self):
-        scheduler = SampleBackfillSubmission(GROUP_SIZE)
+        scheduler = SampleBackfillSubmission()
         # credits whose sample tasks never spawned
         scheduler.on_submit([make_group(1), make_group(2)])
 
-        assert scheduler.has_capacity(pending_groups=0, group_budget=2)
+        assert scheduler.has_capacity(pending_samples=0, group_size=GROUP_SIZE, sample_budget=2 * GROUP_SIZE)
         assert scheduler.samples_in_flight == 0
 
     def test_credits_survive_while_groups_are_pending(self):
-        scheduler = SampleBackfillSubmission(GROUP_SIZE)
+        scheduler = SampleBackfillSubmission()
         scheduler.on_submit([make_group(1)])
 
-        scheduler.has_capacity(pending_groups=1, group_budget=2)
+        scheduler.has_capacity(pending_samples=GROUP_SIZE, group_size=GROUP_SIZE, sample_budget=2 * GROUP_SIZE)
         assert scheduler.samples_in_flight == GROUP_SIZE
 
-    @pytest.mark.parametrize("scheduler_cls", [GroupLevelSubmission, lambda: SampleBackfillSubmission(GROUP_SIZE)])
+    @pytest.mark.parametrize("scheduler_cls", [GroupLevelSubmission, SampleBackfillSubmission])
     async def test_wait_for_progress_returns_on_group_completion(self, scheduler_cls):
         scheduler = scheduler_cls()
         blocker = asyncio.Event()
@@ -367,7 +370,7 @@ class TestSubmissionSchedulers:
         assert pending == set()
 
     async def test_wait_for_progress_returns_on_sample_completion(self):
-        scheduler = SampleBackfillSubmission(GROUP_SIZE)
+        scheduler = SampleBackfillSubmission()
         never = asyncio.create_task(asyncio.Event().wait())
 
         waiter = asyncio.create_task(scheduler.wait_for_progress({never}))

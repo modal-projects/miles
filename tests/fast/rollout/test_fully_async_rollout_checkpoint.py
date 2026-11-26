@@ -242,6 +242,34 @@ async def test_aborted_group_in_retry_queue_survives_checkpoint(monkeypatch, tmp
     assert all(sample.response == "" for sample in pending)
 
 
+async def test_a_recycled_group_keeps_its_own_size_through_a_checkpoint(monkeypatch, tmp_path: Path) -> None:
+    """The retry queue saves the prompt group itself, so a group drawn smaller resumes and trains at its own size."""
+    args = _checkpoint_args(
+        tmp_path,
+        n_samples_per_prompt=4,
+        use_dynamic_global_batch_size=True,
+        async_unused_samples_handler="retry",
+        async_max_concurrent_samples=4,
+    )
+    fn = make_fn(monkeypatch, args, FakeDataSource(), generate=_generate_and_reward)
+    group = make_group(6, size=3)
+    for sample in group:
+        sample.status = Sample.Status.ABORTED
+    await fn._output.put(DataBufferInput(prompt_group=group, group=group))
+
+    fn.save(tmp_path)
+    restored = make_fn(monkeypatch, args, FakeDataSource(), generate=_generate_and_reward)
+    restored.load(tmp_path)
+
+    [pending] = restored._retry_buffer
+    assert [sample.index for sample in pending] == [60, 61, 62]
+    try:
+        output = await asyncio.wait_for(restored(train_input(rollout_id=0)), timeout=5)
+    finally:
+        await restored.dispose()
+    assert [[sample.index for sample in group] for group in output.samples] == [[60, 61, 62]]
+
+
 async def test_a_group_blocked_in_put_is_restored_as_a_clean_retry(monkeypatch, tmp_path: Path) -> None:
     """A group saved while its put waits for buffer capacity is regenerated from its prompt after restore."""
     args = _checkpoint_args(tmp_path, async_data_buffer_capacity_factor=1)

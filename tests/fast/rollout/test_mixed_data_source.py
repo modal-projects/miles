@@ -322,6 +322,39 @@ class TestMixedRolloutDataSource:
             _make_source(tmp_path, datasets).load(tmp_path / "ckpt")
 
 
+class _LabelSizedMixedDataSource(MixedRolloutDataSource):
+    """Deals each prompt as many samples as its label is long, as a source choosing each group's size would."""
+
+    def group_size(self, prompt) -> int:
+        return len(prompt.label)
+
+
+class TestGroupSize:
+    def test_a_mix_deals_each_group_its_chosen_size_with_its_dataset_settings(self, tmp_path):
+        """The size is chosen per prompt, and every sample of a group still carries its dataset's settings."""
+        datasets = {
+            "short": {"path": str(_write_jsonl(tmp_path / "short.jsonl", ["a", "b"])), "samples_per_step": 1},
+            "long": {"path": str(_write_jsonl(tmp_path / "long.jsonl", ["ccc", "ddd"])), "samples_per_step": 1},
+        }
+        datasets["long"]["max_response_len"] = 7
+        source = _LabelSizedMixedDataSource(_make_source(tmp_path, datasets).args)
+
+        groups = source.get_samples(4)
+
+        assert sorted(len(group) for group in groups) == [1, 1, 3, 3]
+        for group in groups:
+            long = group[0].metadata["dataset_name"] == "long"
+            assert len(group) == (3 if long else 1)
+            assert all(sample.max_response_len == (7 if long else None) for sample in group)
+        assert [sample.index for group in groups for sample in group] == list(range(8))
+
+    def test_the_default_size_is_n_samples_per_prompt(self, tmp_path):
+        """A mix that chooses no size keeps the fixed groups of the run's --n-samples-per-prompt."""
+        source = _make_source(tmp_path, _two_datasets(tmp_path), n_samples_per_prompt=3)
+
+        assert {len(group) for group in source.get_samples(8)} == {3}
+
+
 class TestSha256:
     def test_a_matching_hash_passes_and_a_wrong_one_stops_startup(self, tmp_path):
         datasets = _two_datasets(tmp_path)

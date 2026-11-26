@@ -1949,7 +1949,7 @@ def miles_validate_args(args):
         assert args.async_max_concurrent_samples >= args.n_samples_per_prompt, (
             f"--async-max-concurrent-samples ({args.async_max_concurrent_samples}) must be at least "
             f"--n-samples-per-prompt ({args.n_samples_per_prompt}): the worker submits whole groups, "
-            f"so one group already puts n_samples_per_prompt trajectories in flight"
+            f"and one group may put n_samples_per_prompt trajectories in flight"
         )
 
     _resolve_rollout_functions(args)

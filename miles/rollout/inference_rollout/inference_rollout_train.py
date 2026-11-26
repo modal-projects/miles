@@ -121,7 +121,11 @@ async def generate_rollout_async(
     do_print = True
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
     while len(data) < target_data_size:
-        while scheduler.has_capacity(pending_groups=len(pendings), group_budget=target_data_size - len(data)):
+        while scheduler.has_capacity(
+            pending_samples=len(pendings) * args.n_samples_per_prompt,
+            group_size=args.n_samples_per_prompt,
+            sample_budget=(target_data_size - len(data)) * args.n_samples_per_prompt,
+        ):
             # get samples from the buffer and submit the generation requests.
             samples = data_source(args.over_sampling_batch_size)
             stamp_kv_cache_namespace(samples, namespace=kv_cache_namespace)
@@ -152,7 +156,10 @@ async def generate_rollout_async(
                 )
                 do_print = False
 
-            assert len(group) == args.n_samples_per_prompt
+            assert len(group) == args.n_samples_per_prompt, (
+                f"a group holds {len(group)} samples, not --n-samples-per-prompt ({args.n_samples_per_prompt}); "
+                f"only --fully-async trains groups of their own size"
+            )
             all_data.append(group)
             group, aborted = drop_aborted_trajectories(args, group)
             metric_gatherer.on_aborted_trajectories_drop(aborted)

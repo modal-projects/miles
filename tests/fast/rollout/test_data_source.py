@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from miles.rollout import data_source
 from miles.rollout.data_source import (
     DataSource,
     LegacyRolloutDataSourceWithBuffer,
@@ -117,3 +119,76 @@ def test_a_mix_checkpoint_starts_the_single_dataset_over_without_the_flag(tmp_pa
     source.sample_group_index = source.sample_index = 0
     source.load_sample_ids(tmp_path)
     assert (source.sample_group_index, source.sample_index) == (5, 10)
+
+
+class _WordTokenizer:
+    def __call__(self, prompts, add_special_tokens=False):
+        return {"input_ids": [prompt.split() for prompt in prompts]}
+
+
+class _LabelSizedDataSource(RolloutDataSource):
+    """Deals each prompt as many samples as its label names, as a source choosing each group's size would."""
+
+    def group_size(self, prompt: Sample) -> int:
+        return int(prompt.label)
+
+
+def _dataset_source(tmp_path: Path, monkeypatch, cls: type[RolloutDataSource], sizes: list[int]) -> RolloutDataSource:
+    monkeypatch.setattr(data_source, "_load_prompt_tokenizer_and_processor", lambda args: (_WordTokenizer(), None))
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(json.dumps({"input": f"p{i}", "label": str(size)}) + "\n" for i, size in enumerate(sizes)))
+    args = _make_args(
+        rollout_global_dataset=True,
+        rollout_shuffle=True,
+        rollout_seed=1,
+        n_samples_per_prompt=4,
+        prompt_data=str(path),
+        rollout_max_prompt_len=None,
+        input_key="input",
+        label_key="label",
+        metadata_key="metadata",
+        tool_key="tools",
+        multimodal_keys=None,
+        multimodal_token_space_processing=False,
+        shared_media_dir=None,
+        apply_chat_template=False,
+        apply_chat_template_kwargs={},
+    )
+    return cls(args)
+
+
+def _drawn(groups: list[list[Sample]]) -> list[list[tuple]]:
+    return [[(sample.prompt, sample.group_index, sample.index) for sample in group] for group in groups]
+
+
+class TestGroupSize:
+    def test_every_group_holds_n_samples_per_prompt_by_default(self, tmp_path: Path, monkeypatch) -> None:
+        """A run whose data source chooses no size keeps the fixed groups every recipe was tuned with."""
+        source = _dataset_source(tmp_path, monkeypatch, RolloutDataSource, sizes=[1, 2, 3])
+
+        assert [len(group) for group in source.get_samples(5)] == [4] * 5
+
+    def test_a_source_deals_each_group_the_size_it_chooses(self, tmp_path: Path, monkeypatch) -> None:
+        """Each group is one prompt copied as often as the source says, with ids that keep counting across groups."""
+        source = _dataset_source(tmp_path, monkeypatch, _LabelSizedDataSource, sizes=[1, 2, 3, 4])
+
+        groups = source.get_samples(4)
+
+        assert sorted(len(group) for group in groups) == [1, 2, 3, 4]
+        assert all(len(group) == int(group[0].label) for group in groups)
+        assert all(len({sample.prompt for sample in group}) == 1 for group in groups)
+        assert [group[0].group_index for group in groups] == [0, 1, 2, 3]
+        assert [sample.index for group in groups for sample in group] == list(range(10))
+
+    def test_a_resumed_source_deals_the_same_groups_at_the_same_sizes(self, tmp_path: Path, monkeypatch) -> None:
+        """The size comes from the prompt the restored position deals, so a resume repeats the groups it would have."""
+        sizes = [1, 2, 3, 4, 2]
+        source = _dataset_source(tmp_path, monkeypatch, _LabelSizedDataSource, sizes=sizes)
+        source.get_samples(3)
+        source.save(tmp_path / "ckpt")
+        expected = _drawn(source.get_samples(4))
+
+        resumed = _dataset_source(tmp_path, monkeypatch, _LabelSizedDataSource, sizes=sizes)
+        resumed.load(tmp_path / "ckpt")
+
+        assert _drawn(resumed.get_samples(4)) == expected

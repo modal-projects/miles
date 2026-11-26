@@ -79,9 +79,9 @@ class TestGroupErrors:
         class Scheduler:
             sample_done_callback = None
 
-            def has_capacity(self, *, pending_groups: int, group_budget: int) -> bool:
+            def has_capacity(self, *, pending_samples: int, group_size: int, sample_budget: int) -> bool:
                 # Bounded, so a loop that swallows the error ends instead of resubmitting forever.
-                return pending_groups == 0 and len(submitted) < 3
+                return pending_samples == 0 and len(submitted) < 3
 
             def on_submit(self, samples) -> None:
                 pass

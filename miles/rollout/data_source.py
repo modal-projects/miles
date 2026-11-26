@@ -127,7 +127,7 @@ class RolloutDataSource(DataSource):
         samples = []
         for prompt_sample in prompt_samples:
             group = []
-            for _ in range(self.args.n_samples_per_prompt):
+            for _ in range(self.group_size(prompt_sample)):
                 sample = copy.deepcopy(prompt_sample)
                 sample.group_index = self.sample_group_index
                 sample.index = self.sample_index
@@ -136,6 +136,10 @@ class RolloutDataSource(DataSource):
             self.sample_group_index += 1
             samples.append(group)
         return samples
+
+    def group_size(self, prompt: Sample) -> int:
+        """The size of the group drawn from ``prompt``: --n-samples-per-prompt unless a subclass deals fewer."""
+        return self.args.n_samples_per_prompt
 
     def save(self, directory: Path) -> None:
         if not self.args.rollout_global_dataset:
@@ -278,8 +282,8 @@ class RolloutDataResumeMismatch(ValueError):
 class MixedRolloutDataSource(DataSource):
     """Draws every request from the `--rollout-data-yaml-config` datasets in proportion to their weights.
 
-    Datasets are mixed at the prompt level, before each prompt is copied `--n-samples-per-prompt` times, so a
-    group always holds one prompt. Each dataset keeps its own position, epoch and shuffle.
+    Datasets are mixed at the prompt level, before each prompt is copied into its group (`group_size`), so a group
+    always holds one prompt. Each dataset keeps its own position, epoch and shuffle.
     """
 
     def __init__(self, args):
@@ -432,9 +436,13 @@ class MixedRolloutDataSource(DataSource):
                     dataset.shuffle(self.epoch_ids[name])
         return prompts
 
+    def group_size(self, prompt: Sample) -> int:
+        """The size of the group drawn from ``prompt``: --n-samples-per-prompt unless a subclass deals fewer."""
+        return self.args.n_samples_per_prompt
+
     def _make_group(self, config: RolloutDatasetConfig, prompt: Sample) -> list[Sample]:
         group = []
-        for _ in range(self.args.n_samples_per_prompt):
+        for _ in range(self.group_size(prompt)):
             sample = copy.deepcopy(prompt)
             sample.group_index = self.sample_group_index
             sample.index = self.sample_index

@@ -7,6 +7,7 @@ register_cpu_ci(est_time=60, suite="stage-b-cpu", labels=["fully-async"])
 
 import argparse
 import asyncio
+import itertools
 import logging
 from argparse import Namespace
 from collections import deque
@@ -77,6 +78,7 @@ def make_group(
     status: Sample.Status = Sample.Status.COMPLETED,
     weight_versions: list[str] | None = None,
     reward: float = 1,
+    size: int = N_SAMPLES_PER_PROMPT,
 ) -> list[Sample]:
     versions = [
         WeightVersionsPerCall(spans=[WeightVersionSpan(version=version, abs_start=0, abs_end=1)])
@@ -94,7 +96,7 @@ def make_group(
             status=status,
             weight_versions=list(versions),
         )
-        for i in range(N_SAMPLES_PER_PROMPT)
+        for i in range(size)
     ]
 
 
@@ -119,6 +121,8 @@ def make_args(**overrides) -> Namespace:
         rollout_submission_granularity=None,
         dynamic_sampling_filter_path=None,
         use_partial_groups_on_abort=False,
+        use_dynamic_global_batch_size=False,
+        log_passrate=False,
         reward_key=None,
         rollout_sample_filter_path=None,
         buffer_filter_path=None,
@@ -1879,7 +1883,7 @@ class _RecordingScheduler:
     def __init__(self) -> None:
         self.submitted: list[list[list[Sample]]] = []
 
-    def has_capacity(self, *, pending_groups: int, group_budget: int) -> bool:
+    def has_capacity(self, *, pending_samples: int, group_size: int, sample_budget: int) -> bool:
         return False
 
     def on_submit(self, groups: list[list[Sample]]) -> None:
@@ -1913,20 +1917,20 @@ class TestInFlightBudget:
         """Whole groups are submitted, so an odd sample budget buys only the groups that fit inside it."""
         fn = make_fn(monkeypatch, make_args(async_max_concurrent_samples=5), FakeDataSource())
 
-        assert fn._max_in_flight_groups() == 2
+        assert fn._max_in_flight_samples() == 2 * N_SAMPLES_PER_PROMPT
 
     def test_a_sample_budget_smaller_than_one_group_still_keeps_one_group_in_flight(self, monkeypatch) -> None:
         """A budget that floors to zero groups would stop the producer from ever submitting anything."""
         fn = make_fn(monkeypatch, make_args(async_max_concurrent_samples=1), FakeDataSource())
 
-        assert fn._max_in_flight_groups() == 1
+        assert fn._max_in_flight_samples() == N_SAMPLES_PER_PROMPT
 
     def test_an_unset_sample_budget_bounds_in_flight_groups_by_the_rollout_batch_size(self, monkeypatch) -> None:
         """Without --async-max-concurrent-samples the producer keeps one training batch in flight."""
         args = make_args(rollout_batch_size=7, async_max_concurrent_samples=None)
         fn = make_fn(monkeypatch, args, FakeDataSource())
 
-        assert fn._max_in_flight_groups() == 7
+        assert fn._max_in_flight_samples() == 7 * N_SAMPLES_PER_PROMPT
 
     async def test_a_finished_group_frees_exactly_one_submission_slot(self, monkeypatch) -> None:
         """At group granularity the slot a group holds comes back only when that whole group returns."""
@@ -2045,6 +2049,164 @@ class TestInFlightBudget:
         assert all(x.task.done() for x in fn._running_tasks)
 
         await fn.dispose()
+
+
+class SizedDataSource:
+    """Deals its prompts groups of the sizes it cycles through, as a data source choosing each group's size would."""
+
+    def __init__(self, sizes: list[int]):
+        self.sizes = itertools.cycle(sizes)
+        self.size_of: dict[int, int] = {}
+        self.num_get_calls = 0
+
+    def get_samples(self, num_samples):
+        assert num_samples == 1
+        self.num_get_calls += 1
+        group_index = self.num_get_calls
+        self.size_of[group_index] = size = next(self.sizes)
+        group = make_group(group_index, size=size)
+        for i, sample in enumerate(group):
+            sample.index = group_index * 100 + i
+        return [group]
+
+
+class _InFlightSamples:
+    """Finishes each group on the next loop turn, reporting each sample, and records the peak groups and samples."""
+
+    def __init__(self) -> None:
+        self.groups = self.samples = self.peak_groups = self.peak_samples = 0
+
+    async def __call__(self, state, group, sampling_params=None, evaluation=False, sample_done_callback=None):
+        self.groups += 1
+        self.samples += len(group)
+        self.peak_groups = max(self.peak_groups, self.groups)
+        self.peak_samples = max(self.peak_samples, self.samples)
+        await asyncio.sleep(0)
+        for sample in group:
+            sample.status = Sample.Status.COMPLETED
+            self.samples -= 1
+            sample_done_callback()
+        self.groups -= 1
+        return group
+
+
+class TestGroupsOfTheirOwnSize:
+    async def test_groups_of_mixed_sizes_train_as_drawn_within_the_sample_budget(self, monkeypatch) -> None:
+        """Each group trains with the samples its data source drew, and the budget holds them by their real sizes."""
+        source, generate = SizedDataSource([4, 8, 12, 16]), _InFlightSamples()
+        args = make_args(
+            n_samples_per_prompt=16,
+            use_dynamic_global_batch_size=True,
+            rollout_batch_size=4,
+            async_max_concurrent_samples=32,
+        )
+        fn = make_fn(monkeypatch, args, source, generate=generate)
+
+        steps = [await fn(train_input(rollout_id=rollout_id)) for rollout_id in (0, 1)]
+        await fn.dispose()
+
+        groups = [group for step in steps for group in step.samples]
+        assert len(groups) == 8
+        assert all(len(group) == source.size_of[group[0].group_index] for group in groups)
+        assert {len(group) for group in groups} == {4, 8, 12, 16}
+        # 32 samples buy two default-size groups, but the 4, 8 and 12 drawn first fit together
+        assert generate.peak_groups >= 3
+        assert generate.peak_samples <= 32
+
+    @pytest.mark.parametrize("size, groups", [(4, 2), (2, 3), (1, 5)])
+    async def test_smaller_groups_fill_the_same_sample_budget(self, monkeypatch, size, groups) -> None:
+        """The budget counts the samples the pending groups hold, with the default size reserved for the next one."""
+        source, generate = SizedDataSource([size]), _GatedGenerate()
+        args = make_args(
+            n_samples_per_prompt=4,
+            use_dynamic_global_batch_size=True,
+            async_max_concurrent_samples=8,
+            rollout_submission_granularity="group",
+        )
+        fn = make_fn(monkeypatch, args, source, generate=generate)
+
+        fn._worker = asyncio.create_task(fn._worker_loop())
+        await _settle()
+
+        assert source.num_get_calls == groups
+        await fn.dispose()
+        generate.release_all()
+        await _settle()
+
+    async def test_a_recycled_group_is_admitted_by_its_own_size(self, monkeypatch) -> None:
+        """A recycled group is already drawn, so the budget takes its real size instead of the default bound."""
+        source, generate = SizedDataSource([4]), _GatedGenerate()
+        args = make_args(n_samples_per_prompt=4, use_dynamic_global_batch_size=True, async_max_concurrent_samples=8)
+        fn = make_fn(monkeypatch, args, source, generate=generate)
+        recycled = [make_group(1, size=4), make_group(2, size=2), make_group(3, size=2)]
+        for group in recycled:
+            group[0].response = "partial"
+            fn._recycle(group, data_buffer.UnusedReason.ABORTED)
+
+        fn._worker = asyncio.create_task(fn._worker_loop())
+        await _settle()
+
+        # with the default size as the bound, the second group of 2 would wait at 6 of 8 samples
+        assert [id(x.prompt_group) for x in fn._running_tasks] == [id(group) for group in recycled]
+        assert [len(x.prompt_group) for x in fn._running_tasks] == [4, 2, 2]
+        assert all(sample.response == "" for group in recycled for sample in group)
+        assert source.num_get_calls == 0
+        await fn.dispose()
+        generate.release_all()
+        await _settle()
+
+    def test_a_group_larger_than_n_samples_per_prompt_is_refused(self, monkeypatch) -> None:
+        """The budget reserves at most --n-samples-per-prompt for a group it has not drawn yet."""
+        fn = make_fn(monkeypatch, make_args(use_dynamic_global_batch_size=True), SizedDataSource([3]))
+
+        with pytest.raises(AssertionError, match="1 to --n-samples-per-prompt"):
+            fn._submit_one_group()
+
+    def test_a_smaller_group_requires_the_dynamic_global_batch_size(self, monkeypatch) -> None:
+        """A fixed global batch would trim or fail on a batch whose sample count the group sizes vary."""
+        fn = make_fn(monkeypatch, make_args(), SizedDataSource([1]))
+
+        with pytest.raises(AssertionError, match="requires --use-dynamic-global-batch-size"):
+            fn._submit_one_group()
+
+    def test_a_smaller_group_is_refused_under_log_passrate(self, monkeypatch) -> None:
+        """pass@k counts a group complete only at --n-samples-per-prompt, so a smaller one would drop out unseen."""
+        args = make_args(use_dynamic_global_batch_size=True, log_passrate=True)
+        fn = make_fn(monkeypatch, args, SizedDataSource([1]))
+
+        with pytest.raises(AssertionError, match="--log-passrate"):
+            fn._submit_one_group()
+
+    async def test_the_drain_takes_a_group_of_its_own_size(self, monkeypatch) -> None:
+        """A group is complete at the size its prompt group was drawn with, not at --n-samples-per-prompt."""
+        fn = make_fn(monkeypatch, make_args(rollout_batch_size=1, n_samples_per_prompt=4), FakeDataSource())
+        fn._output, _ = make_buffer()
+        group = make_group(1, size=3)
+        await put_group(fn._output, group)
+        fn._worker = _parked_task()
+
+        output = await fn(train_input(rollout_id=0))
+
+        assert output.samples == [group]
+        fn._worker.cancel()
+
+    @pytest.mark.parametrize("trained, accepted", [(2, True), (4, False)])
+    async def test_a_partial_group_is_bounded_by_its_own_prompt_group(self, monkeypatch, trained, accepted) -> None:
+        """A partial group keeps some of its own draws; more than its prompt group held is a broken group."""
+        args = make_args(rollout_batch_size=1, n_samples_per_prompt=4, use_partial_groups_on_abort=True)
+        fn = make_fn(monkeypatch, args, FakeDataSource())
+        fn._output, _ = make_buffer()
+        await fn._output.put(
+            data_buffer.DataBufferInput(prompt_group=make_group(1, size=3), group=make_group(1, size=trained))
+        )
+        fn._worker = _parked_task()
+
+        if accepted:
+            assert [len(group) for group in (await fn(train_input(rollout_id=0))).samples] == [trained]
+        else:
+            with pytest.raises(AssertionError):
+                await fn(train_input(rollout_id=0))
+        fn._worker.cancel()
 
 
 class TestStalenessAdmission:
@@ -2202,13 +2364,13 @@ class TestDrain:
 
         assert [data_buffer.first_sample(group).index for group in output.samples] == [10, 30, 50]
 
-    async def test_a_group_that_does_not_hold_n_samples_per_prompt_is_refused(self, monkeypatch) -> None:
+    async def test_a_group_that_does_not_hold_its_prompt_groups_samples_is_refused(self, monkeypatch) -> None:
         """A short group would silently train on fewer trajectories than the advantage baseline assumes."""
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource())
         buffer, _ = make_buffer()
         fn._output = buffer
-        short = make_group(1)[:1]
-        await buffer.put(data_buffer.DataBufferInput(prompt_group=short, group=short))
+        prompt_group = make_group(1)
+        await buffer.put(data_buffer.DataBufferInput(prompt_group=prompt_group, group=prompt_group[:1]))
         fn._worker = _parked_task()
 
         with pytest.raises(AssertionError):

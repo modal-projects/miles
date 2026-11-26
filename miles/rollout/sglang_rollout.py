@@ -560,7 +560,10 @@ async def generate_rollout_async(
                 )
                 do_print = False
 
-            assert len(group) == args.n_samples_per_prompt
+            assert len(group) == args.n_samples_per_prompt, (
+                f"a group holds {len(group)} samples, not --n-samples-per-prompt ({args.n_samples_per_prompt}); "
+                f"only --fully-async trains groups of their own size"
+            )
             all_data.append(group)
             group, aborted = drop_aborted_trajectories(args, group)
             metric_gatherer.on_aborted_trajectories_drop(aborted)

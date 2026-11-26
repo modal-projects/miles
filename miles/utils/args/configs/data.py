@@ -170,7 +170,15 @@ class DataConfig(BaseConfig):
             ),
         ),
     ] = None
-    n_samples_per_prompt: A[int, Arg(help="Number of responses for each prompt in generation")] = 1
+    n_samples_per_prompt: A[
+        int,
+        Arg(
+            help=(
+                "Number of responses for each prompt in generation. Under --fully-async a data source may draw fewer "
+                "for a prompt (RolloutDataSource.group_size), never more."
+            )
+        ),
+    ] = 1
 
     num_steps_per_rollout: A[
         int | None,

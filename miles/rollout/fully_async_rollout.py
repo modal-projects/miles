@@ -167,25 +167,30 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
     # -------------------------- producer --------------------------
 
-    def _max_in_flight_groups(self) -> int:
+    def _max_in_flight_samples(self) -> int:
+        n = self.args.n_samples_per_prompt
         if (x := self.args.async_max_concurrent_samples) is not None:
-            # Whole groups are submitted, so the sample budget floors to a group count.
-            groups = max(1, x // self.args.n_samples_per_prompt)
+            samples = x
         else:
-            groups = self.args.rollout_batch_size
-        if self._request_capacity is None:
-            return groups
-        recent = sum(self._recent_loads, Counter())
-        # A session holds a request only for its generating share of its life.
-        generating_share = recent["turn_seconds"] / recent["session_seconds"] if recent["session_seconds"] else 1.0
-        sessions = self._request_capacity / generating_share
-        return min(groups, max(1, int(sessions // self.args.n_samples_per_prompt)))
+            samples = self.args.rollout_batch_size * n
+        if self._request_capacity is not None:
+            recent = sum(self._recent_loads, Counter())
+            # A session holds a request only for its generating share of its life.
+            generating_share = recent["turn_seconds"] / recent["session_seconds"] if recent["session_seconds"] else 1.0
+            samples = min(samples, int(self._request_capacity / generating_share))
+        # Whole groups are submitted, so the budget floors to whole groups of the default size.
+        return max(1, samples // n) * n
+
+    def _next_group_size(self) -> int:
+        # A recycled group's size is known; the data source's next one is not drawn yet, so the default size bounds it.
+        return len(self._retry_buffer[0]) if self._retry_buffer else self.args.n_samples_per_prompt
 
     def _submit_one_group(self) -> asyncio.Task:
         samples = [self._retry_buffer.popleft()] if self._retry_buffer else self.data_source.get_samples(1)
         stamp_kv_cache_namespace(samples, namespace=self._curr_kv_cache_namespace)
         self._scheduler.on_submit(samples)
         [prompt_group] = samples
+        _check_group_size(self.args, prompt_group)
         for sample in prompt_group:
             sample.request_priority = self._admitted_groups
         self._admitted_groups += 1
@@ -209,7 +214,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             await self._producer_resumed.wait()
             self._admission_changed.clear()
             while (admits := self._output.admits(in_flight=len(active))) and self._scheduler.has_capacity(
-                pending_groups=len(active), group_budget=self._max_in_flight_groups()
+                pending_samples=sum(len(x.prompt_group) for x in self._running_tasks),
+                group_size=self._next_group_size(),
+                sample_budget=self._max_in_flight_samples(),
             ):
                 active.add(self._submit_one_group())
             if admits:
@@ -269,8 +276,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         if prefix := recent["prefix_tokens"]:
             kept = f"; later turns found {1 - recent['uncached_prefix_tokens'] / prefix:.0%} of earlier context cached"
         logger.info(
-            "Admission: at most %d groups in flight for %s requests at once%s",
-            self._max_in_flight_groups(),
+            "Admission: at most %d samples in flight for %s requests at once%s",
+            self._max_in_flight_samples(),
             self._request_capacity,
             kept,
         )
@@ -312,9 +319,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
         for entry in entries:
             if args.use_partial_groups_on_abort:
-                assert 0 < len(entry.group) <= args.n_samples_per_prompt
+                assert 0 < len(entry.group) <= len(entry.prompt_group)
             else:
-                assert len(entry.group) == args.n_samples_per_prompt
+                assert len(entry.group) == len(entry.prompt_group)
 
             if do_print:
                 sample = first_sample(entry.group)
@@ -396,6 +403,24 @@ class _FullyAsyncRolloutState:
     retry_buffer: list[list[Sample]]
     running: list[list[Sample]]
     output: Any
+
+
+def _check_group_size(args, prompt_group: list[Sample]) -> None:
+    size, n = len(prompt_group), args.n_samples_per_prompt
+    assert 0 < size <= n, (
+        f"a prompt group holds 1 to --n-samples-per-prompt ({n}) samples, the most the in-flight budget reserves "
+        f"for a group not yet drawn, but this one holds {size}"
+    )
+    if size == n:
+        return
+    assert args.use_dynamic_global_batch_size, (
+        f"a prompt group of {size} samples, not --n-samples-per-prompt ({n}), varies the sample count, so it requires "
+        f"--use-dynamic-global-batch-size"
+    )
+    assert not args.log_passrate, (
+        f"--log-passrate estimates pass@k over groups of --n-samples-per-prompt ({n}) samples, so it cannot take a "
+        f"prompt group of {size}"
+    )
 
 
 def _copy_and_reset_for_retry(prompt_group: list[Sample]) -> list[Sample]:

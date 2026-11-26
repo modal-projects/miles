@@ -495,7 +495,7 @@ class DefaultMultiDataBuffer(DataBuffer):
         return self._inners[trainer_model_id]
 
 
-# TODO: a policy absent from a trajectory shortens its group below n_samples_per_prompt, which the drain refuses
+# TODO: a policy absent from a trajectory shortens its group below its prompt group, which the drain refuses
 def _parse_data_buffer_paths(values: Iterable[str] | None) -> dict[str, str]:
     ans: dict[str, str] = {}
     for value in values or []:
