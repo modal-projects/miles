@@ -74,9 +74,12 @@ def _filtered_sample() -> Sample:
     return sample
 
 
+@pytest.mark.parametrize("kl_coef", [0.0, 0.3])
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
 @pytest.mark.parametrize("ci_test", [False, True])
-def test_filtered_loss_matches_dense_support_gradient(single_rank: None, mode: str, ci_test: bool) -> None:
+def test_filtered_loss_matches_dense_support_gradient(
+    single_rank: None, mode: str, ci_test: bool, kl_coef: float
+) -> None:
     sample = _filtered_sample()
     validate_rollout_topk_logprobs_sample(sample, 3)
     np.testing.assert_array_equal(sample.rollout_topk_token_ids, [[3, 2, -1]])
@@ -89,6 +92,7 @@ def test_filtered_loss_matches_dense_support_gradient(single_rank: None, mode: s
         rollout_sampling_logprobs_mode="support",
         use_sampling_support_replay=True,
         entropy_coef=0.03,
+        score_centering_kl_coef=kl_coef,
     )
     validate_score_centering_args(args)
     data = convert_samples_to_train_data(args, [sample], {}, None, None)
@@ -123,12 +127,14 @@ def test_filtered_loss_matches_dense_support_gradient(single_rank: None, mode: s
     else:
         weight = torch.where((ratio >= 0.5) & (ratio <= 5), ratio, 0)
     support_entropy = -(logp.exp() * logp).sum()
-    reference = -0.7 * (weight[0] * logp[0] - (q * weight * logp).sum()) - 0.03 * support_entropy
+    kl = (logp.exp() * (logp - q.log())).sum()
+    reference = -0.7 * (weight[0] * logp[0] - (q * weight * logp).sum()) - 0.03 * support_entropy + kl_coef * kl
     expected = torch.autograd.grad(reference, reference_logits)[0]
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-6)
     torch.testing.assert_close(actual[0, 1, [0, 1, 4, 5, 6, 7]], torch.zeros(6), atol=1e-6, rtol=0)
     torch.testing.assert_close(metrics["sc_rollout_head_mass"], torch.ones_like(metrics["sc_rollout_head_mass"]))
     torch.testing.assert_close(metrics["entropy_loss"], support_entropy.detach())
+    torch.testing.assert_close(metrics["sc_kl"], kl.detach())
 
 
 @pytest.mark.parametrize("ci_test", [False, True])

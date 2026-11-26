@@ -332,6 +332,9 @@ def test_tiny_tails_and_padding_are_finite_and_detached(mode: str) -> None:
         "sc_rollout_head_mass": metrics.rollout_head_mass,
         "sc_tail_ratio": metrics.tail_ratio,
         "sc_importance_weight": metrics.importance_weight,
+        "sc_ratio_outside": metrics.ratio_outside,
+        "sc_kl": metrics.kl,
+        "sc_forward_kl": metrics.forward_kl,
     }
     assert list(logged) == list(expected)
     assert all(logged[key] is value and not value.requires_grad for key, value in expected.items())

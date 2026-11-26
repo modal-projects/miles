@@ -1,5 +1,6 @@
 """Exercise candidate transport through the real rollout and training consumers."""
 
+from argparse import Namespace
 from copy import deepcopy
 
 import numpy as np
@@ -12,6 +13,7 @@ from miles.backends.training_utils.data.context_parallel import get_sum_of_sampl
 from miles.backends.training_utils.loss.hub.losses import get_loss_function
 from miles.backends.training_utils.loss.hub.score_centering import ScoreCenteringInputs, score_centering_loss
 from miles.backends.training_utils.loss.objective import compute_advantages_and_returns, loss_function
+from miles.backends.training_utils.metrics.log_utils import log_train_step
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_raw
 from miles.rollout.generate_utils.sample_utils import merge_samples
@@ -146,3 +148,13 @@ def test_shared_advantages_loss_scaling_and_regularization(
     torch.testing.assert_close(logits.grad, reference_logits.grad, atol=1e-6, rtol=1e-5)
     assert normalizer == 1 and "entropy_loss" in metrics["keys"] and "kl_loss" in metrics["keys"]
     assert "train_rollout_kl" in metrics["keys"]
+    logged = log_train_step(
+        Namespace(trainer_model_id=None, wandb_always_use_train_step=False),
+        dict(zip(metrics["keys"], metrics["values"][1:].tolist(), strict=True)),
+        grad_norm=0.0,
+        rollout_id=0,
+        step_id=0,
+        num_steps_per_rollout=1,
+        should_log=False,
+    )
+    assert {"train/sc_kl", "train/sc_forward_kl", "train/sc_ratio_outside"} <= logged.keys()
