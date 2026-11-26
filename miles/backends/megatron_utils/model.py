@@ -196,12 +196,6 @@ def setup_model_and_optimizer(
             )
         return model, None, None
 
-    if is_bf16_stochastic_rounding_enabled() and (is_lora_enabled(args) or is_multi_lora_enabled(args)):
-        raise ValueError(
-            "OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG=1 rounds the weights a run trains and syncs; a LoRA run "
-            "trains only adapters and never syncs its frozen base, so the rounding has nothing to do"
-        )
-
     # Optimizer
     kwargs = {}
     for f in dataclasses.fields(OptimizerConfig):
