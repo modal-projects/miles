@@ -563,49 +563,19 @@ class TestSteps:
 class TestOutput:
     async def test_the_output_counts_every_group_put_since_the_start(self) -> None:
         buffer = _make_buffer().buffer
-        assert buffer.output() == {"produced": 0, "held": 0.0}
+        assert buffer.output() == {"produced": 0}
         for group_index in (1, 2, 3):
             await _put(buffer, _make_finished_group(group_index))
         await buffer.get(num_groups=2)
 
-        assert buffer.output() == {"produced": 3, "held": 0.0}
+        assert buffer.output() == {"produced": 3}
 
     async def test_a_group_rejected_on_put_was_not_produced(self) -> None:
         buffer = _make_buffer().buffer
         await _put(buffer, _make_finished_group(1, status=Sample.Status.ABORTED))
         await _put(buffer, _make_finished_group(2))
 
-        assert buffer.output()["produced"] == 1
-
-    async def test_a_put_blocked_by_a_full_buffer_holds_the_producer_until_it_ends(self) -> None:
-        buffer = _make_buffer(async_data_buffer_capacity_factor=1.0).buffer
-        await _put(buffer, _make_finished_group(1))
-        blocked = asyncio.create_task(_put(buffer, _make_finished_group(2)))
-        await asyncio.sleep(0.05)
-        assert buffer.output()["held"] >= 0.05
-
-        await buffer.get(num_groups=1)
-        await blocked
-        held = buffer.output()["held"]
-        await asyncio.sleep(0.05)
-
-        assert held >= 0.05 and buffer.output()["held"] == held
-
-    async def test_a_refused_admission_holds_the_producer_until_it_admits(self) -> None:
-        buffer = _make_buffer(async_submit_within_staleness=True, max_weight_staleness=0).buffer
-        assert not buffer.admits(in_flight=0)
-        await asyncio.sleep(0.05)
-        assert buffer.output()["held"] >= 0.05
-
-        # A get waiting for groups widens the window by one batch.
-        get = asyncio.create_task(buffer.get(num_groups=1))
-        await asyncio.sleep(0)
-        assert buffer.admits(in_flight=0)
-        held = buffer.output()["held"]
-        await asyncio.sleep(0.05)
-
-        assert held >= 0.05 and buffer.output()["held"] == held
-        get.cancel()
+        assert buffer.output() == {"produced": 1}
 
 
 # ================================ metrics =================================

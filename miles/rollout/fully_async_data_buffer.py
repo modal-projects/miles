@@ -136,8 +136,8 @@ class DataBuffer(ABC):
         """The policy's last step, one get's start to the next, once: seconds, waited, consumed."""
         return None
 
-    def output(self) -> dict[str, float] | None:
-        """Groups put and seconds the producer was held, both counted from the start; None if it cannot tell."""
+    def output(self) -> dict[str, int] | None:
+        """The groups put since the start; None if the buffer cannot tell."""
         return None
 
     def drop_saved_state(self, state: Any, *, reason: str) -> None:
@@ -202,9 +202,6 @@ class DefaultDataBuffer(DataBuffer):
         self._get_pending = False
         self._short_since: float | None = None
         self._produced = 0
-        self._held = 0.0
-        self._full_since: float | None = None
-        self._refused_since: float | None = None
         self._last_get: _Get | None = None
         self._step: dict[str, float] | None = None
 
@@ -230,11 +227,7 @@ class DefaultDataBuffer(DataBuffer):
 
         async with self._cond:
             while len(self._buffer) >= self._capacity:
-                self._full_since = self._full_since or time.monotonic()
                 await self._cond.wait()
-            if self._full_since:
-                self._held += time.monotonic() - self._full_since
-                self._full_since = None
             self._buffer.append(input)
             self._produced += 1
             self._cond.notify_all()
@@ -285,10 +278,8 @@ class DefaultDataBuffer(DataBuffer):
         step, self._step = self._step, None
         return step
 
-    def output(self) -> dict[str, float]:
-        now = time.monotonic()
-        holding = sum(now - since for since in (self._full_since, self._refused_since) if since is not None)
-        return {"produced": self._produced, "held": self._held + holding}
+    def output(self) -> dict[str, int]:
+        return {"produced": self._produced}
 
     async def _take(self, *, num_groups: int, current_version: int | None) -> tuple[list[DataBufferInput], float]:
         if current_version is not None:
@@ -385,13 +376,7 @@ class DefaultDataBuffer(DataBuffer):
         # that enters the buffer is trained at most max_weight_staleness versions later; random selection can keep
         # a group longer, until the staleness filter drops it.
         window = self._args.max_weight_staleness + int(self._get_pending)
-        admits = len(self._buffer) + in_flight < window * self._args.rollout_batch_size
-        if admits and self._refused_since is not None:
-            self._held += time.monotonic() - self._refused_since
-            self._refused_since = None
-        elif not admits and self._refused_since is None:
-            self._refused_since = time.monotonic()
-        return admits
+        return len(self._buffer) + in_flight < window * self._args.rollout_batch_size
 
     def drop_saved_state(self, state: list[DataBufferInput], *, reason: str) -> None:
         record_dropped_samples([[entry.prompt_group, entry.group] for entry in state])

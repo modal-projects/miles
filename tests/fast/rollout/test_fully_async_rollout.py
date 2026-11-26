@@ -221,7 +221,7 @@ async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypa
     minute.set()
     await real_sleep(0.05)
 
-    assert reports == [{"produced": 0, "held": 0.0}, {"produced": 2, "held": 0.0}]
+    assert reports == [{"produced": 0}, {"produced": 2}]
     await fn.dispose()
 
 

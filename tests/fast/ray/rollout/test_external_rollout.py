@@ -180,7 +180,7 @@ def test_a_step_the_service_refuses_is_only_logged(service, caplog):
 def test_the_rollouts_output_goes_to_the_service_which_replies_its_capacity(service, caplog):
     replies, requests = service
     replies["/load"] = [(200, {"capacity": 96}), (200, {}), (404, {"detail": "Not Found"})]
-    load = {"produced": 2, "held": 6.0}
+    load = {"produced": 2}
 
     capacities = [asyncio.run(ExternalRollout("https://control").report_load(load)) for _ in range(3)]
 
