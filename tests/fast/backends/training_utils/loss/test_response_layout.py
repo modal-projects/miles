@@ -273,6 +273,7 @@ def _score_centering_args(**overrides):
         score_centering_mis_low=0.5,
         score_centering_mis_high=5.0,
         score_centering_kl_coef=0.0,
+        score_centering_kl_direction="forward",
         rollout_top_logprobs_num=TOP_K,
         entropy_coef=0.0,
     )

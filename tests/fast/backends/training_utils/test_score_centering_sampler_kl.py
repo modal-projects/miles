@@ -86,9 +86,12 @@ def test_zero_coefficient_is_bit_identical_to_the_estimator_without_kl(mode: str
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("kl_direction", ["forward", "reverse"])
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
 @pytest.mark.parametrize("sampling_support", [False, True])
-def test_kl_value_and_logit_gradient_match_the_dense_support_oracle(mode: str, sampling_support: bool) -> None:
+def test_kl_value_and_logit_gradient_match_the_dense_support_oracle(
+    mode: str, sampling_support: bool, kl_direction: str
+) -> None:
     generator = torch.Generator().manual_seed(3)
     logits = torch.randn(3, 9, generator=generator, dtype=torch.float64)
     support = torch.tensor([[4, 1, 6, -1], [0, 2, 3, 8], [7, 5, -1, -1]])
@@ -116,6 +119,7 @@ def test_kl_value_and_logit_gradient_match_the_dense_support_oracle(mode: str, s
                 advantages=torch.tensor([1.3, -0.4, 0.8], dtype=torch.float64),
                 mode=mode,
                 kl_coef=kl_coef,
+                kl_direction=kl_direction,
             )
         )
         return loss, metrics, torch.autograd.grad(loss.sum(), scores)[0]
@@ -123,19 +127,27 @@ def test_kl_value_and_logit_gradient_match_the_dense_support_oracle(mode: str, s
     log_p = support_log_probs(logits)
     log_ratio = torch.where(valid, log_p - log_q, 0.0)
     kl = (log_p.exp() * log_ratio).sum(-1)
-    logit_grad = torch.where(valid, log_p.exp() * (log_ratio - kl[:, None]), 0.0) / 0.7
+    forward_kl = -(log_q.exp() * log_ratio).sum(-1)
+    if kl_direction == "forward":
+        # d/dz of sum_c q_c (log q_c - log p_c), p the support softmax of z / T: (p - q) / T on the support.
+        penalty = forward_kl
+        logit_grad = torch.where(valid, log_p.exp() - log_q.exp(), 0.0) / 0.7
+    else:
+        penalty = kl
+        logit_grad = torch.where(valid, log_p.exp() * (log_ratio - kl[:, None]), 0.0) / 0.7
     expected_grad = torch.zeros_like(logits).scatter_add(-1, support.clamp_min(0), logit_grad)
 
     loss_without_kl, _, grad_without_kl = run(0.0)
     loss, metrics, grad = run(0.3)
     torch.testing.assert_close(metrics.kl, kl, rtol=1e-12, atol=1e-12)
-    torch.testing.assert_close(metrics.forward_kl, -(log_q.exp() * log_ratio).sum(-1), rtol=1e-12, atol=1e-12)
-    torch.testing.assert_close(loss - loss_without_kl, 0.3 * kl, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(metrics.forward_kl, forward_kl, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(loss - loss_without_kl, 0.3 * penalty, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(grad - grad_without_kl, 0.3 * expected_grad, rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.parametrize("kl_direction", ["forward", "reverse"])
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
-def test_kl_reaches_zero_advantage_rows_and_skips_rows_without_head_slots(mode: str) -> None:
+def test_kl_reaches_zero_advantage_rows_and_skips_rows_without_head_slots(mode: str, kl_direction: str) -> None:
     logits = torch.randn(3, 4, generator=torch.Generator().manual_seed(8), dtype=torch.float64, requires_grad=True)
     log_q = torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float64).log().expand(3, 4)
     train_nan = torch.tensor([[False] * 4, [True, False, False, False], [True] * 4])
@@ -152,14 +164,20 @@ def test_kl_reaches_zero_advantage_rows_and_skips_rows_without_head_slots(mode: 
             advantages=torch.zeros(3, dtype=torch.float64),
             mode=mode,
             kl_coef=0.3,
+            kl_direction=kl_direction,
         )
     )
     grad = torch.autograd.grad(loss.sum(), logits)[0]
 
     log_p = logits.detach()[0].log_softmax(-1)
-    kl = (log_p.exp() * (log_p - log_q[0])).sum()
+    if kl_direction == "forward":
+        kl = (log_q[0].exp() * (log_q[0] - log_p)).sum()
+        expected_grad = log_p.exp() - log_q[0].exp()
+    else:
+        kl = (log_p.exp() * (log_p - log_q[0])).sum()
+        expected_grad = log_p.exp() * (log_p - log_q[0] - kl)
     torch.testing.assert_close(loss[0], 0.3 * kl, rtol=1e-12, atol=1e-12)
-    torch.testing.assert_close(grad[0], 0.3 * log_p.exp() * (log_p - log_q[0] - kl), rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(grad[0], 0.3 * expected_grad, rtol=1e-12, atol=1e-12)
     assert grad[0].abs().sum() > 0
     assert torch.isfinite(loss[1]) and torch.isfinite(grad[1]).all()
     assert all(torch.isfinite(value).all() for value in metrics.as_log_dict().values())
@@ -251,3 +269,17 @@ def test_positive_kl_coefficient_requires_support_log_probs() -> None:
         validate_score_centering_args(_args(score_centering_kl_coef=0.1))
     validate_score_centering_args(_args(score_centering_kl_coef=0.0))
     validate_score_centering_args(_args(score_centering_kl_coef=0.1, **_SUPPORT_REPLAY))
+
+
+def test_kl_direction_must_be_forward_or_reverse() -> None:
+    logits = torch.zeros(1, 2, dtype=torch.float64)
+    with pytest.raises(ValueError, match="forward or reverse"):
+        ScoreCenteringInputs(
+            train_log_probs=logits[:, 0],
+            train_head_log_probs=logits,
+            rollout_log_probs=logits[:, 0],
+            rollout_head_log_probs=logits,
+            head_mask=torch.ones(1, 2, dtype=torch.bool),
+            advantages=torch.zeros(1, dtype=torch.float64),
+            kl_direction="both",
+        )

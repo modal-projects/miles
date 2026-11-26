@@ -74,11 +74,12 @@ def _filtered_sample() -> Sample:
     return sample
 
 
+@pytest.mark.parametrize("kl_direction", ["forward", "reverse"])
 @pytest.mark.parametrize("kl_coef", [0.0, 0.3])
 @pytest.mark.parametrize("mode", ["none", "tis", "mis"])
 @pytest.mark.parametrize("ci_test", [False, True])
 def test_filtered_loss_matches_dense_support_gradient(
-    single_rank: None, mode: str, ci_test: bool, kl_coef: float
+    single_rank: None, mode: str, ci_test: bool, kl_coef: float, kl_direction: str
 ) -> None:
     sample = _filtered_sample()
     validate_rollout_topk_logprobs_sample(sample, 3)
@@ -93,6 +94,7 @@ def test_filtered_loss_matches_dense_support_gradient(
         use_sampling_support_replay=True,
         entropy_coef=0.03,
         score_centering_kl_coef=kl_coef,
+        score_centering_kl_direction=kl_direction,
     )
     validate_score_centering_args(args)
     data = convert_samples_to_train_data(args, [sample], {}, None, None)
@@ -128,7 +130,9 @@ def test_filtered_loss_matches_dense_support_gradient(
         weight = torch.where((ratio >= 0.5) & (ratio <= 5), ratio, 0)
     support_entropy = -(logp.exp() * logp).sum()
     kl = (logp.exp() * (logp - q.log())).sum()
-    reference = -0.7 * (weight[0] * logp[0] - (q * weight * logp).sum()) - 0.03 * support_entropy + kl_coef * kl
+    forward_kl = (q * (q.log() - logp)).sum()
+    penalty = forward_kl if kl_direction == "forward" else kl
+    reference = -0.7 * (weight[0] * logp[0] - (q * weight * logp).sum()) - 0.03 * support_entropy + kl_coef * penalty
     expected = torch.autograd.grad(reference, reference_logits)[0]
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-6)
     torch.testing.assert_close(actual[0, 1, [0, 1, 4, 5, 6, 7]], torch.zeros(6), atol=1e-6, rtol=0)

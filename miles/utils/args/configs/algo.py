@@ -120,11 +120,21 @@ class AlgoConfig(BaseConfig):
         float,
         Arg(
             help=(
-                "Coefficient of the reverse KL from the trainer to the sampler over the replayed sampling support, "
+                "Coefficient of the KL between the sampler and the trainer over the replayed sampling support, "
                 "added to the score-centering loss of every response token. Requires sampling-support replay."
             )
         ),
     ] = 0.0
+    score_centering_kl_direction: A[
+        str,
+        Arg(
+            choices=["forward", "reverse"],
+            help=(
+                "Direction of the score-centering KL: forward is KL(sampler || trainer), the divergence the stale "
+                "sampler's policy gradient drifts along; reverse is KL(trainer || sampler)."
+            ),
+        ),
+    ] = "forward"
     custom_loss_function_path: A[
         CustomFunctionConfig | None,
         Arg(

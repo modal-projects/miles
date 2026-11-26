@@ -33,6 +33,7 @@ class ScoreCenteringInputs:
     mis_low: float = 0.5
     mis_high: float = 5.0
     kl_coef: float = 0.0
+    kl_direction: str = "forward"
     eps: float = 1e-6
 
     def __post_init__(self) -> None:
@@ -46,6 +47,8 @@ class ScoreCenteringInputs:
             or self.head_mask.shape != self.train_head_log_probs.shape
         ):
             raise ValueError("Score-centering sample tensors must be [tokens] and head tensors [tokens, candidates]")
+        if self.kl_direction not in ("forward", "reverse"):
+            raise ValueError(f"Score-centering KL direction must be forward or reverse, got {self.kl_direction!r}")
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,11 @@ def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, Sc
     correction = (residual * scored_log_probs(train_head, residual)).sum(-1)
     loss = -inputs.advantages.detach() * (weight * scored_log_probs(inputs.train_log_probs, weight) - correction)
     if inputs.kl_coef > 0:
-        loss = loss + inputs.kl_coef * _head_kl(train_head, rollout_head.detach(), inputs.head_mask)
+        if inputs.kl_direction == "forward":
+            sampler_kl = _head_kl(rollout_head.detach(), train_head, inputs.head_mask)
+        else:
+            sampler_kl = _head_kl(train_head, rollout_head.detach(), inputs.head_mask)
+        loss = loss + inputs.kl_coef * sampler_kl
     return loss, ScoreCenteringMetrics(
         correction=correction.detach(),
         train_head_mass=p_mass,
