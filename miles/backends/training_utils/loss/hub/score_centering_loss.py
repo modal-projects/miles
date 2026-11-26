@@ -167,6 +167,7 @@ def score_centering_objective(
             tis_clip=args.score_centering_tis_clip,
             mis_low=args.score_centering_mis_low,
             mis_high=args.score_centering_mis_high,
+            kl_coef=args.score_centering_kl_coef,
         ),
     )
     pg_loss = reduce(token_loss)

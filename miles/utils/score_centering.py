@@ -4,7 +4,7 @@ import math
 import os
 from argparse import Namespace
 
-from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sampling
+from miles.utils.rollout_topk_logprobs import requests_support_logprobs, validate_rollout_topk_logprobs_sampling
 
 
 def validate_score_centering_args(args: Namespace) -> None:
@@ -17,6 +17,15 @@ def validate_score_centering_args(args: Namespace) -> None:
     low, high = args.score_centering_mis_low, args.score_centering_mis_high
     if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
         raise ValueError("Score-centering MIS bounds must be finite with 0 < low <= high")
+    kl_coef = args.score_centering_kl_coef
+    if not math.isfinite(kl_coef) or kl_coef < 0:
+        raise ValueError("--score-centering-kl-coef must be finite and non-negative")
+    if kl_coef > 0 and not requests_support_logprobs(args):
+        raise ValueError(
+            "--score-centering-kl-coef requires --rollout-sampling-logprobs-mode support with "
+            "--rollout-top-logprobs-num set: the KL is exact only when the recorded candidates are the whole "
+            "sampling support"
+        )
     validate_rollout_topk_logprobs_sampling(
         {"top_k": args.rollout_top_k},
         temperature=args.rollout_temperature,

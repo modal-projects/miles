@@ -4,6 +4,7 @@ The sampler distribution is fixed data. Both the importance weights and the
 head residual must be detached: differentiating either changes the estimator.
 """
 
+import math
 from dataclasses import dataclass, fields
 
 import torch
@@ -31,6 +32,7 @@ class ScoreCenteringInputs:
     tis_clip: float = 2.0
     mis_low: float = 0.5
     mis_high: float = 5.0
+    kl_coef: float = 0.0
     eps: float = 1e-6
 
     def __post_init__(self) -> None:
@@ -55,12 +57,21 @@ class ScoreCenteringMetrics:
     rollout_head_mass: torch.Tensor
     tail_ratio: torch.Tensor
     importance_weight: torch.Tensor
+    ratio_outside: torch.Tensor
+    kl: torch.Tensor
+    forward_kl: torch.Tensor
 
     def as_log_dict(self) -> dict[str, torch.Tensor]:
         """Map existing log names to the tensors without copying their storage."""
         return {
             f"sc_{field.name}": getattr(self, field.name) for field in fields(self)
         }  # config-access-exempt: metric field name comes from dataclasses.fields on this record
+
+
+def _head_kl(log_p: torch.Tensor, log_q: torch.Tensor, head_mask: torch.Tensor) -> torch.Tensor:
+    """Per-token KL(p || q) = sum_c p_c (log p_c - log q_c) over the head candidates."""
+    p = head_probs(log_p, head_mask)
+    return (p * scored_log_probs(log_p - log_q, p)).sum(-1)
 
 
 def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, ScoreCenteringMetrics]:
@@ -83,15 +94,22 @@ def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, Sc
         rho = (1 - q_mass).clamp_min(inputs.eps) / (1 - p_mass).clamp_min(inputs.eps)
         alpha = sampling.tail_scale(rho, p.dtype)
         residual = sampling.head_mass(p, q, train_head - rollout_head) - alpha.unsqueeze(-1) * p
-        weight = sampling.sample_weight(
-            drop_inactive_nan(inputs.train_log_probs - inputs.rollout_log_probs, active, 0.0)
-        )
+        log_ratio = drop_inactive_nan(inputs.train_log_probs - inputs.rollout_log_probs, active, 0.0)
+        weight = sampling.sample_weight(log_ratio)
+        inside = (log_ratio >= math.log(inputs.mis_low)) & (log_ratio <= math.log(inputs.mis_high))
+        kl = _head_kl(train_head, rollout_head, inputs.head_mask)
+        forward_kl = _head_kl(rollout_head, train_head, inputs.head_mask)
     correction = (residual * scored_log_probs(train_head, residual)).sum(-1)
     loss = -inputs.advantages.detach() * (weight * scored_log_probs(inputs.train_log_probs, weight) - correction)
+    if inputs.kl_coef > 0:
+        loss = loss + inputs.kl_coef * _head_kl(train_head, rollout_head.detach(), inputs.head_mask)
     return loss, ScoreCenteringMetrics(
         correction=correction.detach(),
         train_head_mass=p_mass,
         rollout_head_mass=q_mass,
         tail_ratio=rho,
         importance_weight=weight,
+        ratio_outside=(~inside).to(log_ratio.dtype),
+        kl=kl,
+        forward_kl=forward_kl,
     )

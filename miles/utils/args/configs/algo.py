@@ -116,6 +116,15 @@ class AlgoConfig(BaseConfig):
     score_centering_tis_clip: A[float, Arg()] = 2.0
     score_centering_mis_low: A[float, Arg()] = 0.5
     score_centering_mis_high: A[float, Arg()] = 5.0
+    score_centering_kl_coef: A[
+        float,
+        Arg(
+            help=(
+                "Coefficient of the reverse KL from the trainer to the sampler over the replayed sampling support, "
+                "added to the score-centering loss of every response token. Requires sampling-support replay."
+            )
+        ),
+    ] = 0.0
     custom_loss_function_path: A[
         CustomFunctionConfig | None,
         Arg(
