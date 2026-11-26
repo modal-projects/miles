@@ -65,3 +65,17 @@ def _assert_span_weight_version_sane(*, sample: "Sample", span: "WeightVersionSp
         f"{span.version!r}, which is not the numeric version miles stamps on weight updates; "
         f"the engine serving this sample got its weights from somewhere miles does not know about"
     )
+
+
+def response_token_ages(sample: "Sample", trainer_version: int) -> list[int]:
+    """Each response token's age: ``trainer_version`` minus the weight version that generated it; -1 where no
+    numeric version span covers the token (tool output and other tokens the policy did not generate)."""
+    offset = len(sample.tokens) - sample.response_length
+    ages = [-1] * sample.response_length
+    for span in sample.all_weight_version_spans:
+        if not str(span.version).isdigit():
+            continue
+        age = trainer_version - int(span.version)
+        for position in range(max(span.abs_start, offset), span.abs_end):
+            ages[position - offset] = age
+    return ages

@@ -506,6 +506,7 @@ def run_forward_backward_pass(
                 "advantages",
                 "returns",
                 "rollout_log_probs",
+                "rollout_token_ages",
                 "rollout_topk_token_ids",
                 "rollout_topk_lengths",
                 "rollout_topk_log_probs",

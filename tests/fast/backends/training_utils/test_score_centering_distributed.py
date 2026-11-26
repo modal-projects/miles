@@ -99,6 +99,7 @@ def _check_loss(
         score_centering_mis_high=5.0,
         score_centering_kl_coef=0.0,
         score_centering_kl_direction="forward",
+        score_centering_kl_age_decay="none",
         entropy_coef=0.03,
         observe_training_entropy=True,
         use_kl_loss=use_kl,

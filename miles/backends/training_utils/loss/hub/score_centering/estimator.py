@@ -34,6 +34,7 @@ class ScoreCenteringInputs:
     mis_high: float = 5.0
     kl_coef: float = 0.0
     kl_direction: str = "forward"
+    kl_token_ages: torch.Tensor | None = None
     eps: float = 1e-6
 
     def __post_init__(self) -> None:
@@ -47,6 +48,8 @@ class ScoreCenteringInputs:
             or self.head_mask.shape != self.train_head_log_probs.shape
         ):
             raise ValueError("Score-centering sample tensors must be [tokens] and head tensors [tokens, candidates]")
+        if self.kl_token_ages is not None and self.kl_token_ages.shape != self.train_log_probs.shape:
+            raise ValueError("Score-centering KL token ages must be [tokens]")
         if self.kl_direction not in ("forward", "reverse"):
             raise ValueError(f"Score-centering KL direction must be forward or reverse, got {self.kl_direction!r}")
 
@@ -75,6 +78,14 @@ def _head_kl(log_p: torch.Tensor, log_q: torch.Tensor, head_mask: torch.Tensor) 
     """Per-token KL(p || q) = sum_c p_c (log p_c - log q_c) over the head candidates."""
     p = head_probs(log_p, head_mask)
     return (p * scored_log_probs(log_p - log_q, p)).sum(-1)
+
+
+def _kl_coefficients(inputs: ScoreCenteringInputs) -> torch.Tensor | float:
+    """The KL coefficient of every token: kl_coef, divided by sqrt(max(age, 1)) when token ages are given."""
+    if inputs.kl_token_ages is None:
+        return inputs.kl_coef
+    ages = inputs.kl_token_ages.to(inputs.train_log_probs.dtype).clamp_min(1)
+    return inputs.kl_coef / ages.sqrt()
 
 
 def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, ScoreCenteringMetrics]:
@@ -109,7 +120,7 @@ def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, Sc
             sampler_kl = _head_kl(rollout_head.detach(), train_head, inputs.head_mask)
         else:
             sampler_kl = _head_kl(train_head, rollout_head.detach(), inputs.head_mask)
-        loss = loss + inputs.kl_coef * sampler_kl
+        loss = loss + _kl_coefficients(inputs) * sampler_kl
     return loss, ScoreCenteringMetrics(
         correction=correction.detach(),
         train_head_mass=p_mass,

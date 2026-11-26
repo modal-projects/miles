@@ -22,6 +22,7 @@ from miles.utils.rollout_topk_logprobs import requests_support_logprobs
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
+from miles.utils.weight_version import response_token_ages
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
     "target_tokens": "int32",
     "loss_masks": "int32",
     "rollout_log_probs": "float32",
+    "rollout_token_ages": "int32",
     "rollout_topk_token_ids": "int32",
     "rollout_topk_lengths": "int32",
     "rollout_topk_log_probs": "float32",
@@ -138,6 +140,14 @@ def convert_samples_to_train_data(
     # Add rollout log probabilities for off-policy correction
     if samples[0].rollout_log_probs is not None:
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
+
+    if args.loss_type == "score_centering" and args.score_centering_kl_age_decay != "none":
+        trainer_version = metadata.get("trainer_weight_version")
+        assert trainer_version is not None, (
+            "--score-centering-kl-age-decay needs the trainer's weight version with the rollout; "
+            "this rollout path does not provide it"
+        )
+        train_data["rollout_token_ages"] = [response_token_ages(sample, trainer_version) for sample in samples]
 
     has_store_plan = any(sample.rollout_store_plan is not None for sample in samples)
     if has_store_plan:
@@ -528,6 +538,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "rollout_ids",
             "rollout_mask_sums",
             "rollout_log_probs",
+            "rollout_token_ages",
             "rollout_topk_token_ids",
             "rollout_topk_lengths",
             "rollout_topk_log_probs",

@@ -103,6 +103,14 @@ def _regularization(
     return loss, metrics
 
 
+def _token_age_rows(args: Namespace, batch: RolloutBatch, layout) -> torch.Tensor | None:
+    if args.score_centering_kl_age_decay == "none":
+        return None
+    if batch.get("rollout_token_ages") is None:
+        raise ValueError("--score-centering-kl-age-decay needs rollout_token_ages in the batch; the rollout sent none")
+    return layout.rows(batch["rollout_token_ages"])
+
+
 def score_centering_loss_function(
     args: Namespace,
     batch: RolloutBatch,
@@ -131,6 +139,7 @@ def score_centering_loss_function(
         candidate_ids=layout.rows_at_positions(candidates, fill=-1),
         rollout_head_log_probs=layout.rows_at_positions(head_log_probs),
         ref_log_probs=layout.rows(batch["ref_log_probs"]) if args.use_kl_loss else None,
+        token_ages=_token_age_rows(args, batch, layout),
         reduce=layout.sum_of_sample_mean,
     )
 
@@ -146,6 +155,7 @@ def score_centering_objective(
     rollout_head_log_probs: torch.Tensor,
     ref_log_probs: torch.Tensor | None,
     reduce: Callable[[torch.Tensor], torch.Tensor],
+    token_ages: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """The loss and metrics from rows laid out by the caller: per-sample responses or padded microbatch rows.
 
@@ -169,6 +179,7 @@ def score_centering_objective(
             mis_high=args.score_centering_mis_high,
             kl_coef=args.score_centering_kl_coef,
             kl_direction=args.score_centering_kl_direction,
+            kl_token_ages=token_ages,
         ),
     )
     pg_loss = reduce(token_loss)

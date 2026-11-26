@@ -135,6 +135,17 @@ class AlgoConfig(BaseConfig):
             ),
         ),
     ] = "forward"
+    score_centering_kl_age_decay: A[
+        str,
+        Arg(
+            choices=["none", "sqrt"],
+            help=(
+                "Scale the score-centering KL coefficient by each response token's age, the trainer's weight version "
+                "minus the version that generated the token: sqrt gives coef / sqrt(max(age, 1)), so a token from an "
+                "older sampler pulls no harder than a recent one; none keeps coef for every token."
+            ),
+        ),
+    ] = "none"
     custom_loss_function_path: A[
         CustomFunctionConfig | None,
         Arg(

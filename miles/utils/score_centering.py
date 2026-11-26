@@ -20,6 +20,8 @@ def validate_score_centering_args(args: Namespace) -> None:
     kl_coef = args.score_centering_kl_coef
     if not math.isfinite(kl_coef) or kl_coef < 0:
         raise ValueError("--score-centering-kl-coef must be finite and non-negative")
+    if args.score_centering_kl_age_decay != "none" and kl_coef == 0:
+        raise ValueError("--score-centering-kl-age-decay scales --score-centering-kl-coef, which is 0")
     if kl_coef > 0 and not requests_support_logprobs(args):
         raise ValueError(
             "--score-centering-kl-coef requires --rollout-sampling-logprobs-mode support with "

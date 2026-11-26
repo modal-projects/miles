@@ -47,6 +47,7 @@ def _args(**overrides: object) -> Namespace:
         score_centering_mis_high=5.0,
         score_centering_kl_coef=0.0,
         score_centering_kl_direction="forward",
+        score_centering_kl_age_decay="none",
         rollout_temperature=0.7,
         rollout_top_p=1.0,
         rollout_top_k=-1,

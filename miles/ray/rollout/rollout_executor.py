@@ -447,6 +447,8 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
             data, metadata = postprocess_rollout_data(
                 self.args, data, train_parallel_config=self._train_parallel_configs_of_model_id[trainer_model_id]
             )
+            if not self.use_legacy_rollout_v1:
+                metadata["trainer_weight_version"] = input.weight_version
             assert_samples_weight_version_sane(self.args, samples=data)
             if RolloutDataInjectionUtil.should_inject(self.args, rollout_id):
                 generated_data = data
