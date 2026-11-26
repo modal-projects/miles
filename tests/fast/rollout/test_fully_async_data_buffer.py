@@ -521,7 +521,7 @@ class TestNoProgressWarning:
 
 class TestSteps:
     async def test_a_step_runs_from_one_gets_start_to_the_next(self) -> None:
-        """It holds the first get's wait and take, and every group the producer added until the next get began."""
+        """It holds the first get's wait and take."""
         buffer = _make_buffer(rollout_batch_size=2).buffer
         first = asyncio.create_task(buffer.get(num_groups=2))
         await asyncio.sleep(0.05)
@@ -536,65 +536,17 @@ class TestSteps:
         await buffer.get(num_groups=2)
         step = buffer.take_step()
 
-        assert (step["consumed"], step["produced"]) == (2, 5)
+        assert step["consumed"] == 2
         assert 0.05 <= step["waited"] and step["waited"] + 0.05 <= step["seconds"]
         assert buffer.take_step() is None
 
-    async def test_the_trainer_waits_while_its_get_is_short_of_groups(self) -> None:
-        buffer = _make_buffer().buffer
-        assert buffer.waiting() == 0.0
-        get = asyncio.create_task(buffer.get(num_groups=1))
-        await asyncio.sleep(0.05)
-        assert buffer.waiting() >= 0.05
-
-        await _put(buffer, _make_finished_group(1))
-        await get
-
-        assert buffer.waiting() == 0.0
-
-    async def test_a_step_nothing_blocked_neither_waited_nor_held(self) -> None:
+    async def test_a_step_nothing_blocked_did_not_wait(self) -> None:
         buffer = _make_buffer().buffer
         for group_index in (1, 2):
             await _put(buffer, _make_finished_group(group_index))
             await buffer.get(num_groups=1)
 
-        step = buffer.take_step()
-        assert (step["waited"], step["held"]) == (0.0, 0.0)
-
-    async def test_a_put_blocked_by_a_full_buffer_held_the_producer(self) -> None:
-        buffer = _make_buffer(async_data_buffer_capacity_factor=1.0).buffer
-        await _put(buffer, _make_finished_group(1))
-        blocked = asyncio.create_task(_put(buffer, _make_finished_group(2)))
-        await asyncio.sleep(0.05)
-        await buffer.get(num_groups=1)
-        await blocked
-
-        await buffer.get(num_groups=1)
-
-        assert buffer.take_step()["held"] >= 0.05
-
-    async def test_a_refused_admission_held_the_producer(self) -> None:
-        buffer = _make_buffer(async_submit_within_staleness=True, max_weight_staleness=0).buffer
-        await _put(buffer, _make_finished_group(1))
-        await buffer.get(num_groups=1)
-        assert not buffer.admits(in_flight=0)
-        await asyncio.sleep(0.05)
-        await _put(buffer, _make_finished_group(2))
-
-        await buffer.get(num_groups=1)
-
-        assert buffer.take_step()["held"] >= 0.05
-
-    async def test_a_group_rejected_on_put_was_not_produced(self) -> None:
-        buffer = _make_buffer().buffer
-        await _put(buffer, _make_finished_group(1))
-        await buffer.get(num_groups=1)
-
-        await _put(buffer, _make_finished_group(2, status=Sample.Status.ABORTED))
-        await _put(buffer, _make_finished_group(3))
-        await buffer.get(num_groups=1)
-
-        assert buffer.take_step()["produced"] == 1
+        assert buffer.take_step()["waited"] == 0.0
 
     async def test_each_policy_reports_its_own_steps(self) -> None:
         multi = _make_multi_buffer()
@@ -606,6 +558,54 @@ class TestSteps:
 
         assert multi.take_step("solver")["consumed"] == 1
         assert multi.take_step("verifier") is None
+
+
+class TestOutput:
+    async def test_the_output_counts_every_group_put_since_the_start(self) -> None:
+        buffer = _make_buffer().buffer
+        assert buffer.output() == {"produced": 0, "held": 0.0}
+        for group_index in (1, 2, 3):
+            await _put(buffer, _make_finished_group(group_index))
+        await buffer.get(num_groups=2)
+
+        assert buffer.output() == {"produced": 3, "held": 0.0}
+
+    async def test_a_group_rejected_on_put_was_not_produced(self) -> None:
+        buffer = _make_buffer().buffer
+        await _put(buffer, _make_finished_group(1, status=Sample.Status.ABORTED))
+        await _put(buffer, _make_finished_group(2))
+
+        assert buffer.output()["produced"] == 1
+
+    async def test_a_put_blocked_by_a_full_buffer_holds_the_producer_until_it_ends(self) -> None:
+        buffer = _make_buffer(async_data_buffer_capacity_factor=1.0).buffer
+        await _put(buffer, _make_finished_group(1))
+        blocked = asyncio.create_task(_put(buffer, _make_finished_group(2)))
+        await asyncio.sleep(0.05)
+        assert buffer.output()["held"] >= 0.05
+
+        await buffer.get(num_groups=1)
+        await blocked
+        held = buffer.output()["held"]
+        await asyncio.sleep(0.05)
+
+        assert held >= 0.05 and buffer.output()["held"] == held
+
+    async def test_a_refused_admission_holds_the_producer_until_it_admits(self) -> None:
+        buffer = _make_buffer(async_submit_within_staleness=True, max_weight_staleness=0).buffer
+        assert not buffer.admits(in_flight=0)
+        await asyncio.sleep(0.05)
+        assert buffer.output()["held"] >= 0.05
+
+        # A get waiting for groups widens the window by one batch.
+        get = asyncio.create_task(buffer.get(num_groups=1))
+        await asyncio.sleep(0)
+        assert buffer.admits(in_flight=0)
+        held = buffer.output()["held"]
+        await asyncio.sleep(0.05)
+
+        assert held >= 0.05 and buffer.output()["held"] == held
+        get.cancel()
 
 
 # ================================ metrics =================================

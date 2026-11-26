@@ -133,11 +133,11 @@ class DataBuffer(ABC):
         return True
 
     def take_step(self, trainer_model_id: str | None = None) -> dict[str, float] | None:
-        """The policy's last step, one get's start to the next, once: seconds, waited, held, consumed, produced."""
+        """The policy's last step, one get's start to the next, once: seconds, waited, consumed."""
         return None
 
-    def waiting(self) -> float | None:
-        """Seconds the get now pending has waited short of groups, 0 if none waits; None if the buffer cannot tell."""
+    def output(self) -> dict[str, float] | None:
+        """Groups put and seconds the producer was held, both counted from the start; None if it cannot tell."""
         return None
 
     def drop_saved_state(self, state: Any, *, reason: str) -> None:
@@ -203,6 +203,7 @@ class DefaultDataBuffer(DataBuffer):
         self._short_since: float | None = None
         self._produced = 0
         self._held = 0.0
+        self._full_since: float | None = None
         self._refused_since: float | None = None
         self._last_get: _Get | None = None
         self._step: dict[str, float] | None = None
@@ -228,12 +229,12 @@ class DefaultDataBuffer(DataBuffer):
             return
 
         async with self._cond:
-            full_since = None
             while len(self._buffer) >= self._capacity:
-                full_since = full_since or time.monotonic()
+                self._full_since = self._full_since or time.monotonic()
                 await self._cond.wait()
-            if full_since:
-                self._held += time.monotonic() - full_since
+            if self._full_since:
+                self._held += time.monotonic() - self._full_since
+                self._full_since = None
             self._buffer.append(input)
             self._produced += 1
             self._cond.notify_all()
@@ -269,19 +270,8 @@ class DefaultDataBuffer(DataBuffer):
 
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
         began = time.monotonic()
-        if self._refused_since is not None:
-            # A refusal still standing counts toward the step it fell in.
-            self._held += began - self._refused_since
-            self._refused_since = began
         if (last := self._last_get) is not None:
-            self._step = dict(
-                seconds=began - last.began,
-                waited=last.waited,
-                held=self._held,
-                consumed=last.consumed,
-                produced=self._produced,
-            )
-        self._produced, self._held = 0, 0.0
+            self._step = dict(seconds=began - last.began, waited=last.waited, consumed=last.consumed)
         self._get_pending = True
         try:
             entries, waited = await self._take(num_groups=num_groups, current_version=current_version)
@@ -295,8 +285,10 @@ class DefaultDataBuffer(DataBuffer):
         step, self._step = self._step, None
         return step
 
-    def waiting(self) -> float | None:
-        return 0.0 if self._short_since is None else time.monotonic() - self._short_since
+    def output(self) -> dict[str, float]:
+        now = time.monotonic()
+        holding = sum(now - since for since in (self._full_since, self._refused_since) if since is not None)
+        return {"produced": self._produced, "held": self._held + holding}
 
     async def _take(self, *, num_groups: int, current_version: int | None) -> tuple[list[DataBufferInput], float]:
         if current_version is not None:

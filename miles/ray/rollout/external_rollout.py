@@ -66,8 +66,8 @@ class ExternalRollout:
         except Exception as error:
             logger.warning(f"the external rollout did not take a training step: {error!r}")
 
-    async def report_load(self, load: dict[str, float | None]) -> int | None:
-        """The rollout's load, from which the service sizes its engines; it replies the requests they run at once."""
+    async def report_load(self, load: dict[str, float]) -> int | None:
+        """The rollout's output so far, for the service to size its engines; replies the requests they run at once."""
         try:
             async with asyncio.timeout(_REPORT_TIMEOUT_S):
                 reply = await self._call("/load", load)

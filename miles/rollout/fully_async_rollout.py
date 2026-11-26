@@ -254,8 +254,6 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         }
         for load in loads.values():
             self._session_load.update(load)
-        self._session_load["finished_sessions"] += len(loads)
-        self._session_load["finished_groups"] += bool(loads)
 
     async def _refresh_capacity(self) -> None:
         load, self._session_load = self._session_load, Counter()
@@ -263,13 +261,19 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         if self._external_rollout is None:
             capacity = await _own_engines_capacity(self.args)
         else:
-            in_flight = sum(len(task.prompt_group) for task in self._running_tasks)
-            capacity = await self._external_rollout.report_load(
-                {**load, "sessions_in_flight": in_flight, "waiting": self._output.waiting()}
-            )
+            capacity = await self._external_rollout.report_load(self._output.output() or {})
         if capacity is not None and capacity != self._request_capacity:
             self._request_capacity = capacity
             self._admission_changed.set()
+        recent, kept = sum(self._recent_loads, Counter()), ""
+        if prefix := recent["prefix_tokens"]:
+            kept = f"; later turns found {1 - recent['uncached_prefix_tokens'] / prefix:.0%} of earlier context cached"
+        logger.info(
+            "Admission: at most %d groups in flight for %s requests at once%s",
+            self._max_in_flight_groups(),
+            self._request_capacity,
+            kept,
+        )
 
     async def _refresh_capacity_every_minute(self) -> None:
         while True:
