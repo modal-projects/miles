@@ -141,13 +141,14 @@ def convert_samples_to_train_data(
     if samples[0].rollout_log_probs is not None:
         train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
-    if args.loss_type == "score_centering" and args.score_centering_kl_age_decay != "none":
+    if args.loss_type == "score_centering":
         trainer_version = metadata.get("trainer_weight_version")
-        assert trainer_version is not None, (
+        assert trainer_version is not None or args.score_centering_kl_age_decay == "none", (
             "--score-centering-kl-age-decay needs the trainer's weight version with the rollout; "
             "this rollout path does not provide it"
         )
-        train_data["rollout_token_ages"] = [response_token_ages(sample, trainer_version) for sample in samples]
+        if trainer_version is not None:
+            train_data["rollout_token_ages"] = [response_token_ages(sample, trainer_version) for sample in samples]
 
     has_store_plan = any(sample.rollout_store_plan is not None for sample in samples)
     if has_store_plan:

@@ -66,6 +66,10 @@ class ScoreCenteringMetrics:
     ratio_outside: torch.Tensor
     kl: torch.Tensor
     forward_kl: torch.Tensor
+    forward_kl_above_0p1: torch.Tensor
+    forward_kl_above_0p3: torch.Tensor
+    kl_pull: torch.Tensor
+    pg_push: torch.Tensor
 
     def as_log_dict(self) -> dict[str, torch.Tensor]:
         """Map existing log names to the tensors without copying their storage."""
@@ -113,6 +117,14 @@ def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, Sc
         inside = (log_ratio >= math.log(inputs.mis_low)) & (log_ratio <= math.log(inputs.mis_high))
         kl = _head_kl(train_head, rollout_head, inputs.head_mask)
         forward_kl = _head_kl(rollout_head, train_head, inputs.head_mask)
+        # L1 of each term's logit gradient: the KL's, and a plain policy gradient's 2 |A| (1 - p_sampled).
+        if inputs.kl_direction == "forward":
+            kl_force = (p - q).abs().sum(-1)
+        else:
+            kl_force = (p * (scored_log_probs(train_head - rollout_head, p) - kl.unsqueeze(-1))).abs().sum(-1)
+        kl_pull = _kl_coefficients(inputs) * kl_force if inputs.kl_coef > 0 else torch.zeros_like(kl_force)
+        sampled = drop_inactive_nan(inputs.train_log_probs, active, -math.inf).exp()
+        pg_push = 2 * inputs.advantages.detach().abs() * (1 - sampled)
     correction = (residual * scored_log_probs(train_head, residual)).sum(-1)
     loss = -inputs.advantages.detach() * (weight * scored_log_probs(inputs.train_log_probs, weight) - correction)
     if inputs.kl_coef > 0:
@@ -130,4 +142,8 @@ def score_centering_loss(inputs: ScoreCenteringInputs) -> tuple[torch.Tensor, Sc
         ratio_outside=(~inside).to(log_ratio.dtype),
         kl=kl,
         forward_kl=forward_kl,
+        forward_kl_above_0p1=(forward_kl > 0.1).to(kl.dtype),
+        forward_kl_above_0p3=(forward_kl > 0.3).to(kl.dtype),
+        kl_pull=kl_pull,
+        pg_push=pg_push,
     )

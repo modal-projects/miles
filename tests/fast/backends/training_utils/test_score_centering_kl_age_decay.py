@@ -102,8 +102,11 @@ def test_conversion_carries_token_ages_from_the_trainer_version() -> None:
         convert_samples_to_train_data(args, [sample], {}, None, None)
 
 
-def test_conversion_without_age_decay_carries_no_ages() -> None:
+def test_conversion_carries_ages_for_the_metrics_whenever_the_version_came_along() -> None:
     sample = _turn([5, 6], [3, 2], [0.4, 0.6])
-    data = convert_samples_to_train_data(_args(**_SUPPORT_REPLAY), [sample], {}, None, None)
-    assert "rollout_token_ages" not in data
-    assert math.isfinite(sum(data["rollout_log_probs"][0]))
+    sample.weight_versions = [WeightVersionsPerCall(spans=[WeightVersionSpan(version="3", abs_start=2, abs_end=4)])]
+    data = convert_samples_to_train_data(_args(**_SUPPORT_REPLAY), [sample], {"trainer_weight_version": 4}, None, None)
+    assert [list(ages) for ages in data["rollout_token_ages"]] == [[1, 1]]
+    without_version = convert_samples_to_train_data(_args(**_SUPPORT_REPLAY), [sample], {}, None, None)
+    assert "rollout_token_ages" not in without_version
+    assert math.isfinite(sum(without_version["rollout_log_probs"][0]))

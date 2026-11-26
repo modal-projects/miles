@@ -104,11 +104,15 @@ def _regularization(
 
 
 def _token_age_rows(args: Namespace, batch: RolloutBatch, layout) -> torch.Tensor | None:
-    if args.score_centering_kl_age_decay == "none":
-        return None
     if batch.get("rollout_token_ages") is None:
-        raise ValueError("--score-centering-kl-age-decay needs rollout_token_ages in the batch; the rollout sent none")
+        if args.score_centering_kl_age_decay != "none":
+            raise ValueError("--score-centering-kl-age-decay needs rollout_token_ages in the batch; the rollout sent none")
+        return None
     return layout.rows(batch["rollout_token_ages"])
+
+
+# Token-age buckets of the KL-by-age metrics: name, first age, last age (None: no bound).
+KL_AGE_BUCKETS = (("0_2", 0, 2), ("3_5", 3, 5), ("6_8", 6, 8), ("9_11", 9, 11), ("12_up", 12, None))
 
 
 def score_centering_loss_function(
@@ -179,7 +183,7 @@ def score_centering_objective(
             mis_high=args.score_centering_mis_high,
             kl_coef=args.score_centering_kl_coef,
             kl_direction=args.score_centering_kl_direction,
-            kl_token_ages=token_ages,
+            kl_token_ages=token_ages if args.score_centering_kl_age_decay != "none" else None,
         ),
     )
     pg_loss = reduce(token_loss)
@@ -195,6 +199,13 @@ def score_centering_objective(
     )
     loss = loss + pg_loss
     log.update({key: reduce(value).detach() for key, value in metrics.as_log_dict().items()})
+    if token_ages is not None:
+        # Per bucket, the forward KL's sum and the tokens it covers: their ratio is the bucket's mean KL, and
+        # both reduce the same way, so the ratio survives the reducer.
+        for name, first, last in KL_AGE_BUCKETS:
+            inside = active & (token_ages >= first) & (token_ages <= last if last is not None else True)
+            log[f"sc_forward_kl_age_{name}_sum"] = reduce(torch.where(inside, metrics.forward_kl, 0.0)).detach()
+            log[f"sc_forward_kl_age_{name}_tokens"] = reduce(inside.to(metrics.forward_kl.dtype)).detach()
     log.update(loss=loss.detach(), pg_loss=pg_loss.detach())
     train_log_probs = torch.where(active, selected[:, 0].detach(), 0.0)
     log["train_rollout_logprob_abs_diff"] = reduce((train_log_probs - rollout).abs()).detach()
