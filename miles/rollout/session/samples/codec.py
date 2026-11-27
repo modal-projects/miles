@@ -25,9 +25,23 @@ class ValueSpec:
     """Wire contract of one computed field."""
 
     codec: str  # "tensor" | "tensor_list" | "sampling_mask" | "json"
-    dtype: np.dtype | None = None  # tensor codecs: pinned on both sides; a mismatch raises instead of converting
-    strict: bool = False  # encode never converts, only validates (R3 replay tensors must arrive as int32)
+    dtype: np.dtype | tuple[np.dtype, ...] | None = None
+    strict: bool = False  # encode never converts, only validates
     null: object = None  # decoded value for a null-marked field; copied per sample so no instance is shared
+
+
+def _format_expected_dtype(expected: np.dtype | tuple[np.dtype, ...] | None) -> str:
+    if isinstance(expected, tuple):
+        return " or ".join(str(d) for d in expected)
+    return str(expected)
+
+
+def _dtype_matches(actual: np.dtype, expected: np.dtype | tuple[np.dtype, ...] | None) -> bool:
+    if expected is None:
+        return True
+    if isinstance(expected, tuple):
+        return actual in expected
+    return actual == expected
 
 
 # tokens/loss_mask/logprobs are re-materialized as Python lists on decode,
@@ -41,7 +55,7 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "rollout_topk_token_ids": ValueSpec("tensor", np.dtype(np.int32), strict=True),
     "rollout_topk_log_probs": ValueSpec("tensor", np.dtype(np.float32), strict=True),
     "rollout_sampling_mask": ValueSpec("sampling_mask"),
-    "rollout_routed_experts": ValueSpec("tensor", np.dtype(np.int32), strict=True),
+    "rollout_routed_experts": ValueSpec("tensor", (np.dtype(np.int16), np.dtype(np.int32)), strict=True),
     "rollout_indexer_topk": ValueSpec("tensor", np.dtype(np.int32), strict=True),
     "rollout_store_plan": ValueSpec("json"),
     "status": ValueSpec("json"),
@@ -97,8 +111,7 @@ def _asarray_wire(field: str, value, dtype: np.dtype) -> np.ndarray:
 
 
 # safetensors dtype names of every wire dtype in SAMPLES_VALUE_SPEC_V2 (incl. sampling-mask ids/offsets).
-# TODO: add "I16": np.int16 for #4035's int16 routed experts (past 256 experts), whichever lands second.
-_WIRE_DTYPES = {"I64": np.int64, "I32": np.int32, "U8": np.uint8, "F64": np.float64, "F32": np.float32}
+_WIRE_DTYPES = {"I64": np.int64, "I32": np.int32, "I16": np.int16, "U8": np.uint8, "F64": np.float64, "F32": np.float32}
 
 
 def _load_tensor_views(payload: bytes | np.ndarray) -> dict[str, np.ndarray]:
@@ -180,8 +193,10 @@ def encode_samples(
                 continue
             if spec.strict:
                 arr = np.asarray(value)
-                if arr.dtype != spec.dtype:
-                    raise ValueError(f"{field} must have dtype {spec.dtype}, got {arr.dtype}")
+                if not _dtype_matches(arr.dtype, spec.dtype):
+                    raise ValueError(
+                        f"{field} must have dtype {_format_expected_dtype(spec.dtype)}, got {arr.dtype}"
+                    )
             else:
                 arr = _asarray_wire(field, value, spec.dtype)
             # ascontiguousarray is a correctness requirement: the numpy adapter
@@ -273,8 +288,10 @@ def decode_samples_and_merge_input_sample(
                 )
                 continue
             arr = tensors.pop(f"{field}.{sample_index}")  # KeyError propagates: a promised tensor must exist
-            if arr.dtype != spec.dtype:
-                raise ValueError(f"{field} must have dtype {spec.dtype}, got {arr.dtype}")
+            if not _dtype_matches(arr.dtype, spec.dtype):
+                raise ValueError(
+                    f"{field} must have dtype {_format_expected_dtype(spec.dtype)}, got {arr.dtype}"
+                )
             setattr(sample, field, arr.tolist() if spec.codec == "tensor_list" else arr)
         samples.append(sample)
     if tensors:

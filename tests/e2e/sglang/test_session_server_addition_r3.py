@@ -225,13 +225,14 @@ def test_tito_session_addition_r3_matches_full_r3(sglang_server):
         sample = samples_reply.samples[0]
         assert sample.tokens == final_token_ids
         assert sample.rollout_routed_experts is not None
-        assert sample.rollout_routed_experts.dtype == np.int32
+        assert sample.rollout_routed_experts.dtype == np.int16
         assert sample.rollout_routed_experts.shape == (
             len(final_token_ids) - 1,
             _NUM_LAYERS,
             _ROUTED_EXPERTS_TOPK,
         )
-        assert sample.rollout_routed_experts.tobytes(order="C") == full_r3
+        expected_r3 = np.frombuffer(full_r3, dtype=np.int32).astype(np.int16).reshape(sample.rollout_routed_experts.shape)
+        np.testing.assert_array_equal(sample.rollout_routed_experts, expected_r3)
 
 
 if __name__ == "__main__":
