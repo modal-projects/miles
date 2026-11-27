@@ -140,9 +140,9 @@ class BaseReplayManager:
             if manager.enable_check_replay_result:
                 manager.check_replay_result(old_topk_fn, scores, topk, top_indices, *args, **kwargs)
             top_indices = manager.fill_replay_padding(top_indices, scores.shape[1])
-            if top_indices.dtype != torch.int64:
-                top_indices = top_indices.long()
-            return (scores.gather(1, top_indices), top_indices) if return_probs else top_indices
+            if top_indices.dtype == torch.int16:
+                top_indices = top_indices.to(torch.int32)
+            return (scores.gather(1, top_indices.long()), top_indices) if return_probs else top_indices
 
         return new_topk_fn
 
