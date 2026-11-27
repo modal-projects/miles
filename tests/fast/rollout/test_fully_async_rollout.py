@@ -197,7 +197,7 @@ async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypa
 
     async def report_load(self, load):
         reports.append(load)
-        return {"capacity": None, "running": None}
+        return {"capacity": None, "running": None, "queued": None}
 
     async def sleep(delay, *args):
         if delay != 60:
@@ -226,9 +226,9 @@ async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypa
 
 
 class _Capacity:
-    """An external rollout replying each load report with the next (capacity, running); groups run until released."""
+    """An external rollout replying each report with the next (capacity, running, queued); groups run till released."""
 
-    def __init__(self, monkeypatch, replies: list[tuple[int, int | None]]):
+    def __init__(self, monkeypatch, replies: list[tuple[int, int | None, int | None]]):
         self.replies, self.minute, self.real_sleep = iter(replies), asyncio.Event(), asyncio.sleep
         self.started: list[int] = []
         self.releases: dict[int, asyncio.Event] = {}
@@ -238,8 +238,8 @@ class _Capacity:
         self.fn = make_fn(monkeypatch, args, FakeDataSource(), self._generate)
 
     async def _report_load(self, load):
-        capacity, running = next(self.replies, (None, None))
-        return {"capacity": capacity, "running": running}
+        capacity, running, queued = next(self.replies, (None, None, None))
+        return {"capacity": capacity, "running": running, "queued": queued}
 
     async def _sleep(self, delay, *args):
         if delay != 60:
@@ -269,7 +269,7 @@ class _Capacity:
 
 
 async def test_admission_follows_the_reported_capacity_without_aborting_what_runs(monkeypatch):
-    capacity = _Capacity(monkeypatch, [(4, None), (8, None), (2, None)])
+    capacity = _Capacity(monkeypatch, [(4, None, None), (8, None, None), (2, None, None)])
     drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
     await capacity.settle()
     assert capacity.started == [1001, 1002]
@@ -291,7 +291,7 @@ async def test_without_an_external_rollout_admission_follows_what_its_own_engine
         return ["http://engine-0", "http://engine-1"]
 
     async def loads(url):
-        return {"loads": [{"max_running_requests": 2, "num_running_reqs": 0}]}
+        return {"loads": [{"max_running_requests": 2, "num_running_reqs": 0, "num_waiting_reqs": 0}]}
 
     started = []
 
@@ -322,10 +322,38 @@ async def test_without_a_reported_capacity_the_args_bound_admission(monkeypatch)
 
 async def test_engines_running_a_request_per_two_samples_double_what_a_capacity_admits(monkeypatch):
     """Samples spend part of their life away from the engines (tools, sandboxes, transport): admission fills slots."""
-    capacity = _Capacity(monkeypatch, [(4, None), (4, 2)])
+    capacity = _Capacity(monkeypatch, [(4, None, None), (4, 2, 0)])
     drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
     await capacity.settle()
     assert capacity.started == [1001, 1002]
+
+    await capacity.next_minute()
+    await capacity.release(1001)
+
+    assert capacity.started == [1001, 1002, 1003, 1004, 1005]
+    drain.cancel()
+    await capacity.fn.dispose()
+
+
+async def test_requests_queued_on_full_engines_stop_admission(monkeypatch):
+    """Running stops at the slots once the engines are full; the queue behind them shows the samples admitted past."""
+    capacity = _Capacity(monkeypatch, [(4, None, None), (4, 4, 8)])
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
+
+    await capacity.next_minute()
+    await capacity.release(1001)
+
+    assert capacity.started == [1001, 1002]
+    drain.cancel()
+    await capacity.fn.dispose()
+
+
+async def test_the_samples_in_flight_at_most_double_in_a_minute(monkeypatch):
+    """Freshly admitted samples are still setting up and hold no request yet, so the share reads low after a jump."""
+    capacity = _Capacity(monkeypatch, [(4, None, None), (4, 1, 0)])
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
 
     await capacity.next_minute()
     await capacity.release(1001)

@@ -114,8 +114,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._refresher: asyncio.Task | None = None
         self._session_load: Counter[str] = Counter()
         self._recent_loads: deque[Counter[str]] = deque(maxlen=10)
-        # Each minute, the requests the engines run and the samples in flight.
+        # Each minute, the requests the engines hold (running and queued) and the samples in flight.
         self._recent_use: deque[tuple[int, int]] = deque(maxlen=10)
+        self._growth_limit: int | None = None
         self._admitted_groups = 0
         self._request_capacity: int | None = None
 
@@ -176,11 +177,11 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         else:
             samples = self.args.rollout_batch_size * n
         if self._request_capacity is not None:
-            running = sum(requests for requests, _ in self._recent_use)
+            held = sum(requests for requests, _ in self._recent_use)
             in_flight = sum(samples for _, samples in self._recent_use)
-            # A sample holds a request for only part of its life: the requests running per sample in flight.
-            generating_share = running / in_flight if running and in_flight else 1.0
-            samples = min(samples, int(self._request_capacity / generating_share))
+            # A sample holds a request for only part of its life: the requests the engines hold per sample in flight.
+            generating_share = held / in_flight if held and in_flight else 1.0
+            samples = min(samples, int(self._request_capacity / generating_share), self._growth_limit)
         # Whole groups are submitted, so the budget floors to whole groups of the default size.
         return max(1, samples // n) * n
 
@@ -272,20 +273,23 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             engines = await _own_engines_load(self.args)
         else:
             engines = await self._external_rollout.report_load(self._output.output() or {})
+        in_flight = self._scheduler.in_flight(pending_samples=self._pending_samples())
         if engines["running"] is not None:
-            in_flight = self._scheduler.in_flight(pending_samples=self._pending_samples())
-            self._recent_use.append((engines["running"], in_flight))
+            self._recent_use.append((engines["running"] + (engines["queued"] or 0), in_flight))
         if engines["capacity"] is not None:
             self._request_capacity = engines["capacity"]
+            # Admitted samples are not taken back, so the samples in flight at most double in a minute.
+            self._growth_limit = max(engines["capacity"], 2 * in_flight)
         self._admission_changed.set()
         recent, kept = sum(self._recent_loads, Counter()), ""
         if prefix := recent["prefix_tokens"]:
             kept = f"; later turns found {1 - recent['uncached_prefix_tokens'] / prefix:.0%} of earlier context cached"
         logger.info(
-            "Admission: at most %d samples in flight for %s requests at once, %s running%s",
+            "Admission: at most %d samples in flight for %s requests at once, %s running, %s queued%s",
             self._max_in_flight_samples(),
             self._request_capacity,
             engines["running"],
+            engines["queued"],
             kept,
         )
 
@@ -447,11 +451,12 @@ async def _own_engines_load(args) -> dict[str, int | None]:
             loads = await asyncio.gather(*(get(f"{url}/v1/loads?include=core") for url in urls))
     except Exception as error:
         logger.warning(f"could not read the engines' capacity: {error!r}")
-        return {"capacity": None, "running": None}
+        return {"capacity": None, "running": None, "queued": None}
     ranks = [rank for load in loads for rank in load["loads"]]
     return {
         "capacity": sum(rank["max_running_requests"] for rank in ranks) or None,
         "running": sum(rank["num_running_reqs"] for rank in ranks),
+        "queued": sum(rank["num_waiting_reqs"] for rank in ranks),
     }
 
 
