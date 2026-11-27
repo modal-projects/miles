@@ -38,6 +38,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Per-response-token fields other than rollout_log_probs, whose dtype _rollout_logprob_dtype picks.
+RESPONSE_TOKEN_DTYPES = {
+    "teacher_log_probs": torch.float32,
+    "opd_reverse_kl": torch.float32,
+    "rollout_token_ages": torch.int32,
+}
+
 
 def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
     if args.true_on_policy_mode:
@@ -146,10 +153,10 @@ def prepare_rollout_data(
 
         rollout_data["max_seq_lens"] = [max_seq_len] * len(rollout_data["tokens"])
 
-    # Full-response SGLang OPD fields share rollout CP slicing but retain float32 precision.
-    for key in ("rollout_log_probs", "teacher_log_probs", "opd_reverse_kl"):
+    # Per-response-token fields share rollout CP slicing; full-response SGLang OPD fields retain float32 precision.
+    for key in ("rollout_log_probs", *RESPONSE_TOKEN_DTYPES):
         if key in rollout_data:
-            dtype = _rollout_logprob_dtype(args) if key == "rollout_log_probs" else torch.float32
+            dtype = _rollout_logprob_dtype(args) if key == "rollout_log_probs" else RESPONSE_TOKEN_DTYPES[key]
             rollout_data[key] = [
                 torch.as_tensor(
                     slice_log_prob_with_cp(

@@ -20,8 +20,23 @@ def validate_score_centering_args(args: Namespace) -> None:
     kl_coef = args.score_centering_kl_coef
     if not math.isfinite(kl_coef) or kl_coef < 0:
         raise ValueError("--score-centering-kl-coef must be finite and non-negative")
-    if args.score_centering_kl_age_decay != "none" and kl_coef == 0:
-        raise ValueError("--score-centering-kl-age-decay scales --score-centering-kl-coef, which is 0")
+    if args.score_centering_kl_age_decay != "none":
+        if kl_coef == 0:
+            raise ValueError("--score-centering-kl-age-decay scales --score-centering-kl-coef, which is 0")
+        # A token's age is taken against the trainer's version when its batch is drained, which is the version
+        # that trains the batch only if the batch is one optimizer step and the weights update after every step.
+        one_step = args.num_steps_per_rollout in (None, 1) and (
+            args.use_dynamic_global_batch_size
+            or args.global_batch_size == args.rollout_batch_size * args.n_samples_per_prompt
+        )
+        if not one_step or args.update_weights_interval != 1:
+            raise ValueError(
+                "--score-centering-kl-age-decay requires one optimizer step per rollout and "
+                "--update-weights-interval 1: token ages are taken against the trainer's version when the batch "
+                "is drained"
+            )
+        if args.train_backend != "megatron":
+            raise ValueError("--score-centering-kl-age-decay is only wired into the Megatron backend's batches")
     if kl_coef > 0 and not requests_support_logprobs(args):
         raise ValueError(
             "--score-centering-kl-coef requires --rollout-sampling-logprobs-mode support with "

@@ -60,6 +60,10 @@ def _args(**overrides: object) -> Namespace:
         length_penalty_coeff=0.0,
         length_penalty_min_tokens=1,
         use_dynamic_global_batch_size=False,
+        num_steps_per_rollout=None,
+        update_weights_interval=1,
+        rollout_batch_size=1,
+        n_samples_per_prompt=1,
         balance_data=False,
         qkv_format="thd",
         true_on_policy_mode=False,
@@ -77,7 +81,13 @@ def _args(**overrides: object) -> Namespace:
         **{name: values.pop(name) for name in ("vocab_size", "calculate_per_token_loss", "global_batch_size")}
     )
     sglang = SglangConfig(models=[], base_args={"speculative_algorithm": values["sglang_speculative_algorithm"]})
-    return Namespace(**values, train_backend="megatron", backend=backend, sglang=sglang)
+    return Namespace(
+        **values,
+        global_batch_size=backend.global_batch_size,
+        train_backend="megatron",
+        backend=backend,
+        sglang=sglang,
+    )
 
 
 def _turn(prompt: list[int], output: list[int], probabilities: list[float]) -> Sample:

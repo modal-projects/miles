@@ -1,12 +1,18 @@
 """The score-centering KL coefficient scaled by each response token's age."""
 
 import math
+from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 import torch
 from tests.fast.fixtures.score_centering_fixtures import _args, _turn
 
+from miles.backends.training_utils.data import context_parallel
+from miles.backends.training_utils.data import rollout as data_utils
 from miles.backends.training_utils.loss.hub.score_centering import ScoreCenteringInputs, score_centering_loss
+from miles.backends.training_utils.metrics import log_utils
+from miles.backends.training_utils.parallel import GroupInfo, ParallelState
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data
 from miles.utils.score_centering import validate_score_centering_args
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
@@ -102,11 +108,136 @@ def test_conversion_carries_token_ages_from_the_trainer_version() -> None:
         convert_samples_to_train_data(args, [sample], {}, None, None)
 
 
-def test_conversion_carries_ages_for_the_metrics_whenever_the_version_came_along() -> None:
+def test_conversion_sends_ages_only_with_age_decay() -> None:
     sample = _turn([5, 6], [3, 2], [0.4, 0.6])
     sample.weight_versions = [WeightVersionsPerCall(spans=[WeightVersionSpan(version="3", abs_start=2, abs_end=4)])]
     data = convert_samples_to_train_data(_args(**_SUPPORT_REPLAY), [sample], {"trainer_weight_version": 4}, None, None)
-    assert [list(ages) for ages in data["rollout_token_ages"]] == [[1, 1]]
-    without_version = convert_samples_to_train_data(_args(**_SUPPORT_REPLAY), [sample], {}, None, None)
-    assert "rollout_token_ages" not in without_version
-    assert math.isfinite(sum(without_version["rollout_log_probs"][0]))
+    assert "rollout_token_ages" not in data
+    assert math.isfinite(sum(data["rollout_log_probs"][0]))
+
+
+def test_age_decay_refuses_a_trained_token_without_a_version() -> None:
+    sample = _turn([5, 6], [3, 2], [0.4, 0.6])
+    sample.weight_versions = [WeightVersionsPerCall(spans=[WeightVersionSpan(version="3", abs_start=2, abs_end=3)])]
+    args = _args(score_centering_kl_age_decay="sqrt", score_centering_kl_coef=0.1, **_SUPPORT_REPLAY)
+    with pytest.raises(AssertionError, match="1 trained tokens carry no numeric weight version"):
+        convert_samples_to_train_data(args, [sample], {"trainer_weight_version": 8}, None, None)
+    sample.loss_mask = [1, 0]
+    data = convert_samples_to_train_data(args, [sample], {"trainer_weight_version": 8}, None, None)
+    assert [list(ages) for ages in data["rollout_token_ages"]] == [[5, -1]]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(num_steps_per_rollout=2),
+        dict(update_weights_interval=2),
+        dict(global_batch_size=2),
+    ],
+)
+def test_age_decay_refuses_batches_trained_after_another_step(overrides: dict) -> None:
+    args = _args(score_centering_kl_age_decay="sqrt", score_centering_kl_coef=0.1, **_SUPPORT_REPLAY, **overrides)
+    with pytest.raises(ValueError, match="one optimizer step per rollout"):
+        validate_score_centering_args(args)
+
+
+def test_age_decay_takes_a_dynamic_global_batch_as_one_step() -> None:
+    args = _args(
+        score_centering_kl_age_decay="sqrt",
+        score_centering_kl_coef=0.1,
+        use_dynamic_global_batch_size=True,
+        global_batch_size=2,
+        **_SUPPORT_REPLAY,
+    )
+    validate_score_centering_args(args)
+
+
+def test_age_decay_runs_only_on_megatron() -> None:
+    args = _args(score_centering_kl_age_decay="sqrt", score_centering_kl_coef=0.1, **_SUPPORT_REPLAY)
+    args.train_backend = "fsdp"
+    with pytest.raises(ValueError, match="Megatron"):
+        validate_score_centering_args(args)
+
+
+@pytest.mark.parametrize(
+    ("qkv_format", "cp_size", "cp_rank", "expected_indices"),
+    [
+        ("thd", 1, 0, [0, 1, 2, 3, 4, 5, 6]),
+        ("thd", 2, 0, [6]),
+        ("thd", 2, 1, [0, 1, 2, 3, 4, 5]),
+        ("bshd", 2, 0, [0]),
+        ("bshd", 2, 1, [1, 2, 3, 4, 5, 6]),
+    ],
+)
+def test_the_trainer_slices_token_ages_with_the_rollout_log_probs(
+    monkeypatch: pytest.MonkeyPatch, qkv_format: str, cp_size: int, cp_rank: int, expected_indices: list[int]
+) -> None:
+    log_probs = torch.tensor([-0.2, -1.3, -0.7, -2.1, -0.4, -3.2, -1.8])
+    ages = [3, 3, -1, 2, 2, 0, 0]
+    rollout_data = {
+        "tokens": [list(range(11))],
+        "loss_masks": [[1] * 7],
+        "total_lengths": [11],
+        "response_lengths": [7],
+        "rollout_log_probs": [log_probs.tolist()],
+        "rollout_token_ages": [ages],
+    }
+    group = GroupInfo(rank=0, size=1, group=None)
+    cp = GroupInfo(rank=cp_rank, size=cp_size, group=None)
+    parallel_state = ParallelState(
+        intra_dp=group, intra_dp_cp=cp, cp=cp, tp=group, pp=group, ep=group, etp=group, indep_dp=group
+    )
+    monkeypatch.setattr(data_utils, "process_rollout_data", lambda *args, **kwargs: (rollout_data, object()))
+    monkeypatch.setattr(data_utils, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
+    args = Namespace(
+        enable_witness=False,
+        multimodal_token_space_processing=False,
+        qkv_format=qkv_format,
+        data_pad_size_multiplier=16,
+        true_on_policy_mode=False,
+        backend=Namespace(compress_ratios=[], bf16=False, fp16=False),
+    )
+
+    loaded, _ = data_utils.get_rollout_data(
+        args=args,
+        rollout_data_ref=object(),
+        train_parallel_config=parallel_state.train_parallel_config(supports_precomputed_schedule=True),
+    )
+
+    [sliced] = loaded["rollout_token_ages"]
+    assert sliced.dtype == torch.int32
+    assert sliced.tolist() == [ages[i] for i in expected_indices]
+    assert len(sliced) == len(loaded["rollout_log_probs"][0])
+
+
+def test_rollout_metrics_leave_the_token_ages_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+    parallel_state = SimpleNamespace(
+        tp=SimpleNamespace(rank=0),
+        cp=SimpleNamespace(size=1),
+        effective_dp=SimpleNamespace(size=1),
+        is_pp_last_stage=True,
+    )
+    monkeypatch.setattr(log_utils, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(
+        log_utils, "gather_log_data", lambda name, args, rollout_id, log_dict: captured.update(log_dict)
+    )
+    rollout_data = {
+        "tokens": [torch.tensor([1, 2, 3])],
+        "total_lengths": [3],
+        "response_lengths": [2],
+        "loss_masks": [torch.tensor([1, 1], dtype=torch.int32)],
+        "log_probs": [torch.tensor([-1.0, -3.0])],
+        "rollout_token_ages": [torch.tensor([2, 2], dtype=torch.int32)],
+    }
+    args = Namespace(
+        ci_test=False, qkv_format="thd", log_multi_turn=False, log_passrate=False, log_correct_samples=False
+    )
+
+    log_utils.log_rollout_data(0, args, rollout_data)
+
+    assert "rollout_token_ages" not in captured
+    assert captured["log_probs"][0] == pytest.approx(-2.0)
