@@ -21,6 +21,10 @@ class GroupLevelSubmission:
     def has_capacity(self, *, pending_samples: int, group_size: int, sample_budget: int) -> bool:
         return pending_samples + group_size <= sample_budget
 
+    def in_flight(self, *, pending_samples: int) -> int:
+        """The samples counted against the budget."""
+        return pending_samples
+
     def on_submit(self, groups: list[list[Sample]]) -> None:
         pass
 
@@ -49,6 +53,9 @@ class SampleBackfillSubmission:
             return True
         self._sample_done.clear()
         return False
+
+    def in_flight(self, *, pending_samples: int) -> int:
+        return self.samples_in_flight
 
     def on_submit(self, groups: list[list[Sample]]) -> None:
         self.samples_in_flight += sum(len(group) for group in groups)

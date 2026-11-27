@@ -29,7 +29,6 @@ from miles.backends.megatron_utils.megatron_config import resolve_megatron_confi
 from miles.rollout.base_types import BaseRolloutFn, RolloutFnConstructorInput, RolloutFnEvalInput, RolloutFnTrainInput
 from miles.rollout.filter_hub.base_types import FilterOutput
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
-from miles.rollout.session.session_load import SESSION_LOAD_KEY
 from miles.utils.audit_utils.event_logger.logger import EventLogger, read_events, set_event_logger
 from miles.utils.audit_utils.event_logger.models import ExplicitlyDroppedSamplesEvent
 from miles.utils.audit_utils.process_identity import SimpleProcessIdentity
@@ -198,6 +197,7 @@ async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypa
 
     async def report_load(self, load):
         reports.append(load)
+        return {"capacity": None, "running": None}
 
     async def sleep(delay, *args):
         if delay != 60:
@@ -226,20 +226,20 @@ async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypa
 
 
 class _Capacity:
-    """An external rollout replying each load report with the next capacity; each group generates until released."""
+    """An external rollout replying each load report with the next (capacity, running); groups run until released."""
 
-    def __init__(self, monkeypatch, capacities: list[int], generating_share: float = 1.0):
-        self.capacities, self.minute, self.real_sleep = iter(capacities), asyncio.Event(), asyncio.sleep
+    def __init__(self, monkeypatch, replies: list[tuple[int, int | None]]):
+        self.replies, self.minute, self.real_sleep = iter(replies), asyncio.Event(), asyncio.sleep
         self.started: list[int] = []
         self.releases: dict[int, asyncio.Event] = {}
         monkeypatch.setattr(fully_async.ExternalRollout, "report_load", self._report_load)
         monkeypatch.setattr(asyncio, "sleep", self._sleep)
         args = make_args(rollout_external_control_url="https://control", async_max_concurrent_samples=16)
-        self.share = generating_share
         self.fn = make_fn(monkeypatch, args, FakeDataSource(), self._generate)
 
     async def _report_load(self, load):
-        return next(self.capacities, None)
+        capacity, running = next(self.replies, (None, None))
+        return {"capacity": capacity, "running": running}
 
     async def _sleep(self, delay, *args):
         if delay != 60:
@@ -253,7 +253,6 @@ class _Capacity:
         await self.releases.setdefault(index, asyncio.Event()).wait()
         for sample in group:
             sample.status = Sample.Status.COMPLETED
-            sample.metadata[SESSION_LOAD_KEY] = {"turn_seconds": 10.0 * self.share, "session_seconds": 10.0}
             sample_done_callback()
         return group
 
@@ -270,7 +269,7 @@ class _Capacity:
 
 
 async def test_admission_follows_the_reported_capacity_without_aborting_what_runs(monkeypatch):
-    capacity = _Capacity(monkeypatch, [4, 8, 2])
+    capacity = _Capacity(monkeypatch, [(4, None), (8, None), (2, None)])
     drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
     await capacity.settle()
     assert capacity.started == [1001, 1002]
@@ -292,7 +291,7 @@ async def test_without_an_external_rollout_admission_follows_what_its_own_engine
         return ["http://engine-0", "http://engine-1"]
 
     async def loads(url):
-        return {"loads": [{"max_running_requests": 2}]}
+        return {"loads": [{"max_running_requests": 2, "num_running_reqs": 0}]}
 
     started = []
 
@@ -321,18 +320,18 @@ async def test_without_a_reported_capacity_the_args_bound_admission(monkeypatch)
     await capacity.fn.dispose()
 
 
-async def test_sessions_generating_half_their_life_double_what_a_capacity_admits(monkeypatch):
-    capacity = _Capacity(monkeypatch, [4, 4], generating_share=0.5)
+async def test_engines_running_a_request_per_two_samples_double_what_a_capacity_admits(monkeypatch):
+    """Samples spend part of their life away from the engines (tools, sandboxes, transport): admission fills slots."""
+    capacity = _Capacity(monkeypatch, [(4, None), (4, 2)])
     drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
     await capacity.settle()
-    await capacity.release(1001)
-    assert capacity.started == [1001, 1002, 1003]
+    assert capacity.started == [1001, 1002]
 
     await capacity.next_minute()
-    await capacity.release(1002)
+    await capacity.release(1001)
 
-    assert capacity.started == [1001, 1002, 1003, 1004, 1005, 1006]
-    await drain
+    assert capacity.started == [1001, 1002, 1003, 1004, 1005]
+    drain.cancel()
     await capacity.fn.dispose()
 
 

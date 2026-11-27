@@ -179,12 +179,13 @@ def test_a_step_the_service_refuses_is_only_logged(service, caplog):
 
 def test_the_rollouts_output_goes_to_the_service_which_replies_its_capacity(service, caplog):
     replies, requests = service
-    replies["/load"] = [(200, {"capacity": 96}), (200, {}), (404, {"detail": "Not Found"})]
+    replies["/load"] = [(200, {"capacity": 96, "running": 40}), (200, {}), (404, {"detail": "Not Found"})]
     load = {"produced": 2}
 
     capacities = [asyncio.run(ExternalRollout("https://control").report_load(load)) for _ in range(3)]
 
-    assert capacities == [96, None, None]
+    unknown = {"capacity": None, "running": None}
+    assert capacities == [{"capacity": 96, "running": 40}, unknown, unknown]
     assert [(method, path, body) for method, path, body, _ in requests] == [("POST", "/load", load)] * 3
     assert "did not take a load report" in caplog.text
 
@@ -196,7 +197,7 @@ def test_a_load_report_the_service_never_answers_gives_up(monkeypatch, caplog):
     monkeypatch.setattr(external_rollout, "_REPORT_TIMEOUT_S", 0.05)
     monkeypatch.setattr(ExternalRollout, "_call", never)
 
-    assert asyncio.run(ExternalRollout("https://control").report_load({})) is None
+    assert asyncio.run(ExternalRollout("https://control").report_load({})) == {"capacity": None, "running": None}
     assert "did not take a load report" in caplog.text
 
 
