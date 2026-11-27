@@ -159,6 +159,12 @@ def test_age_decay_runs_only_on_megatron() -> None:
         validate_score_centering_args(args)
 
 
+def test_the_kl_direction_defaults_to_reverse() -> None:
+    from miles.utils.args.configs.algo import AlgoConfig
+
+    assert AlgoConfig.model_fields["score_centering_kl_direction"].default == "reverse"
+
+
 @pytest.mark.parametrize(
     ("qkv_format", "cp_size", "cp_rank", "expected_indices"),
     [

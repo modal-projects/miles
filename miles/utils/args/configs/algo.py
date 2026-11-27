@@ -131,10 +131,11 @@ class AlgoConfig(BaseConfig):
             choices=["forward", "reverse"],
             help=(
                 "Direction of the score-centering KL: forward is KL(sampler || trainer), the divergence the stale "
-                "sampler's policy gradient drifts along; reverse is KL(trainer || sampler)."
+                "sampler's policy gradient drifts along; reverse is KL(trainer || sampler), the one score centering "
+                "used before this choice existed."
             ),
         ),
-    ] = "forward"
+    ] = "reverse"
     score_centering_kl_age_decay: A[
         str,
         Arg(
