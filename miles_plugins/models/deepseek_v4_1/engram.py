@@ -1,6 +1,8 @@
+import fcntl
 import json
 import logging
 import os
+import shutil
 import warnings
 from dataclasses import dataclass
 
@@ -155,7 +157,23 @@ def build_engram_layout(config: TransformerConfig) -> EngramLayout | None:
 ENGRAM_GATE_CHUNK = int(os.environ.get("MILES_DSV41_ENGRAM_GATE_CHUNK", "4096"))
 ENGRAM_HOST_TABLE = os.environ.get("MILES_DSV41_ENGRAM_HOST_TABLE", "sharded")
 ENGRAM_GATHER_THREADS = int(os.environ.get("MILES_DSV41_ENGRAM_GATHER_THREADS", "16"))
+ENGRAM_TABLE_DIR = os.environ.get("MILES_DSV41_ENGRAM_TABLE_DIR", "")
 assert ENGRAM_HOST_TABLE in ("sharded", "shared"), ENGRAM_HOST_TABLE
+
+
+def node_local_copy(path: str, directory: str) -> str:
+    """``path`` copied once under ``directory`` (node-local memory such as /dev/shm) for all of the node's ranks, so
+    the random-row gathers of every forward never page in from a network checkpoint mount."""
+    local = os.path.join(directory, os.path.abspath(path).lstrip("/"))
+    os.makedirs(os.path.dirname(local), exist_ok=True)
+    with open(local + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not os.path.exists(local) or os.path.getsize(local) != os.path.getsize(path):
+            staging = local + ".partial"
+            shutil.copyfile(path, staging)
+            os.replace(staging, local)
+            logger.info(f"engram host table copied to {local} ({os.path.getsize(local) / 1e9:.1f} GB)")
+    return local
 
 
 def engram_gate(x, kv, q_weight, k_weight, eps, clamp_value, chunk: int | None = None):
@@ -262,16 +280,21 @@ class DeepSeekV41Engram(MegatronModule):
     def _load_table(self):
         ckpt = self.config.v41_hf_checkpoint
         index = json.load(open(os.path.join(ckpt, "model.safetensors.index.json")))["weight_map"]
+
+        def table_file(name: str) -> str:
+            path = os.path.join(ckpt, index[name])
+            return node_local_copy(path, ENGRAM_TABLE_DIR) if ENGRAM_TABLE_DIR else path
+
         end = self.row_start + self.rows_avail
         self.table = _mmap_rows(
-            os.path.join(ckpt, index[f"layers.{self.layer_id}.engram.embed.weight"]),
+            table_file(f"layers.{self.layer_id}.engram.embed.weight"),
             f"layers.{self.layer_id}.engram.embed.weight",
             self.row_start,
             end,
             self.head_dim,
         )
         self.table_scale = _mmap_rows(
-            os.path.join(ckpt, index[f"layers.{self.layer_id}.engram.embed.scale"]),
+            table_file(f"layers.{self.layer_id}.engram.embed.scale"),
             f"layers.{self.layer_id}.engram.embed.scale",
             self.row_start,
             end,
