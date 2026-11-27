@@ -95,7 +95,7 @@ def _record_postprocess_configs(monkeypatch) -> list[TrainParallelConfig | None]
 
     def _postprocess_rollout_data(args, data, *, train_parallel_config: TrainParallelConfig | None):
         seen.append(train_parallel_config)
-        return data, None
+        return data, {}
 
     monkeypatch.setattr(rollout_executor_module, "postprocess_rollout_data", _postprocess_rollout_data)
     return seen
