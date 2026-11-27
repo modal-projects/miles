@@ -9,18 +9,22 @@ SESSION_LOAD_KEY = "session_load"
 
 def session_load(turns: Iterable[tuple[SessionRecord, SessionRecord | None]]) -> dict[str, float]:
     """Each turn comes with the turn it continues, None for a session's first."""
-    turn_seconds = 0.0
+    turn_seconds = engine_seconds = 0.0
     prefix_tokens = uncached_prefix_tokens = 0
     for record, previous in turns:
+        meta_info = record.response["choices"][0]["meta_info"]
         if record.request_timestamp is not None:
             turn_seconds += record.timestamp - record.request_timestamp
+            # SGLang's own time for the request, from its tokenizer receiving it to the finished output.
+            engine_seconds += meta_info.get("e2e_latency", 0.0)
         if previous is None:
             continue
         prefix = _common_prefix(_token_ids(previous), record.request["input_ids"])
         prefix_tokens += prefix
-        uncached_prefix_tokens += max(0, prefix - record.response["choices"][0]["meta_info"].get("cached_tokens", 0))
+        uncached_prefix_tokens += max(0, prefix - meta_info.get("cached_tokens", 0))
     return {
         "turn_seconds": turn_seconds,
+        "engine_seconds": engine_seconds,
         "prefix_tokens": prefix_tokens,
         "uncached_prefix_tokens": uncached_prefix_tokens,
     }

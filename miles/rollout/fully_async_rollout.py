@@ -272,14 +272,17 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         if capacity is not None and capacity != self._request_capacity:
             self._request_capacity = capacity
             self._admission_changed.set()
-        recent, kept = sum(self._recent_loads, Counter()), ""
+        recent, kept, engines = sum(self._recent_loads, Counter()), "", ""
         if prefix := recent["prefix_tokens"]:
             kept = f"; later turns found {1 - recent['uncached_prefix_tokens'] / prefix:.0%} of earlier context cached"
+        if recent["engine_seconds"]:
+            engines = f"; turns spent {recent['engine_seconds'] / recent['turn_seconds']:.0%} of their time in engines"
         logger.info(
-            "Admission: at most %d samples in flight for %s requests at once%s",
+            "Admission: at most %d samples in flight for %s requests at once%s%s",
             self._max_in_flight_samples(),
             self._request_capacity,
             kept,
+            engines,
         )
 
     async def _refresh_capacity_every_minute(self) -> None:

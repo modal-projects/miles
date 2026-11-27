@@ -336,6 +336,7 @@ async def test_the_reply_carries_the_sessions_load(core):
 
     assert decode_samples_and_merge_input_sample(payload, Sample()).session_metadata[SESSION_LOAD_KEY] == {
         "turn_seconds": 3.5,
+        "engine_seconds": 0.0,
         "prefix_tokens": 5,
         "uncached_prefix_tokens": 3,
     }

@@ -771,6 +771,7 @@ async def test_a_node_continues_its_parent_not_the_node_committed_before_it(core
     metadata = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).session_metadata
     assert metadata[SESSION_LOAD_KEY] == {
         "turn_seconds": 0.0,
+        "engine_seconds": 0.0,
         "prefix_tokens": 5 + 5 + 7,
         "uncached_prefix_tokens": 17,
     }
