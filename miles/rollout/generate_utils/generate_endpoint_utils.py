@@ -293,11 +293,42 @@ def _append_store_response(
     return new if plan is None else plan.append_response(new)
 
 
-def _decode_topk_buffer(info: str, num_tokens: int, num_layers: int, topk: int) -> np.ndarray:
+ROUTED_EXPERTS_WIRE_DTYPES: dict[str, np.dtype] = {
+    "int32": np.dtype("<i4"),
+    "int16": np.dtype("<i2"),
+    "uint16": np.dtype("<u2"),
+    "uint8": np.dtype("u1"),
+}
+
+
+def narrow_routed_experts_dtype(values: np.ndarray) -> np.ndarray:
+    """Narrow routed expert IDs to int16 when they fit (preserving -1 padding), else int32."""
+    if values.dtype == np.int16:
+        return values
+    if values.size == 0:
+        return values.astype(np.int16, copy=False)
+    if values.dtype == np.uint8:
+        return values.astype(np.int16)
+    low = int(values.min())
+    high = int(values.max())
+    if -32768 <= low and high <= 32767:
+        return values.astype(np.int16)
+    return values.astype(np.int32, copy=False)
+
+
+def _decode_topk_buffer(
+    info: str,
+    num_tokens: int,
+    num_layers: int,
+    topk: int,
+    *,
+    wire_dtype: np.dtype | type = np.int32,
+) -> np.ndarray:
     # validate=True: SGLang sends plain base64; pybase64 skips its slow non-alphabet filtering pass.
-    x = np.frombuffer(pybase64.b64decode(info, validate=True), dtype=np.int32)
+    dtype = np.dtype(wire_dtype)
+    x = np.frombuffer(pybase64.b64decode(info, validate=True), dtype=dtype)
     if num_tokens <= 0:
-        return np.empty((0, num_layers, max(0, topk)), dtype=np.int32)
+        return np.empty((0, num_layers, max(0, topk)), dtype=dtype)
     if topk == -1:  # indexer: topk dim recovered from buffer length
         topk = len(x) // (num_tokens * num_layers)
     return x.reshape(num_tokens, num_layers, topk)
@@ -307,12 +338,21 @@ def get_routed_experts_from_response(args, output, num_tokens: int):
     info = output["meta_info"].get("routed_experts")
     if info is None:
         return None
-    routed_experts = _decode_topk_buffer(info, num_tokens, args.num_layers, -1)
+    dtype_name = output["meta_info"].get("routed_experts_dtype", "int32")
+    if dtype_name not in ROUTED_EXPERTS_WIRE_DTYPES:
+        raise ValueError(f"unsupported routed_experts_dtype: {dtype_name!r}")
+    routed_experts = _decode_topk_buffer(
+        info,
+        num_tokens,
+        args.num_layers,
+        -1,
+        wire_dtype=ROUTED_EXPERTS_WIRE_DTYPES[dtype_name],
+    )
     assert routed_experts.size == 0 or routed_experts.any(), (
         "routed_experts payload is all zeros: the sglang engine did not capture routed experts "
         "(topk-bypassing --moe-runner-backend such as flashinfer_trtllm?)."
     )
-    return routed_experts
+    return narrow_routed_experts_dtype(routed_experts)
 
 
 def get_indexer_topk_from_response(args, output, sample):

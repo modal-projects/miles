@@ -276,3 +276,40 @@ def test_routed_experts_cover_the_prompt_the_engine_served():
     asyncio.run(update_sample_from_response(args, sample, {"input_ids": sample.tokens}, output))
 
     assert sample.rollout_routed_experts.shape == (served_prompt_tokens + len(response) - 1, layers, topk)
+    assert sample.rollout_routed_experts.dtype == np.int16
+
+
+@pytest.mark.parametrize(
+    ("wire_dtype", "np_dtype", "expected_dtype"),
+    [
+        ("int32", np.int32, np.int16),
+        ("int16", np.int16, np.int16),
+        ("uint16", np.uint16, np.int16),
+        ("uint8", np.uint8, np.int16),
+    ],
+)
+def test_routed_experts_decodes_compact_wire_dtypes_to_int16(wire_dtype, np_dtype, expected_dtype):
+    layers, topk, response = 2, 4, [7, 8]
+    sample = Sample(prompt="", tokens=[1, 2, 3])
+    n_rows = len(sample.tokens) + len(response) - 1
+    rows = (np.arange(n_rows * layers * topk) % 256).astype(np_dtype)
+    rows[0] = 1
+    output = {
+        "text": "",
+        "meta_info": {
+            "output_token_logprobs": [(-0.5, t, None) for t in response],
+            "finish_reason": {"type": "stop"},
+            "prompt_tokens": len(sample.tokens),
+            "completion_tokens": len(response),
+            "routed_experts": pybase64.b64encode(rows.tobytes()).decode(),
+            "routed_experts_dtype": wire_dtype,
+        },
+    }
+    args = SimpleNamespace(
+        rollout_top_logprobs_num=0, sglang=make_sglang_config(speculative_algorithm=None), num_layers=layers
+    )
+    asyncio.run(update_sample_from_response(args, sample, {"input_ids": sample.tokens}, output))
+    assert sample.rollout_routed_experts.dtype == expected_dtype
+    np.testing.assert_array_equal(
+        sample.rollout_routed_experts, rows.astype(expected_dtype).reshape(n_rows, layers, topk)
+    )

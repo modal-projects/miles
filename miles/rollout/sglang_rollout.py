@@ -302,9 +302,17 @@ async def generate(
     sample.rollout_log_probs += new_response_log_probs
 
     if "routed_experts" in output["meta_info"]:
+        from miles.rollout.generate_utils.generate_endpoint_utils import (
+            ROUTED_EXPERTS_WIRE_DTYPES,
+            narrow_routed_experts_dtype,
+        )
+
+        _dtype_name = output["meta_info"].get("routed_experts_dtype", "int32")
+        if _dtype_name not in ROUTED_EXPERTS_WIRE_DTYPES:
+            raise ValueError(f"unsupported routed_experts_dtype: {_dtype_name!r}")
         _re = np.frombuffer(
             pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")),
-            dtype=np.int32,
+            dtype=ROUTED_EXPERTS_WIRE_DTYPES[_dtype_name],
         )
         _ntok = int(output["meta_info"]["prompt_tokens"]) + len(new_response_tokens) - 1
         _topk = _re.size // max(1, _ntok * args.num_layers)
@@ -321,7 +329,7 @@ async def generate(
             "routed_experts payload is all zeros: the sglang engine did not capture routed experts "
             "(topk-bypassing --moe-runner-backend such as flashinfer_trtllm?)."
         )
-        sample.rollout_routed_experts = _re.reshape(_ntok, args.num_layers, _topk)
+        sample.rollout_routed_experts = narrow_routed_experts_dtype(_re.reshape(_ntok, args.num_layers, _topk))
     if "indexer_topk" in output["meta_info"]:
         sample.rollout_indexer_topk = get_indexer_topk_from_response(args, output, sample)
 

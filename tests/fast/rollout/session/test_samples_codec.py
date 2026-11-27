@@ -150,6 +150,19 @@ class TestSamplesWireCodec:
         assert out_b.metadata["input_only"] == {"value": 1}
         assert template.metadata == {"input_only": {"value": 1}}
 
+    def test_routed_experts_accepts_int16_and_int32_strictly(self):
+        for dtype in (np.int16, np.int32):
+            routes = np.arange(24, dtype=dtype).reshape(4, 3, 2)
+            routes[0, 0, 0] = -1
+            payload = encode_samples([_computed_sample(rollout_routed_experts=routes)], {}, None)
+            (out,) = decode_samples_and_merge_input_sample(payload, Sample()).samples
+            assert out.rollout_routed_experts.dtype == dtype
+            np.testing.assert_array_equal(out.rollout_routed_experts, routes)
+
+        bad = np.arange(24, dtype=np.uint16).reshape(4, 3, 2)
+        with pytest.raises(ValueError, match="rollout_routed_experts must have dtype"):
+            encode_samples([_computed_sample(rollout_routed_experts=bad)], {}, None)
+
     def test_empty_reply_round_trips_reason_and_skips_defaults_guard(self):
         # The empty reply is decoded before the driver takes its ABORTED path, so
         # the overlay-defaults guard must not fire on it — even for an input
@@ -244,7 +257,7 @@ class TestSamplesWireCodec:
 
     def test_encode_rejects_non_int32_replay_dtype(self):
         sample = _computed_sample(rollout_routed_experts=np.arange(24, dtype=np.int64).reshape(4, 3, 2))
-        with pytest.raises(ValueError, match="rollout_routed_experts must have dtype int32"):
+        with pytest.raises(ValueError, match="rollout_routed_experts must have dtype int16 or int32"):
             encode_samples([sample], {}, None)
 
     def test_encode_rejects_loss_mask_values_that_wrap_in_uint8(self):
