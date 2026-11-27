@@ -85,16 +85,6 @@ class TestGroupsOfTheirOwnSize:
         assert not scheduler.has_capacity(pending_samples=4, group_size=5, sample_budget=8)
 
 
-class TestInFlight:
-    def test_each_granularity_counts_in_flight_what_it_counts_against_the_budget(self) -> None:
-        group_level, backfill = GroupLevelSubmission(), SampleBackfillSubmission()
-        backfill.on_submit([_make_group(1), _make_group(2)])
-        backfill.sample_done_callback()
-
-        assert group_level.in_flight(pending_samples=2 * GROUP_SIZE) == 2 * GROUP_SIZE
-        assert backfill.in_flight(pending_samples=2 * GROUP_SIZE) == 2 * GROUP_SIZE - 1
-
-
 class TestMakeSubmissionScheduler:
     def test_an_unknown_granularity_is_refused(self) -> None:
         """Falling back silently would pace the run in a way the user never asked for."""
