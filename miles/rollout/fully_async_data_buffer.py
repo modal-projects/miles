@@ -133,7 +133,7 @@ class DataBuffer(ABC):
         return True
 
     def take_step(self, trainer_model_id: str | None = None) -> dict[str, float] | None:
-        """The policy's last step, one get's start to the next, once: seconds, waited, consumed."""
+        """The policy's last get as a step closed now, once: seconds, waited, consumed."""
         return None
 
     def output(self) -> dict[str, int] | None:
@@ -203,7 +203,6 @@ class DefaultDataBuffer(DataBuffer):
         self._short_since: float | None = None
         self._produced = 0
         self._last_get: _Get | None = None
-        self._step: dict[str, float] | None = None
 
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
@@ -263,8 +262,6 @@ class DefaultDataBuffer(DataBuffer):
 
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
         began = time.monotonic()
-        if (last := self._last_get) is not None:
-            self._step = dict(seconds=began - last.began, waited=last.waited, consumed=last.consumed)
         self._get_pending = True
         try:
             entries, waited = await self._take(num_groups=num_groups, current_version=current_version)
@@ -275,8 +272,10 @@ class DefaultDataBuffer(DataBuffer):
         return entries
 
     def take_step(self, trainer_model_id: str | None = None) -> dict[str, float] | None:
-        step, self._step = self._step, None
-        return step
+        last, self._last_get = self._last_get, None
+        if last is None:
+            return None
+        return dict(seconds=time.monotonic() - last.began, waited=last.waited, consumed=last.consumed)
 
     def output(self) -> dict[str, int]:
         return {"produced": self._produced}

@@ -177,20 +177,31 @@ async def test_drain_collects_batch_sorted_with_metrics(monkeypatch):
     assert len(output2.samples) == 3
 
 
-async def test_every_step_after_the_first_is_reported_to_the_external_rollout(monkeypatch):
-    reports = []
+async def test_a_step_is_reported_as_the_trainer_asks_for_its_next_batch_not_once_that_batch_is_in(monkeypatch):
+    reports, release = [], asyncio.Event()
 
     async def report_step(self, step):
         reports.append(step)
 
-    monkeypatch.setattr(fully_async.ExternalRollout, "report_step", report_step)
-    fn = make_fn(monkeypatch, make_args(rollout_external_control_url="https://control"), FakeDataSource())
+    async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        if group[0].group_index > 1002:
+            await release.wait()
+        for sample in group:
+            sample.status = Sample.Status.COMPLETED
+        return group
 
+    monkeypatch.setattr(fully_async.ExternalRollout, "report_step", report_step)
+    fn = make_fn(monkeypatch, make_args(rollout_external_control_url="https://control"), FakeDataSource(), generate)
     await fn(train_input(rollout_id=0))
-    await fn(train_input(rollout_id=1))
-    await asyncio.sleep(0)
+    assert reports == []
+
+    drain = asyncio.create_task(fn(train_input(rollout_id=1)))
+    await asyncio.sleep(0.05)
 
     assert [report["consumed"] for report in reports] == [2]
+    release.set()
+    await drain
+    await fn.dispose()
 
 
 async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypatch):
@@ -221,7 +232,8 @@ async def test_each_minute_the_external_rollout_gets_the_buffers_output(monkeypa
     minute.set()
     await real_sleep(0.05)
 
-    assert reports == [{"produced": 0}, {"produced": 2}]
+    assert [report["produced"] for report in reports] == [0, 2]
+    assert reports[0]["lifetime"] is None and reports[1]["lifetime"] >= 0
     await fn.dispose()
 
 
@@ -230,6 +242,7 @@ class _Capacity:
 
     def __init__(self, monkeypatch, capacities: list[int], generating_share: float = 1.0):
         self.capacities, self.minute, self.real_sleep = iter(capacities), asyncio.Event(), asyncio.sleep
+        self.loads: list[dict] = []
         self.started: list[int] = []
         self.releases: dict[int, asyncio.Event] = {}
         monkeypatch.setattr(fully_async.ExternalRollout, "report_load", self._report_load)
@@ -239,6 +252,7 @@ class _Capacity:
         self.fn = make_fn(monkeypatch, args, FakeDataSource(), self._generate)
 
     async def _report_load(self, load):
+        self.loads.append(load)
         return next(self.capacities, None)
 
     async def _sleep(self, delay, *args):
@@ -333,6 +347,68 @@ async def test_sessions_generating_half_their_life_double_what_a_capacity_admits
 
     assert capacity.started == [1001, 1002, 1003, 1004, 1005, 1006]
     await drain
+    await capacity.fn.dispose()
+
+
+@pytest.mark.parametrize("reported, held", [(4, False), (64, True)])
+async def test_waiting_for_the_engines_capacity_is_not_a_hold_but_waiting_at_the_args_bound_is(
+    monkeypatch, reported, held
+):
+    """The args admit 16 samples: a capacity of 4 bounds admission, one of 64 leaves the args to bound it."""
+    capacity = _Capacity(monkeypatch, [reported, reported])
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
+
+    await capacity.next_minute()
+
+    assert (capacity.loads[-1]["held"] >= 0.04) is held
+    drain.cancel()
+    await capacity.fn.dispose()
+
+
+async def test_a_load_report_counts_a_full_buffer_as_held_while_it_still_holds(monkeypatch):
+    reports, minute, real_sleep = [], asyncio.Event(), asyncio.sleep
+
+    async def report_load(self, load):
+        reports.append(load)
+        return 64
+
+    async def sleep(delay, *args):
+        if delay != 60:
+            return await real_sleep(delay, *args)
+        await minute.wait()
+        minute.clear()
+
+    monkeypatch.setattr(fully_async.ExternalRollout, "report_load", report_load)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    args = make_args(
+        rollout_external_control_url="https://control",
+        async_max_concurrent_samples=64,
+        rollout_batch_size=1,
+        async_data_buffer_capacity_factor=1.0,
+    )
+    fn = make_fn(monkeypatch, args, FakeDataSource())
+    await fn(train_input(rollout_id=0))
+    await real_sleep(0.1)
+
+    minute.set()
+    await real_sleep(0.05)
+
+    assert reports[-1]["held"] >= 0.09
+    await fn.dispose()
+
+
+async def test_a_load_report_carries_how_long_the_groups_took(monkeypatch):
+    capacity = _Capacity(monkeypatch, [4, 4])
+    drain = asyncio.create_task(capacity.fn(train_input(rollout_id=0)))
+    await capacity.settle()
+    await capacity.real_sleep(0.1)
+    await capacity.release(1001)
+
+    await capacity.next_minute()
+
+    assert capacity.loads[-1]["lifetime"] >= 0.15
+    drain.cancel()
     await capacity.fn.dispose()
 
 

@@ -19,6 +19,8 @@ rollout engines, pausing producer submissions for the duration of the
 import asyncio
 import copy
 import logging
+import math
+import time
 from collections import Counter, deque
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -63,6 +65,9 @@ from miles.utils.simple_checkpointer import load_simple_checkpoint, save_simple_
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
+
+# The group lifetimes reported are those of the groups finished in this window.
+_LIFETIME_WINDOW_S = 600
 
 
 class FullyAsyncRolloutFn(BaseRolloutFn):
@@ -116,6 +121,11 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._recent_loads: deque[Counter[str]] = deque(maxlen=10)
         self._admitted_groups = 0
         self._request_capacity: int | None = None
+        # What the producer reports beside its output: the seconds it held off admitting for a reason other than the
+        # engines' capacity, and when each group finished generating and how long that took.
+        self._held_seconds = 0.0
+        self._held_since: float | None = None
+        self._lifetimes: deque[tuple[float, float]] = deque()
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
@@ -169,17 +179,22 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
     def _max_in_flight_samples(self) -> int:
         n = self.args.n_samples_per_prompt
-        if (x := self.args.async_max_concurrent_samples) is not None:
-            samples = x
-        else:
-            samples = self.args.rollout_batch_size * n
-        if self._request_capacity is not None:
-            recent = sum(self._recent_loads, Counter())
-            # A session holds a request only for its generating share of its life.
-            generating_share = recent["turn_seconds"] / recent["session_seconds"] if recent["session_seconds"] else 1.0
-            samples = min(samples, int(self._request_capacity / generating_share))
+        samples = min(self._samples_by_args(), self._samples_by_capacity() or math.inf)
         # Whole groups are submitted, so the budget floors to whole groups of the default size.
-        return max(1, samples // n) * n
+        return max(1, int(samples) // n) * n
+
+    def _samples_by_args(self) -> int:
+        if (x := self.args.async_max_concurrent_samples) is not None:
+            return x
+        return self.args.rollout_batch_size * self.args.n_samples_per_prompt
+
+    def _samples_by_capacity(self) -> int | None:
+        if self._request_capacity is None:
+            return None
+        recent = sum(self._recent_loads, Counter())
+        # A session holds a request only for its generating share of its life.
+        generating_share = recent["turn_seconds"] / recent["session_seconds"] if recent["session_seconds"] else 1.0
+        return int(self._request_capacity / generating_share)
 
     def _next_group_size(self) -> int:
         # A recycled group's size is known; the data source's next one is not drawn yet, so the default size bounds it.
@@ -199,6 +214,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         return task
 
     async def _generate_group(self, prompt_group: list[Sample]) -> DataBufferInput:
+        began = time.monotonic()
         result = await generate_and_rm_group(
             self.state,
             prompt_group,
@@ -206,12 +222,14 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             evaluation=False,
             sample_done_callback=self._scheduler.sample_done_callback,
         )
+        now = time.monotonic()
+        self._lifetimes.append((now, now - began))
         return DataBufferInput(prompt_group=prompt_group, group=result)
 
     async def _worker_loop(self) -> None:
         active: set[asyncio.Task] = set()
         while True:
-            await self._producer_resumed.wait()
+            await self._held_while(self._producer_resumed.wait())
             self._admission_changed.clear()
             while (admits := self._output.admits(in_flight=len(active))) and self._scheduler.has_capacity(
                 pending_samples=sum(len(x.prompt_group) for x in self._running_tasks),
@@ -219,16 +237,39 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 sample_budget=self._max_in_flight_samples(),
             ):
                 active.add(self._submit_one_group())
-            if admits:
-                done, active = await self._scheduler.wait_for_progress(active)
+            if not admits:
+                done, active = await self._held_while(self._wait_for_admission(active))
+            elif (by_capacity := self._samples_by_capacity()) is None or self._samples_by_args() < by_capacity:
+                done, active = await self._held_while(self._scheduler.wait_for_progress(active))
             else:
-                done, active = await self._wait_for_admission(active)
+                done, active = await self._scheduler.wait_for_progress(active)
             for task in done:
                 prompt_group = next(x.prompt_group for x in self._running_tasks if x.task is task)
                 entry = self._collect_group_result(task, prompt_group)
                 self._add_session_load(entry.group)
-                await self._output.put(entry)
+                await self._held_while(self._output.put(entry))
                 self._running_tasks = [x for x in self._running_tasks if x.task is not task]
+
+    async def _held_while(self, awaitable):
+        self._held_since = time.monotonic()
+        try:
+            return await awaitable
+        finally:
+            self._held_seconds += time.monotonic() - self._held_since
+            self._held_since = None
+
+    def _producer_report(self) -> dict[str, float | None]:
+        """The output so far, the seconds held since the last report, and the 90th-percentile group lifetime."""
+        now = time.monotonic()
+        held, self._held_seconds = self._held_seconds, 0.0
+        if self._held_since is not None:
+            # A hold still running counts up to now in this report, the rest in the next.
+            held, self._held_since = held + now - self._held_since, now
+        while self._lifetimes and self._lifetimes[0][0] < now - _LIFETIME_WINDOW_S:
+            self._lifetimes.popleft()
+        spans = sorted(span for _, span in self._lifetimes)
+        lifetime = spans[int(0.9 * (len(spans) - 1))] if spans else None
+        return {**(self._output.output() or {}), "held": held, "lifetime": lifetime}
 
     async def _wait_for_admission(self, pendings: set[asyncio.Task]) -> tuple[set[asyncio.Task], set[asyncio.Task]]:
         """Wait for a drain to start, an unused group to leave, or a group to finish (its put may reject it)."""
@@ -268,7 +309,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         if self._external_rollout is None:
             capacity = await _own_engines_capacity(self.args)
         else:
-            capacity = await self._external_rollout.report_load(self._output.output() or {})
+            capacity = await self._external_rollout.report_load(self._producer_report())
         if capacity is not None and capacity != self._request_capacity:
             self._request_capacity = capacity
             self._admission_changed.set()
@@ -305,17 +346,17 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         assert not self._worker.done(), "the fully-async rollout worker has ended"
         self._worker_error_cancel_targets.add(asyncio.current_task())
         self._admission_changed.set()
+        if self._external_rollout is not None and (step := self._output.take_step(input.trainer_model_id)):
+            # Off the step: a slow or failed report never holds the trainer.
+            report = asyncio.create_task(self._external_rollout.report_step(step))
+            self._step_reports.add(report)
+            report.add_done_callback(self._step_reports.discard)
         entries = await self._output.get(
             current_version=input.weight_version,
             num_groups=args.rollout_batch_size,
             trainer_model_id=input.trainer_model_id,
         )
         self._worker_error_cancel_targets.discard(asyncio.current_task())
-        if self._external_rollout is not None and (step := self._output.take_step(input.trainer_model_id)):
-            # Off the step: a slow or failed report never holds the trainer.
-            report = asyncio.create_task(self._external_rollout.report_step(step))
-            self._step_reports.add(report)
-            report.add_done_callback(self._step_reports.discard)
 
         data: list[Group] = []
         do_print = True

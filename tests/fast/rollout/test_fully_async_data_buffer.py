@@ -520,20 +520,17 @@ class TestNoProgressWarning:
 
 
 class TestSteps:
-    async def test_a_step_runs_from_one_gets_start_to_the_next(self) -> None:
-        """It holds the first get's wait and take."""
+    async def test_a_step_runs_from_its_gets_start_until_it_is_taken(self) -> None:
+        """It holds the get's wait and take; the rollout takes it as the trainer asks for its next batch."""
         buffer = _make_buffer(rollout_batch_size=2).buffer
+        assert buffer.take_step() is None
         first = asyncio.create_task(buffer.get(num_groups=2))
         await asyncio.sleep(0.05)
         for group_index in (1, 2):
             await _put(buffer, _make_finished_group(group_index))
         await first
-        assert buffer.take_step() is None
-
-        for group_index in (3, 4, 5):
-            await _put(buffer, _make_finished_group(group_index))
         await asyncio.sleep(0.05)
-        await buffer.get(num_groups=2)
+
         step = buffer.take_step()
 
         assert step["consumed"] == 2
